@@ -23,14 +23,20 @@ export function __neq(context: any) {
         const valA = Series.from(a).get(0);
         const valB = Series.from(b).get(0);
 
-        if (typeof valA === 'number' && typeof valB === 'number') {
+        // Same normalization as __eq: strategy count getters return a hybrid
+        // object (count via valueOf()); JS strict inequality (!==) never
+        // invokes valueOf, so `strategy.opentrades() != 0` was ALWAYS true.
+        const primA = valA != null && typeof valA === 'object' ? valA.valueOf() : valA;
+        const primB = valB != null && typeof valB === 'object' ? valB.valueOf() : valB;
+
+        if (typeof primA === 'number' && typeof primB === 'number') {
             // Pine Script: any comparison with `na` evaluates to `na`.
-            if (isNaN(valA) || isNaN(valB)) return NaN;
+            if (isNaN(primA) || isNaN(primB)) return NaN;
 
             // TradingView treats values equal within an absolute 1e-10 tolerance.
-            return Math.abs(valA - valB) >= 1e-10;
+            return Math.abs(primA - primB) >= 1e-10;
         }
 
-        return valA !== valB;
+        return primA !== primB;
     };
 }
