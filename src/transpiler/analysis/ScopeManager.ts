@@ -136,6 +136,17 @@ export class ScopeManager {
      */
     private functionParamUdtTypes: Map<string, Record<string, string>> = new Map();
 
+    /**
+     * Pine method name → receiver-type variants. Populated by the
+     * `renameMethodVariants` pre-pass: `method init(X this, …)` is emitted by
+     * codegen as `function $M_init(…)` for every receiver type X; without
+     * renaming, JS last-wins collapses all overloads onto the last declared
+     * variant. Each entry here is a unique binding `$M_init_X`; the
+     * dispatcher emitted at the end of the transpiled program routes calls by
+     * the receiver instance's UDT factory identity (`_udt`).
+     */
+    private methodVariants: Map<string, Array<{ receiverType: string; jsName: string }>> = new Map();
+
     public get nextParamIdArg(): any {
         return {
             type: 'Identifier',
@@ -250,6 +261,25 @@ export class ScopeManager {
         return this.udtTypeNames.get(typeName);
     }
 
+    /**
+     * Resolve a chain of UDT field names from a root UDT type down to the
+     * final field, collapsing container value types to their element/value
+     * type. E.g. `('ChannelDesc', ['map'])` → `'WordPosArray'` for
+     * `map<string, WordPosArray>`. Returns undefined when any hop is not a
+     * known UDT field.
+     */
+    resolveUdtFieldValueType(rootType: string, fieldNames: string[]): string | undefined {
+        let current = rootType;
+        for (const name of fieldNames) {
+            const fields = this.getUdtTypeFields(current);
+            if (!fields) return undefined;
+            const raw = fields[name];
+            if (!raw) return undefined;
+            current = resolveUdtValueType(raw);
+        }
+        return current;
+    }
+
     markVariableAsUdtInstance(varName: string, typeName: string): void {
         this.udtInstances.set(varName, typeName);
     }
@@ -314,6 +344,31 @@ export class ScopeManager {
 
     getFunctionParamUdtTypes(funcName: string): Record<string, string> | undefined {
         return this.functionParamUdtTypes.get(funcName);
+    }
+
+    /**
+     * Register one receiver-type variant of a Pine method. The receiver type
+     * is the UDT type of the `this` parameter; later registrations for the
+     * same (method, receiverType) pair replace earlier ones (matching JS
+     * last-declaration-wins for duplicate declarations).
+     */
+    registerMethodVariant(pineName: string, receiverType: string, jsName: string): void {
+        const list = this.methodVariants.get(pineName) ?? [];
+        const existing = list.findIndex((v) => v.receiverType === receiverType);
+        if (existing >= 0) {
+            list[existing] = { receiverType, jsName };
+        } else {
+            list.push({ receiverType, jsName });
+        }
+        this.methodVariants.set(pineName, list);
+    }
+
+    /**
+     * All registered method variants, keyed by Pine method name, in
+     * declaration order. Used by the dispatcher emitter.
+     */
+    getMethodVariants(): Array<[string, Array<{ receiverType: string; jsName: string }>]> {
+        return [...this.methodVariants.entries()];
     }
 
     /**
@@ -563,6 +618,25 @@ export class ScopeManager {
         }
         return candidate;
     }
+}
+
+/**
+ * Collapse a Pine field-type string to its bare (value) type name:
+ * strip qualifiers (`simple NumericSystem` → `NumericSystem`) and unwrap
+ * container value types (`map<string, WordPosArray>` → `WordPosArray`,
+ * `array<int>` → `int`). The result is compared against the UDT type
+ * registry by callers, so non-UDT results are naturally ignored.
+ */
+function resolveUdtValueType(fieldType: string): string {
+    let t = fieldType.trim();
+    const spaceIdx = t.indexOf(' ');
+    if (spaceIdx > 0) t = t.slice(spaceIdx + 1).trim();
+    if (t.endsWith('>')) {
+        const inner = t.slice(t.indexOf('<') + 1, -1).trim();
+        const parts = inner.split(',');
+        return parts[parts.length - 1].trim();
+    }
+    return t;
 }
 
 export default ScopeManager;

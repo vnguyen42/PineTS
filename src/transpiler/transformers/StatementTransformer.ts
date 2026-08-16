@@ -1359,16 +1359,21 @@ export function transformReturnStatement(node: any, scopeManager: ScopeManager):
                             node._arrayAccessed = true;
                         }
                     },
-                    MemberExpression(node: any) {
-                        transformMemberExpression(node, '', scopeManager);
+                    MemberExpression(node: any, state: ScopeManager, c: any) {
+                        // walk.recursive's base visitor suppresses custom
+                        // visitors for member-expression objects, so a nested
+                        // chain like `self.signal.isNegative` would otherwise
+                        // stay bare (→ crash on Series.field). Recurse the
+                        // object chain like the main walker does, then lower
+                        // this member.
+                        if (node.object &&
+                            (node.object.type === 'CallExpression' ||
+                             node.object.type === 'MemberExpression' ||
+                             (node.object.type === 'Identifier' && !state.isContextBound(node.object.name)))) {
+                            c(node.object, state);
+                        }
+                        transformMemberExpression(node, '', state);
                     },
-                    // When an arrow function's last statement is an assignment
-                    // (e.g. `tracker.field := …`), the parser folds it into the
-                    // implicit return as an AssignmentExpression. Without this
-                    // visitor, the default acorn-walk fall-through visits the
-                    // LHS as a MemberExpression — which doesn't rewrite the
-                    // root identifier of an assignment LHS — and `tracker`
-                    // leaks bare → "ReferenceError: tracker is not defined".
                     AssignmentExpression(node: any, state: ScopeManager) {
                         transformAssignmentExpression(node, state);
                     },
@@ -1505,9 +1510,12 @@ export function transformFunctionDeclaration(node: any, scopeManager: ScopeManag
         // so the use-site rewrite for `b.field[N]` fires inside the body.
         // The names get unmarked when leaving function scope below.
         // Methods carry a `$M_` JS-name prefix that's not used in the registry
-        // (which is keyed by the Pine name) — strip it before lookup.
+        // (which is keyed by the Pine name) — strip it before lookup. When
+        // `renameMethodVariants` renamed the declaration to `$M_init_Type`,
+        // the original Pine name is preserved on `__pineName`.
         const rawFnName = node.id?.name as string | undefined;
-        const fnName = rawFnName?.startsWith('$M_') ? rawFnName.slice(3) : rawFnName;
+        const fnName = (node.id?.__pineName as string | undefined) ??
+            (rawFnName?.startsWith('$M_') ? rawFnName.slice(3) : rawFnName);
         const paramTypes = fnName ? scopeManager.getFunctionParamUdtTypes(fnName) : undefined;
         // Snapshot prior bindings for parameter names that shadow outer-scope
         // UDT instances (e.g. `method touch(ZZ aZZ)` where `aZZ` is also a

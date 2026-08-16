@@ -91,13 +91,20 @@ export class CodeGenerator {
      */
     private renameConflictingVariables(ast: any) {
         const renameMap = new Map<string, string>();
+        // Names renamed because a USER FUNCTION collides with a namespace or
+        // JS keyword. At a `name(...)` call site the callee then refers to the
+        // user function (namespaces like `log` are not callable), so the
+        // callee must be renamed too — unlike variable-declaration collisions
+        // (e.g. `var fill = …` + builtin `fill(...)`) where the callee stays
+        // the namespace.
+        const functionRenameNames = new Set<string>();
 
         // Collect conflicting variable names from the entire program
-        this.collectConflictingVarNames(ast, renameMap);
+        this.collectConflictingVarNames(ast, renameMap, functionRenameNames);
 
         if (renameMap.size > 0) {
             // Apply context-aware renaming across the entire program body
-            this.renameVariableRefsInAST(ast, renameMap);
+            this.renameVariableRefsInAST(ast, renameMap, functionRenameNames);
         }
     }
 
@@ -115,7 +122,7 @@ export class CodeGenerator {
      * (JS_RESERVED_WORDS). Both collision classes are renamed with the same
      * `_$N` suffix scheme.
      */
-    private collectConflictingVarNames(node: any, renameMap: Map<string, string>) {
+    private collectConflictingVarNames(node: any, renameMap: Map<string, string>, functionRenameNames: Set<string>) {
         if (!node || typeof node !== 'object') return;
 
         if (node.type === 'VariableDeclaration') {
@@ -141,6 +148,9 @@ export class CodeGenerator {
 
         // User-defined function/method names that collide with reserved identifiers.
         // The function body inherits the rename via the same renameMap pass.
+        // Call sites of the renamed function are renamed too (tracked in
+        // functionRenameNames) — a bare `name(...)` call can only refer to the
+        // user function, since Pine namespaces are not callable.
         //
         // Skip methods (`method foo(...) =>`): their JS identifier already gets
         // a `$M_` prefix in `generateFunctionDeclaration` which is collision-
@@ -153,6 +163,7 @@ export class CodeGenerator {
                 this.isReservedName(node.id.name) &&
                 !renameMap.has(node.id.name)) {
                 renameMap.set(node.id.name, `${node.id.name}_$${this.paramRenameCounter++}`);
+                functionRenameNames.add(node.id.name);
             }
         }
 
@@ -162,11 +173,11 @@ export class CodeGenerator {
             if (Array.isArray(val)) {
                 for (const child of val) {
                     if (child && typeof child === 'object') {
-                        this.collectConflictingVarNames(child, renameMap);
+                        this.collectConflictingVarNames(child, renameMap, functionRenameNames);
                     }
                 }
             } else if (val && typeof val === 'object' && val.type) {
-                this.collectConflictingVarNames(val, renameMap);
+                this.collectConflictingVarNames(val, renameMap, functionRenameNames);
             }
         }
     }
@@ -179,7 +190,7 @@ export class CodeGenerator {
      * - MemberExpression non-computed properties (obj.namespace)
      * - Object property keys ({namespace: value})
      */
-    private renameVariableRefsInAST(node: any, renameMap: Map<string, string>) {
+    private renameVariableRefsInAST(node: any, renameMap: Map<string, string>, functionRenameNames: Set<string>) {
         if (!node || typeof node !== 'object') return;
 
         // CallExpression: handle direct-Identifier callees specially.
@@ -188,19 +199,24 @@ export class CodeGenerator {
                 // Two cases:
                 //   - JS_RESERVED_WORDS rename (e.g. user `method delete` → `delete_$N`):
                 //     the callee IS the user function — must be renamed.
-                //   - NAMESPACE_COLLISION_NAMES rename (e.g. user `var fill = ...` while
-                //     also calling the built-in `fill(...)`): the callee here refers to
-                //     the namespace, not the renamed user variable — leave it alone.
-                if (JS_RESERVED_WORDS.has(node.callee.name)) {
+                //   - function-declaration renames (e.g. user `function log(...)`
+                //     while `log` is also a namespace): the bare `log(...)` call can
+                //     only refer to the user function (namespaces are not callable),
+                //     so the callee must be renamed too.
+                //   - NAMESPACE_COLLISION_NAMES variable renames (e.g. user
+                //     `var fill = ...` while also calling the built-in `fill(...)`):
+                //     the callee here refers to the namespace, not the renamed user
+                //     variable — leave it alone.
+                if (JS_RESERVED_WORDS.has(node.callee.name) || functionRenameNames.has(node.callee.name)) {
                     node.callee.name = renameMap.get(node.callee.name)!;
                 }
                 // else: skip callee
             } else {
-                this.renameVariableRefsInAST(node.callee, renameMap);
+                this.renameVariableRefsInAST(node.callee, renameMap, functionRenameNames);
             }
             if (node.arguments) {
                 for (const arg of node.arguments) {
-                    this.renameVariableRefsInAST(arg, renameMap);
+                    this.renameVariableRefsInAST(arg, renameMap, functionRenameNames);
                 }
             }
             return;
@@ -216,19 +232,19 @@ export class CodeGenerator {
             }
             if (!node.computed && node.property?.type === 'Identifier' && renameMap.has(node.property.name)) {
                 // array.size → method name, recurse object only, skip property
-                this.renameVariableRefsInAST(node.object, renameMap);
+                this.renameVariableRefsInAST(node.object, renameMap, functionRenameNames);
                 return;
             }
             // For other MemberExpressions (computed or no match), recurse normally
-            this.renameVariableRefsInAST(node.object, renameMap);
-            if (node.computed) this.renameVariableRefsInAST(node.property, renameMap);
+            this.renameVariableRefsInAST(node.object, renameMap, functionRenameNames);
+            if (node.computed) this.renameVariableRefsInAST(node.property, renameMap, functionRenameNames);
             return;
         }
 
         // Property: skip key, rename value
         if (node.type === 'Property') {
             // Key is a named argument or object literal key — never rename
-            this.renameVariableRefsInAST(node.value, renameMap);
+            this.renameVariableRefsInAST(node.value, renameMap, functionRenameNames);
             return;
         }
 
@@ -245,11 +261,11 @@ export class CodeGenerator {
             if (Array.isArray(val)) {
                 for (const child of val) {
                     if (child && typeof child === 'object') {
-                        this.renameVariableRefsInAST(child, renameMap);
+                        this.renameVariableRefsInAST(child, renameMap, functionRenameNames);
                     }
                 }
             } else if (val && typeof val === 'object' && val.type) {
-                this.renameVariableRefsInAST(val, renameMap);
+                this.renameVariableRefsInAST(val, renameMap, functionRenameNames);
             }
         }
     }
@@ -375,6 +391,9 @@ export class CodeGenerator {
     // Generate TypeDefinition (convert to Type(...) call)
     // Fields with defaults: { name: ['type', defaultExpr] }
     // Fields without defaults: { name: 'type' }
+    // The second argument carries the UDT type name so the runtime factory
+    // can expose a stable `__pineName` (used by method-overload dispatch —
+    // factory object identity is not stable across bars).
     generateTypeDefinition(node) {
         this.write(this.indentStr.repeat(this.indent));
         this.write(`const ${node.name} = Type({`);
@@ -397,7 +416,7 @@ export class CodeGenerator {
             this.write(' ');
         }
 
-        this.write('});\n');
+        this.write(`}, '${node.name}');\n`);
     }
 
     // Rename Identifier nodes in an AST subtree (simple, non-context-aware).
@@ -612,14 +631,14 @@ export class CodeGenerator {
         // these to know which params are UDT instances, enabling correct
         // `b.field[N]` series-lookback rewriting inside the function body.
         // Inert at runtime; AnalysisPass filters to known UDT types.
-        // Skip the method receiver (now renamed to `self`) — it's passed by
-        // the caller, never a Series of UDT instances, so the rewrite would
-        // be incorrect for it.
+        // The method receiver (renamed `self`) is included so the transpiler
+        // can resolve the receiver type of each method declaration — needed
+        // for per-receiver-type overload dispatch (`method init(X this, …)`
+        // compiles to distinct variants keyed by the receiver type).
         const typedParams: Array<[string, string]> = [];
         for (let i = 0; i < node.params.length; i++) {
             const p = node.params[i];
             const paramName = p.type === 'AssignmentPattern' ? p.left?.name : p.name;
-            if (isMethod && i === 0 && paramName === 'self') continue;
             const varType = p.type === 'AssignmentPattern' ? p.left?.varType : p.varType;
             if (paramName && varType) {
                 typedParams.push([paramName, varType]);

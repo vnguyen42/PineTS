@@ -1658,12 +1658,6 @@ export function transformCallExpression(node: any, scopeManager: ScopeManager, n
         const _obj = node.callee.object;
         const isBuiltinMethodOnParam = _obj.type === 'Identifier' && scopeManager.isLocalSeriesVar(_obj.name);
 
-        // Guard: if the callee object is a MemberExpression (property chain like
-        // aZZ.x.set(0, val)), this is a method call on a sub-property, NOT a user
-        // function call.  User function method calls only happen on direct variable
-        // references (e.g. obj.method(args) where obj is an Identifier).
-        const isChainedPropertyMethod = _obj.type === 'MemberExpression';
-
         // Only allow obj.method(args) → method(obj, args) for functions declared
         // with the Pine `method` keyword.  Regular functions (without `method`)
         // must NOT be callable via dot-notation — obj.func() is always a built-in
@@ -1678,7 +1672,28 @@ export function transformCallExpression(node: any, scopeManager: ScopeManager, n
         // The receiver may have already been wrapped into a `$.get(...)` call by
         // an earlier pass — but the original Identifier name is preserved on
         // the wrapper as `.name`, so a single lookup covers both shapes.
-        const isReceiverUdtInstance = !!_obj.name && scopeManager.isUdtInstance(_obj.name);
+        // For UDT-field chains (`self.schema.channelDesc`) the chain is walked
+        // down to its base; the base name is preserved on the `$.get(self, 0)`
+        // leaf (or is a plain Identifier when the chain was not yet lowered).
+        const receiverRootName = (() => {
+            if (_obj.type === 'Identifier') return _obj.name;
+            let cursor: any = _obj;
+            while (cursor && cursor.type === 'MemberExpression' && cursor.object) {
+                cursor = cursor.object;
+            }
+            return cursor && typeof cursor.name === 'string' ? cursor.name : null;
+        })();
+        const isReceiverUdtInstance = !!receiverRootName && scopeManager.isUdtInstance(receiverRootName);
+
+        // Guard: if the callee object is a MemberExpression (property chain like
+        // aZZ.x.set(0, val)), this is a method call on a sub-property, NOT a user
+        // function call.  User function method calls only happen on direct variable
+        // references (e.g. obj.method(args) where obj is an Identifier).
+        // EXCEPTION: when the chain is rooted at a UDT instance (`this.schema.init(…)`,
+        // `dg.schema.get_x(…)`) the call MUST dispatch to the user method — a bare
+        // property lookup on PineTypeObject never finds user methods and silently
+        // no-ops, leaving nested UDT fields uninitialized.
+        const isChainedPropertyMethod = _obj.type === 'MemberExpression' && !isReceiverUdtInstance;
 
         if (isUserFunction && isUserMethod && !scopeManager.isContextBound(methodName) && !isBuiltinMethodOnParam && !isChainedPropertyMethod && isReceiverUdtInstance) {
             // It's a user variable/function.
@@ -1706,6 +1721,26 @@ export function transformCallExpression(node: any, scopeManager: ScopeManager, n
                  // If object is a call expression, transform it first
                  transformCallExpression(obj, scopeManager);
                  transformedObj = transformFunctionArgument(obj, CONTEXT_NAME, scopeManager);
+            } else if (obj.type === 'MemberExpression') {
+                 // UDT-field receiver (`this.schema.init(…)`): the callee-object
+                 // pre-walk usually already lowered the chain to
+                 // `$.get(self, 0).schema`; when it didn't (direct calls from
+                 // other transformer paths), lower it here — walk the chain
+                 // root-first so the base identifier is wrapped before outer
+                 // member hops reference it. The lowered chain is passed as-is:
+                 // `$.get(<instance>, 0)` inside the method returns the instance.
+                 const lowerChain = (member: any): void => {
+                     if (!member || member.type !== 'MemberExpression') return;
+                     if (member.object && (member.object.type === 'CallExpression' || member.object.type === 'MemberExpression')) {
+                         lowerChain(member.object);
+                     }
+                     if (member.object && member.object.type === 'Identifier' && !scopeManager.isContextBound(member.object.name)) {
+                         transformIdentifier(member.object, scopeManager);
+                     }
+                     transformMemberExpression(member, '', scopeManager);
+                 };
+                 lowerChain(obj);
+                 transformedObj = obj;
             }
 
             // 5. Construct the new call: method(obj, ...args)

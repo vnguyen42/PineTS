@@ -82,7 +82,7 @@ export function preProcessUdtRegistry(ast: any, scopeManager: ScopeManager): voi
                     decl.init.type === 'CallExpression' &&
                     decl.init.callee?.type === 'Identifier' &&
                     decl.init.callee.name === 'Type' &&
-                    decl.init.arguments?.length === 1 &&
+                    decl.init.arguments?.length >= 1 &&
                     decl.init.arguments[0]?.type === 'ObjectExpression'
                 ) {
                     const fields: Record<string, string> = {};
@@ -573,4 +573,78 @@ export function runAnalysisPass(ast: any, scopeManager: ScopeManager): string | 
     });
 
     return originalParamName;
+}
+
+/**
+ * Give each Pine `method <name>(<Type> this, …)` declaration a unique JS
+ * binding keyed by its receiver type, and register the variant so the
+ * dispatcher emitted at the end of the program can route by receiver type.
+ *
+ * codegen emits every receiver-type overload of a method name as
+ * `function $M_init(…)` — JS last-wins collapses them all onto the last
+ * declared variant (e.g. `method init(Schema this, …)` and
+ * `method init(Datagram this, …)` are indistinguishable). The receiver type
+ * is carried on the `$M_init.__pineParamTypes__` marker that immediately
+ * follows the declaration (codegen includes `self` there); we pair each
+ * declaration with its own marker by walking the top-level statements in
+ * order and rename the declaration to `$M_init_<ReceiverType>`.
+ *
+ * Methods whose receiver has no UDT type (e.g. `method getPrices(pivots)`)
+ * keep their plain `$M_` binding — those stay last-wins as before and become
+ * the dispatcher's fallback.
+ */
+export function renameMethodVariants(ast: any, scopeManager: ScopeManager): void {
+    const program = ast.body?.[0]?.expression?.body;
+    if (!program || program.type !== 'BlockStatement' || !Array.isArray(program.body)) return;
+
+    let pendingFnName: string | null = null;
+    let pendingFnId: any = null;
+
+    for (const stmt of program.body) {
+        if (stmt.type === 'FunctionDeclaration' && stmt.id?.name?.startsWith('$M_')) {
+            pendingFnName = stmt.id.name;
+            pendingFnId = stmt.id;
+            continue;
+        }
+        if (!pendingFnName) continue;
+        if (stmt.type !== 'ExpressionStatement' || stmt.expression?.type !== 'AssignmentExpression') continue;
+        const left = stmt.expression.left;
+        if (
+            left?.type !== 'MemberExpression' ||
+            left.property?.name !== '__pineParamTypes__' ||
+            left.object?.type !== 'Identifier' ||
+            left.object.name !== pendingFnName
+        ) {
+            continue;
+        }
+        const right = stmt.expression.right;
+        if (right?.type !== 'ObjectExpression') {
+            pendingFnName = null;
+            pendingFnId = null;
+            continue;
+        }
+
+        let receiverType: string | undefined;
+        for (const prop of right.properties) {
+            if (prop.type !== 'Property') continue;
+            let keyName: string | undefined;
+            if (prop.key?.type === 'Identifier') keyName = prop.key.name;
+            else if (prop.key?.type === 'Literal' && typeof prop.key.value === 'string') keyName = prop.key.value;
+            if (keyName !== 'self') continue;
+            if (prop.value?.type !== 'Literal' || typeof prop.value.value !== 'string') break;
+            receiverType = prop.value.value.split(/\s+/).pop();
+            break;
+        }
+
+        if (receiverType && scopeManager.isUdtTypeName(receiverType)) {
+            const jsName = `${pendingFnName}_${receiverType}`;
+            const pineName = pendingFnName.slice(3);
+            pendingFnId.name = jsName;
+            pendingFnId.__pineName = pineName;
+            scopeManager.registerMethodVariant(pineName, receiverType, jsName);
+        }
+
+        pendingFnName = null;
+        pendingFnId = null;
+    }
 }

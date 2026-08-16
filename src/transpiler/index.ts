@@ -52,7 +52,7 @@ import ScopeManager from './analysis/ScopeManager';
 import { injectImplicitImports } from './transformers/InjectionTransformer';
 import { normalizeNativeImports } from './transformers/NormalizationTransformer';
 import { wrapInContextFunction } from './transformers/WrapperTransformer';
-import { transformNestedArrowFunctions, preProcessContextBoundVars, preProcessUdtRegistry, runAnalysisPass } from './analysis/AnalysisPass';
+import { transformNestedArrowFunctions, preProcessContextBoundVars, preProcessUdtRegistry, runAnalysisPass, renameMethodVariants } from './analysis/AnalysisPass';
 import { runTypeInferencePass } from './analysis/TypeInferencePass';
 import { runTransformationPass, transformEqualityChecks, propagateAsyncAwait } from './transformers/MainTransformer';
 import { extractPineScriptVersion, pineToJS } from './pineToJS/pineToJS.index';
@@ -127,6 +127,12 @@ export function transpile(source: string | Function, options: { debug: boolean; 
     // Returns the original parameter name of the root function if any
     const originalParamName = runAnalysisPass(ast, scopeManager) || '';
 
+    // Rename receiver-type overloads of Pine methods to unique bindings
+    // (`$M_init_Schema`, `$M_init_Datagram`, …) and register the variants,
+    // so the dispatcher emitted below routes by receiver type. Must run
+    // after the analysis pass (which reads the original `$M_` names).
+    renameMethodVariants(ast, scopeManager);
+
     // Type inference (RC2b): replicate Pine `int / int → int`. Runs on the clean
     // pre-lowering AST (operands still bare identifiers / `input.int(...)` /
     // literals) and rewrites provably-int `/` to `$.pine.math.__idiv(...)`. The
@@ -143,6 +149,16 @@ export function transpile(source: string | Function, options: { debug: boolean; 
     // Functions containing await (e.g., from request.security) must be async,
     // and their callers (via $.call) must await them.
     propagateAsyncAwait(ast);
+
+    // Emit per-name method dispatchers. Every `$M_<name>` call site resolves
+    // through the dispatcher, which selects the receiver-type variant at
+    // runtime from the instance's UDT factory identity (`_udt`). The
+    // dispatcher is bound BEFORE the method markers (`$M_init.__pineMethod__`)
+    // run, so those inert markers land on the dispatcher without a
+    // ReferenceError; unmatched receivers fall back to the plain `$M_<name>`
+    // binding (last declared, preserving pre-overload behavior for methods
+    // whose receiver type was not renamed).
+    injectMethodDispatchers(ast, scopeManager);
 
     // Post-process: inject __maxLoops local variable at the top of the function body.
     // This caches $.__maxLoops (from Context) in a local variable so loop guards
@@ -207,4 +223,62 @@ export function transpile(source: string | Function, options: { debug: boolean; 
         (mainFn as any)._ltfSlices = slices;
     }
     return mainFn;
+}
+
+/**
+ * Emit a runtime dispatcher for every Pine method that has receiver-type
+ * variants (registered by `renameMethodVariants`). The dispatcher selects
+ * the per-type variant by comparing the receiver's UDT factory name
+ * (`__pineName`) against the registered receiver types as plain strings:
+ *
+ *   var $M_init = (function (_fallback) {
+ *     return function (self) {
+ *       var inst = self != null ? $.get(self, 0) : self;
+ *       var t = inst && inst._udt && inst._udt.__pineName;
+ *       if (t === 'WordDesc') return $M_init_WordDesc.apply(null, arguments);
+ *       ...
+ *       if (_fallback) return _fallback.apply(null, arguments);
+ *       throw new Error(...);
+ *     };
+ *   })($M_init);
+ *
+ * The receiver can arrive either as a Series wrapper (a UDT variable held as
+ * a time series) or as the bare UDT instance (call sites that already lowered
+ * the receiver through `$.get`). `$.get(self, 0)` is the runtime's canonical
+ * `instanceof Series`-based unwrap — the same discrimination every other
+ * generated call site uses — so only genuine Series wrappers are unwrapped;
+ * a UDT instance that merely has an array-typed field (e.g. `data`) passes
+ * through untouched and dispatches on its own `_udt.__pineName`.
+ *
+ * The dispatcher statement is PREPENDED to the wrapped context function so
+ * the inert `$M_init.__pineMethod__ / __pineParamTypes__` markers (which
+ * follow each declaration) bind to the dispatcher without a ReferenceError.
+ * The IIFE captures the plain `$M_init` binding (last declared non-renamed
+ * variant) as the fallback for receivers outside the registered set.
+ */
+function injectMethodDispatchers(ast: any, scopeManager: ScopeManager): void {
+    const program = ast.body?.[0]?.expression?.body;
+    if (!program || program.type !== 'BlockStatement' || !Array.isArray(program.body)) return;
+
+    const variants = scopeManager.getMethodVariants();
+    if (variants.length === 0) return;
+
+    const lines: string[] = [];
+    for (const [pineName, list] of variants) {
+        const dispatchName = `$M_${pineName}`;
+        const checks = list.map((v) =>
+            `if (t === '${v.receiverType}') return ${v.jsName}.apply(null, arguments);`);
+        lines.push(`var ${dispatchName} = (function (_fallback) {
+  return function (self) {
+    var inst = self != null ? $.get(self, 0) : self;
+    var t = inst && inst._udt && inst._udt.__pineName;
+    ${checks.join('\n    ')}
+    if (_fallback) return _fallback.apply(null, arguments);
+    throw new Error("PineTS: no overload of method '${pineName}' for receiver type " + String(t));
+  };
+})(${dispatchName});`);
+    }
+
+    const parsed = acorn.parse(lines.join('\n'), { ecmaVersion: 'latest' }) as any;
+    program.body.unshift(...parsed.body);
 }

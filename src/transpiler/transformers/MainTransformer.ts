@@ -17,6 +17,30 @@ import {
 } from './StatementTransformer';
 
 /**
+ * Resolve the UDT value type of a destructured loop iterable, e.g. the
+ * `WordPosArray` of `for [_, wordPositions] in this.map` where `map` is
+ * `map<string, WordPosArray>`. The iterable may already be lowered to
+ * `$.get(self, 0).map` (base name preserved on the `$.get` leaf) or still be
+ * the raw `self.map` chain. Returns undefined when the chain cannot be
+ * resolved to a known UDT type (callers then keep current behavior).
+ */
+function resolveIterableUdtValueType(expr: any, state: ScopeManager): string | undefined {
+    if (!expr) return undefined;
+    const fieldNames: string[] = [];
+    let cursor = expr;
+    while (cursor && cursor.type === 'MemberExpression' && cursor.object) {
+        if (cursor.property?.type !== 'Identifier') return undefined;
+        fieldNames.unshift(cursor.property.name);
+        cursor = cursor.object;
+    }
+    const rootName = typeof cursor?.name === 'string' ? cursor.name : undefined;
+    if (!rootName || fieldNames.length === 0) return undefined;
+    const rootType = state.getVariableUdtType(rootName);
+    if (!rootType) return undefined;
+    return state.resolveUdtFieldValueType(rootType, fieldNames);
+}
+
+/**
  * Post-pass: propagate async/await through user-defined function call chains.
  *
  * When request.security() is used inside a user-defined function, the transpiler
@@ -302,6 +326,19 @@ export function runTransformationPass(
                 state.getCurrentScopeType() !== 'fn') {
                 c(node.argument, state);
             }
+            // NON-computed member chains used as return arguments (e.g.
+            // `return self.map.get(name).positions` or `return this.signal`)
+            // were previously only run through transformArrayIndex — a no-op
+            // for non-computed members — leaving the leaf base bare
+            // (`self.map` on a Series → crash). Walk them through the main
+            // member machinery so the base identifier and member hops get the
+            // standard `$.get(base, 0).field…` lowering. Computed member
+            // arguments are handled by transformReturnStatement directly.
+            else if (node.argument &&
+                node.argument.type === 'MemberExpression' &&
+                !node.argument.computed) {
+                c(node.argument, state);
+            }
             transformReturnStatement(node, state);
         },
         VariableDeclaration(node: any, state: ScopeManager) {
@@ -364,6 +401,7 @@ export function runTransformationPass(
             // (built-ins like box.all), and pass-through for already-iterable values.
             // Centralizing the resolution avoids special-casing the codegen for each iterable
             // shape and removes the static-typing guesswork.
+            const udtLoopVarNames: string[] = [];
             if (node.right) {
                 if (node.right.type === 'Identifier') {
                     // transformIdentifier may already wrap user variables in $.get($.var.X, 0).
@@ -384,6 +422,24 @@ export function runTransformationPass(
                 const isDestructuring = node.left && node.left.type === 'VariableDeclaration' &&
                     node.left.declarations[0].id.type === 'ArrayPattern';
                 const helperName = isDestructuring ? 'entries' : 'iter';
+
+                // Destructured loop vars whose iterated value type is a known
+                // UDT (e.g. `for [_, wordPositions] in this.map` with map value
+                // type WordPosArray) are registered as UDT instances for the
+                // body walk, so user-method calls on them dispatch to
+                // `$.call($M_…, …)` instead of being left as a bare property
+                // lookup on PineTypeObject (silent no-op).
+                if (isDestructuring) {
+                    const valueType = resolveIterableUdtValueType(node.right, state);
+                    if (valueType && state.isUdtTypeName(valueType)) {
+                        for (const el of node.left.declarations[0].id.elements) {
+                            if (el && el.type === 'Identifier') {
+                                state.markVariableAsUdtInstance(el.name, valueType);
+                                udtLoopVarNames.push(el.name);
+                            }
+                        }
+                    }
+                }
 
                 // Build: $.<helperName>(<currentRight>)
                 const currentRight = { ...node.right };
@@ -406,6 +462,11 @@ export function runTransformationPass(
             // Traverse the body
             if (node.body) {
                 c(node.body, state);
+            }
+
+            // Clean up the UDT loop-var registrations after the body walk
+            for (const varName of udtLoopVarNames) {
+                state.unmarkVariableAsUdtInstance(varName);
             }
 
             // Prepend guard check as the first statement in the loop body

@@ -485,7 +485,7 @@ export class Core {
         return val.toString();
     }
 
-    Type(definition: Record<string, string | [string, any]>) {
+    Type(definition: Record<string, string | [string, any]>, name?: string) {
         // Extract field names, types, and defaults from definition.
         // Fields can be either 'type' (no default) or ['type', defaultValue].
         const definitionKeys = Object.keys(definition);
@@ -567,6 +567,14 @@ export class Core {
             _fieldDefaults: fieldDefaults,
             _definitionKeys: definitionKeys,
         };
+        // Stable type name for method-overload dispatch. The factory object
+        // itself is recreated every bar (the transpiler re-runs
+        // `Type(…)` inside `$.init`), so instances hold the bar-0 factory
+        // while the const slot holds the current one — identity comparison
+        // would fail from bar 1 on. The name string is stable.
+        if (name) {
+            UDT.__pineName = name;
+        }
         return UDT;
     }
 }
