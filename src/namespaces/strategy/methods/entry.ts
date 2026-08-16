@@ -19,7 +19,7 @@ import { parseArgsForPineParams } from '../../utils';
  *     position AND open a new one of the requested qty in the new direction.
  */
 const ENTRY_SIGNATURES = [
-    ['id', 'direction', 'qty', 'limit', 'stop', 'oca_name', 'oca_type', 'comment', 'alert_message', 'disable_alert'],
+    ['id', 'direction', 'qty', 'limit', 'stop', 'oca_name', 'oca_type', 'comment', 'alert_message', 'disable_alert', 'when'],
 ];
 const ENTRY_ARGS_TYPES = {
     id: 'string',
@@ -32,6 +32,7 @@ const ENTRY_ARGS_TYPES = {
     comment: 'string',
     alert_message: 'string',
     disable_alert: 'boolean',
+    when: 'series',
 };
 
 export function entry(context: any) {
@@ -50,6 +51,8 @@ export function entry(context: any) {
             if (typeof val === 'object' && val.get !== undefined) return val.get(0);
             return val;
         };
+        const whenValue = Object.prototype.hasOwnProperty.call(parsed, 'when') ? extractValue(parsed.when) : true;
+        if (!whenValue) return;
 
         const idValue       = extractValue(parsed.id);
         const directionVal  = extractValue(parsed.direction);

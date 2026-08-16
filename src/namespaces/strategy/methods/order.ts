@@ -24,7 +24,7 @@ import { parseArgsForPineParams } from '../../utils';
  * uniformly.
  */
 const ORDER_SIGNATURES = [
-    ['id', 'direction', 'qty', 'limit', 'stop', 'oca_name', 'oca_type', 'comment', 'alert_message', 'disable_alert'],
+    ['id', 'direction', 'qty', 'limit', 'stop', 'oca_name', 'oca_type', 'comment', 'alert_message', 'disable_alert', 'when'],
 ];
 
 const ORDER_ARGS_TYPES = {
@@ -39,6 +39,7 @@ const ORDER_ARGS_TYPES = {
     comment: 'string',
     alert_message: 'string',
     disable_alert: 'boolean',
+    when: 'series',
 };
 
 /**
@@ -65,6 +66,8 @@ export function order(context: any) {
             if (typeof val === 'object' && val.get !== undefined) return val.get(0);
             return val;
         };
+        const whenValue = Object.prototype.hasOwnProperty.call(parsed, 'when') ? extractValue(parsed.when) : true;
+        if (!whenValue) return;
 
         const idValue       = extractValue(parsed.id);
         const directionVal  = extractValue(parsed.direction);

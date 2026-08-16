@@ -20,7 +20,7 @@ import { parseArgsForPineParams } from '../../utils';
  *   - `qty` and `qty_percent` apply to the SUM of contracts open from the
  *     matching entries (FIFO across multiple stacked entries with same id).
  */
-const CLOSE_SIGNATURES = [['id', 'comment', 'qty', 'qty_percent', 'alert_message', 'immediately', 'disable_alert']];
+const CLOSE_SIGNATURES = [['id', 'comment', 'qty', 'qty_percent', 'alert_message', 'immediately', 'disable_alert', 'when']];
 const CLOSE_ARGS_TYPES = {
     id: 'string',
     comment: 'string',
@@ -29,6 +29,7 @@ const CLOSE_ARGS_TYPES = {
     alert_message: 'string',
     immediately: 'boolean',
     disable_alert: 'boolean',
+    when: 'series',
 };
 
 export function close(context: any) {
@@ -37,6 +38,8 @@ export function close(context: any) {
             throw new Error('strategy.close() called before strategy() declaration');
         }
         const parsed = parseArgsForPineParams<any>(args, CLOSE_SIGNATURES, CLOSE_ARGS_TYPES);
+        const whenValue = parsed.when instanceof Series ? parsed.when.get(0) : parsed.when;
+        if (Object.prototype.hasOwnProperty.call(parsed, 'when') && !whenValue) return;
         const targetId = parsed.id;
         if (targetId === undefined || targetId === null) return;
 

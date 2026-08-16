@@ -32,7 +32,7 @@ const EXIT_SIGNATURES = [
         'id', 'from_entry', 'qty', 'qty_percent', 'profit', 'limit', 'loss', 'stop',
         'trail_price', 'trail_points', 'trail_offset', 'oca_name', 'comment',
         'comment_profit', 'comment_loss', 'comment_trailing', 'alert_message',
-        'alert_profit', 'alert_loss', 'alert_trailing', 'disable_alert',
+        'alert_profit', 'alert_loss', 'alert_trailing', 'disable_alert', 'when',
     ],
 ];
 const EXIT_ARGS_TYPES = {
@@ -46,6 +46,7 @@ const EXIT_ARGS_TYPES = {
     comment: 'string', comment_profit: 'string', comment_loss: 'string', comment_trailing: 'string',
     alert_message: 'string', alert_profit: 'string', alert_loss: 'string', alert_trailing: 'string',
     disable_alert: 'boolean',
+    when: 'series',
 };
 
 export function exit(context: any) {
@@ -61,14 +62,6 @@ export function exit(context: any) {
         // stable id within the bar (the cadence check below is fuzzier in
         // that case but still works for the canonical patterns).
         let callsiteId = extractCallsiteId(args);
-        if (callsiteId === undefined) {
-            const s = context.strategy;
-            if (s._exit_fallback_last_bar !== context.idx) {
-                s._exit_fallback_counter = 0;
-                s._exit_fallback_last_bar = context.idx;
-            }
-            callsiteId = `exit_raw_${s._exit_fallback_counter++}`;
-        }
 
         const parsed = parseArgsForPineParams<any>(args, EXIT_SIGNATURES, EXIT_ARGS_TYPES);
 
@@ -82,6 +75,16 @@ export function exit(context: any) {
             return val;
         };
 
+        const whenValue = Object.prototype.hasOwnProperty.call(parsed, 'when') ? extractValue(parsed.when) : true;
+        if (!whenValue) return;
+        if (callsiteId === undefined) {
+            const s = context.strategy;
+            if (s._exit_fallback_last_bar !== context.idx) {
+                s._exit_fallback_counter = 0;
+                s._exit_fallback_last_bar = context.idx;
+            }
+            callsiteId = `exit_raw_${s._exit_fallback_counter++}`;
+        }
         const idValue          = extractValue(parsed.id);
         const fromEntry        = extractValue(parsed.from_entry);
         const qty              = extractValue(parsed.qty);
