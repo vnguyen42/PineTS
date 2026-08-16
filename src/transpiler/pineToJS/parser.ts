@@ -100,6 +100,17 @@ export class Parser {
         'type', 'method', 'enum',
     ]);
 
+    // A token that can name a Pine type or identifier: a plain identifier or a
+    // contextual keyword (`type`/`method`/`enum`) used as one. The qualifier
+    // loops must accept both, otherwise `simple string type = ...` stops one
+    // word short: `string` becomes a phantom param name and `type` is parsed
+    // as a second param — two `simple string ...` params then yield a
+    // duplicate `string` param in the generated JS ("Argument name clash").
+    private isIdentifierLike(token: Token): boolean {
+        return token.type === TokenType.IDENTIFIER
+            || (token.type === TokenType.KEYWORD && Parser.CONTEXTUAL_KEYWORDS.has(token.value));
+    }
+
     /**
      * Consume an identifier OR a contextual keyword used as an identifier.
      * Used in positions where Pine permits soft keywords as names — most notably
@@ -819,8 +830,8 @@ export class Parser {
 
             // Handle type qualifiers (can be multiple: series float, simple int, etc.)
             while (
-                this.peek().type === TokenType.IDENTIFIER &&
-                this.peek(1).type === TokenType.IDENTIFIER &&
+                this.isIdentifierLike(this.peek()) &&
+                this.isIdentifierLike(this.peek(1)) &&
                 this.peek(2).type !== TokenType.LPAREN
             ) {
                 if (paramType) {
@@ -911,8 +922,8 @@ export class Parser {
 
             // Handle type qualifiers (can be multiple: series float, simple int, etc.)
             while (
-                this.peek().type === TokenType.IDENTIFIER &&
-                this.peek(1).type === TokenType.IDENTIFIER &&
+                this.isIdentifierLike(this.peek()) &&
+                this.isIdentifierLike(this.peek(1)) &&
                 this.peek(2).type !== TokenType.LPAREN
             ) {
                 if (paramType) {
