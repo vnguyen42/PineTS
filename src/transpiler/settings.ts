@@ -276,6 +276,9 @@ export const CONTEXT_PINE_VARS = [
     'extend',
     'position',
 
+    // Strategy/indicator display constants (axis scaling — no computation effect)
+    'scale',
+
     // Merge constants (request.security)
     'barmerge',
 
