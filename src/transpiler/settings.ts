@@ -250,6 +250,7 @@ export const CONTEXT_PINE_VARS = [
     'inputs',
     'time',
     'time_close',
+    'timenow',
     'time_tradingday',
     'dayofmonth',
     'hour',
