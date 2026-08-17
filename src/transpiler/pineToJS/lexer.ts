@@ -161,6 +161,15 @@ export class Lexer {
         // Convert spaces to indent levels (4 spaces = 1 level)
         indent += Math.floor(spaceCount / 4);
 
+        // Comment-only lines are invisible to block structure (TradingView
+        // semantics): their indentation must never emit INDENT/DEDENT, or a
+        // comment re-indented relative to the code around it (e.g. a `//`
+        // comment at column 0 wedged between two deeper body lines) corrupts
+        // the indent stack and the next real line re-indents as a block.
+        if (this.peek() === '/' && this.peek(1) === '/') {
+            return;
+        }
+
         // Pine allows binary-operator (and comma / ternary `:` / logical
         // and|or) line continuation. The continuation line is typically
         // visually aligned past the operand of the previous line, which
@@ -171,6 +180,20 @@ export class Lexer {
         // the block parser sees that DEDENT and prematurely closes the
         // surrounding function/if/for body, dropping subsequent
         // statements (which then reference now-out-of-scope parameters).
+        //
+        // The backward check below covers lines that END with a continuation
+        // token. TradingView also accepts the symmetric wrap: a line that
+        // STARTS with an infix operator continues the previous line's
+        // expression (e.g. a `+` chain wrapped onto a deeper line even after
+        // the expression's closing paren). A Pine statement can never begin
+        // with an infix operator, so this forward check can never swallow a
+        // structural block indent — it only fires while an expression is
+        // open across the newline, which the parser's own operator lookahead
+        // (peekOperatorEx / matchEx) already crosses NEWLINE for.
+        if (this.lineStartsWithInfixOperator()) {
+            return;
+        }
+
         if (this.isContinuationFromPrevToken()) {
             return;
         }
@@ -219,6 +242,51 @@ export class Lexer {
             if (t.type === TokenType.KEYWORD && (t.value === 'and' || t.value === 'or')) return true;
             return false;
         }
+        return false;
+    }
+
+    /**
+     * True when the first token of the current line (leading whitespace
+     * already consumed) is an infix binary operator — TradingView wraps an
+     * expression onto the next line by starting it with the operator, even
+     * at a visually deeper indentation. A Pine statement can never start
+     * with an infix operator, so this can never suppress a real block
+     * indent: the only legitimate INDENT position is the first statement of
+     * a block body, which always begins with a keyword, identifier, literal
+     * or opening bracket. The set mirrors what the parser's `peekOperatorEx`
+     * / `matchEx` continuation crosses NEWLINE for.
+     */
+    private lineStartsWithInfixOperator(): boolean {
+        const ch = this.peek();
+        const next = this.peek(1);
+        const two = ch + next;
+
+        // Comment lines are handled before this helper (invisible to blocks).
+        if (two === '//') return false;
+
+        // A `switch` arm label never continues an expression: either a numeric
+        // case value with an optional sign (`-1 =>`, `+1 =>`, `-1, 1 =>`) or a
+        // bare default arm (`=>`). The label's sign would otherwise match the
+        // operator checks below, swallowing the arm level's INDENT/DEDENT and
+        // corrupting the whole switch block.
+        if (two === '=>' || /^[+-]?\s*[\d.]+(\s*,\s*[+-]?\s*[\d.]+)*\s*=>/.test(this.source.slice(this.pos))) {
+            return false;
+        }
+
+        // Multi-char infix operators (exclude `=>`, which opens a block).
+        if (two === '==' || two === '!=' || two === '<=' || two === '>=' || two === ':=' ||
+            two === '+=' || two === '-=' || two === '*=' || two === '/=' || two === '%=') {
+            return true;
+        }
+
+        // Single-char infix operators. `!` is unary and excluded; `?` and `:`
+        // are ternary continuations (`?` lexes as an OPERATOR, `:` as COLON).
+        if ('+-*/%=<>?:'.includes(ch)) return true;
+
+        // Logical keywords `and` / `or` continue boolean expressions.
+        if (ch === 'a' && this.source.startsWith('and', this.pos) && !this.isIdentifierChar(this.peek(3))) return true;
+        if (ch === 'o' && this.source.startsWith('or', this.pos) && !this.isIdentifierChar(this.peek(2))) return true;
+
         return false;
     }
 
