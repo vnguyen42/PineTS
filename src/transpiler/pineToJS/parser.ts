@@ -1048,6 +1048,21 @@ export class Parser {
             statements[statements.length - 1] = new ReturnStatement(last.expression);
         } else if (last.type === 'IfStatement') {
             this._addImplicitReturnToIf(last);
+        } else if (last.type === 'VariableDeclaration') {
+            // Pine: "Either an expression or a declared variable should be the
+            // last statement of the function's body. The result of this
+            // expression (or variable) will be the result of the function's
+            // call." (user manual v5, multi-line functions). Une déclaration
+            // locale en dernière position (`x = expr`, `float x = expr`,
+            // `a = 1, b = 2`) retourne la valeur de la variable déclarée —
+            // celle du dernier declarator pour les séquences. Sans ce return,
+            // le transpileur émettait une fonction sans valeur de retour
+            // (undefined aval chez l'appelant).
+            const decls = last.declarations;
+            const lastDecl = decls[decls.length - 1];
+            if (lastDecl?.init && lastDecl.id?.type === 'Identifier') {
+                statements.push(new ReturnStatement(new Identifier(lastDecl.id.name)));
+            }
         }
     }
 
