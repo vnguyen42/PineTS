@@ -17,7 +17,15 @@ export function opentrades(context: any) {
         // the rationale — per-bar plot values must capture per-bar state).
         const live: Trade[] = context.strategy?.opentrades ?? [];
         const list: Trade[] = live.slice();
-        const at = (i: any): Trade | undefined => list[Number(i)];
+        const at = (i: any): Trade | undefined => {
+            // Pine named-arg form `strategy.opentrades.entry_price(trade_num = N)`
+            // reaches the runtime as a raw `{trade_num: N}` bag (the transpiler
+            // emits named args as a trailing object literal on method calls it
+            // cannot see into). Unwrap it so the index lands where the positional
+            // form puts it — otherwise every per-trade getter silently returns NaN.
+            const idx = i !== null && typeof i === 'object' && 'trade_num' in i ? i.trade_num : i;
+            return list[Number(idx)];
+        };
         const currentPrice = (): number => {
             const md = context.marketData;
             if (Array.isArray(md) && context.idx >= 0 && context.idx < md.length) {

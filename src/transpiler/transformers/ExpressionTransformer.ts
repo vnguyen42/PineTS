@@ -12,6 +12,55 @@ const UNDEFINED_ARG = {
 };
 
 /**
+ * Pine parameter order (by name) for builtins whose runtime closures are pure
+ * positional — they never call `parseArgsForPineParams`, so a
+ * transpiler-emitted named-args bag (`ta.sma(source = close, length = 14)`
+ * arrives as ONE `ta.param({…}, …)` argument) lands in the first positional
+ * slot and every value silently becomes na. The transpiler expands the bag
+ * into positional slots using this table (see transformCallExpression).
+ *
+ * Corpus-grounded (scan 2026-08-17): every entry is a `namespace.method`
+ * actually called with named args by the TradeSearcher corpus; no
+ * speculative entries. The names are the PINE param names, which can differ
+ * from the runtime closure's local variable names (e.g. ta.alma's `series`
+ * is `source` inside the closure).
+ */
+const NAMED_ARGS_PARAM_ORDER: Record<string, string[]> = {
+    // ta.* — 18 functions, 14 corpus scripts
+    'ta.atr': ['length'],
+    'ta.sma': ['source', 'length'],
+    'ta.ema': ['source', 'length'],
+    'ta.wma': ['source', 'length'],
+    'ta.hma': ['source', 'length'],
+    'ta.rma': ['source', 'length'],
+    'ta.vwma': ['source', 'length'],
+    'ta.swma': ['source'],
+    'ta.vwap': ['source'],
+    'ta.alma': ['series', 'length', 'offset', 'sigma'],
+    'ta.rsi': ['source', 'length'],
+    'ta.lowest': ['source', 'length'],
+    'ta.highest': ['source', 'length'],
+    'ta.supertrend': ['factor', 'atrPeriod'],
+    'ta.crossover': ['source1', 'source2'],
+    'ta.crossunder': ['source1', 'source2'],
+    'ta.bb': ['series', 'length', 'mult'],
+    'ta.valuewhen': ['condition', 'source', 'occurrence'],
+    // label.* — 3 functions
+    'label.set_y': ['id', 'y'],
+    'label.set_tooltip': ['id', 'tooltip'],
+    'label.set_yloc': ['id', 'yloc'],
+    // line.* — 4 functions
+    'line.set_color': ['id', 'color'],
+    'line.set_width': ['id', 'width'],
+    'line.set_style': ['id', 'style'],
+    'line.set_extend': ['id', 'extend'],
+    // color.* — 2 functions
+    'color.new': ['color', 'transp'],
+    'color.rgb': ['red', 'green', 'blue', 'transp'],
+};
+
+
+/**
  * Build the third argument to a `*.param(value, idx, name)` call. The
  * statically-allocated `pN` string is unique across the script, but
  * `Context.param` stores the resulting series in `context.params[name]` —
@@ -1544,15 +1593,57 @@ export function transformCallExpression(node: any, scopeManager: ScopeManager, n
             }
         }
         // Transform arguments using the namespace's param
-        const newArgs: any[] = [];
-        node.arguments.forEach((arg: any) => {
-            // If argument is already a param call, don't wrap it again
-            if (arg._isParamCall) {
-                newArgs.push(arg);
-                return;
+        const newArgs = [];
+        const namedParams = NAMED_ARGS_PARAM_ORDER[`${namespace}.${node.callee.property.name}`];
+        if (namedParams && node.arguments.some((a) => a.type === 'ObjectExpression')) {
+            // Named-args bag (the parser collects ALL named args into one
+            // trailing ObjectExpression). Positional-runtime builtins (ta.*,
+            // drawing setters, color.rgb) cannot consume the bag — it would
+            // land in the first positional slot and silently produce na.
+            // Expand it into positional slots in Pine parameter order,
+            // merging with positional args (which fill the lowest still-empty
+            // slots, Pine's mixing semantics: `ta.rsi(close, length = 14)`,
+            // `color.rgb(0, 195, 255, transp = 0)`).
+            const bagIndex = node.arguments.findIndex((a) => a.type === 'ObjectExpression');
+            const bag = node.arguments[bagIndex];
+            const positionals = node.arguments.filter((_, i) => i !== bagIndex);
+            const slots = new Array(namedParams.length);
+            for (const prop of bag.properties) {
+                if (prop?.key?.type !== 'Identifier') continue;
+                const idx = namedParams.indexOf(prop.key.name);
+                if (idx >= 0 && slots[idx] === undefined) slots[idx] = prop.value;
             }
-            newArgs.push(transformFunctionArgument(arg, namespace, scopeManager));
-        });
+            let slotIdx = 0;
+            const extra = [];
+            for (const pos of positionals) {
+                while (slotIdx < slots.length && slots[slotIdx] !== undefined) slotIdx++;
+                if (slotIdx < slots.length) {
+                    slots[slotIdx] = pos;
+                    slotIdx++;
+                } else {
+                    extra.push(pos);
+                }
+            }
+            for (const slot of slots) {
+                if (slot === undefined) {
+                    newArgs.push(UNDEFINED_ARG);
+                } else if (slot._isParamCall) {
+                    newArgs.push(slot);
+                } else {
+                    newArgs.push(transformFunctionArgument(slot, namespace, scopeManager));
+                }
+            }
+            for (const e of extra) newArgs.push(e);
+        } else {
+            node.arguments.forEach((arg) => {
+                // If argument is already a param call, don't wrap it again
+                if (arg._isParamCall) {
+                    newArgs.push(arg);
+                    return;
+                }
+                newArgs.push(transformFunctionArgument(arg, namespace, scopeManager));
+            });
+        }
         node.arguments = newArgs;
 
         // Inject a trailing `{ __callsiteId }` options object for calls that
