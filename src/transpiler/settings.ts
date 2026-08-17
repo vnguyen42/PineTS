@@ -148,6 +148,7 @@ export const NAMESPACE_COLLISION_NAMES = new Set([
     'strategy',
     'log',
     'str',
+    'runtime',
 ]);
 
 // JavaScript reserved keywords that ARE valid Pine identifiers but invalid as
@@ -278,6 +279,9 @@ export const CONTEXT_PINE_VARS = [
 
     // Strategy/indicator display constants (axis scaling — no computation effect)
     'scale',
+
+    // runtime namespace (runtime.error — halts the script with a runtime error)
+    'runtime',
 
     // Merge constants (request.security)
     'barmerge',

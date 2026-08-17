@@ -18,6 +18,7 @@ import { Strategy, StrategyState } from './namespaces/strategy/strategy.index';
 import { Series } from './Series';
 import { Log } from './namespaces/Log';
 import { Str } from './namespaces/Str';
+import { Runtime } from './namespaces/Runtime';
 import types, { display, shape } from './namespaces/Types';
 import { Timeframe } from './namespaces/Timeframe';
 import { FillHelper, HlineHelper, PlotHelper } from './namespaces/Plots';
@@ -104,6 +105,7 @@ export class Context {
         // barstate: Barstate;
         // log: Log;
         // str: Str;
+        // runtime: Runtime;
         // timeframe: Timeframe;
         [key: string]: any;
     };
@@ -216,6 +218,7 @@ export class Context {
             matrix: new PineMatrix(this),
             ticker: new Ticker(this),
             strategy: new Strategy(this),
+            runtime: new Runtime(this),
 
             syminfo: null,
             timeframe: new Timeframe(this),
