@@ -334,16 +334,21 @@ export class Parser {
         if (stmt) {
             stmt._line = startLine;
             
-            // Handle comma-separated statements on the same line: a = high, b = low
+            // Handle comma-separated statement sequences: a = high, b = low.
+            // TradingView allows the sequence to span multiple lines — a line
+            // ending with a comma continues with the next statement on the
+            // following line (the lexer already treats such lines as
+            // continuations, emitting no INDENT/DEDENT). The loop keeps
+            // consuming commas and statements until the sequence ends.
             // Only handle commas at the top level (not in recursive calls)
-            if (handleCommas && this.match(TokenType.COMMA) && this.peek().line === startLine) {
+            if (handleCommas && this.match(TokenType.COMMA)) {
                 const statements = [stmt];
                 
-                while (this.match(TokenType.COMMA) && this.peek().line === startLine) {
+                while (this.match(TokenType.COMMA)) {
                     this.advance(); // consume comma
                     this.skipNewlines(true); // skip any whitespace after comma
                     
-                    // Parse the next statement on the same line (don't handle commas recursively)
+                    // Parse the next statement (don't handle commas recursively)
                     const nextStmt = this.parseStatement(false);
                     if (nextStmt) {
                         statements.push(nextStmt);
