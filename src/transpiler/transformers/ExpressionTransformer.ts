@@ -161,6 +161,11 @@ export function transformArrayIndex(node: any, scopeManager: ScopeManager): void
         if (node.property.type === 'BinaryExpression' || node.property.type === 'UnaryExpression' ||
             node.property.type === 'LogicalExpression' || node.property.type === 'ConditionalExpression') {
             node.property = transformOperand(node.property, scopeManager);
+        } else if (node.property.type === 'CallExpression') {
+            // Dynamic call-result index: `close[array.get(divs, i)]`. The call must be
+            // transformed like any other call (rename + param-wrap + hoist), otherwise
+            // its inner identifiers escape the global rename → ReferenceError.
+            transformCallExpression(node.property, scopeManager);
         }
     }
 }
@@ -403,6 +408,9 @@ export function transformMemberExpression(memberNode: any, originalParamName: st
     ) {
         if (!memberNode.object._transformed) {
             transformCallExpression(memberNode.object, scopeManager);
+        }
+        if (memberNode.property.type === 'CallExpression') {
+            transformCallExpression(memberNode.property, scopeManager);
         }
         const paramId = scopeManager.generateParamId();
         const paramCall = {
@@ -694,6 +702,9 @@ function transformOperand(node: any, scopeManager: ScopeManager, namespace: stri
                     property: { type: 'Identifier', name: '__value' },
                     computed: false,
                 };
+                if (node.property.type === 'CallExpression') {
+                    transformCallExpression(node.property, scopeManager);
+                }
                 return ASTFactory.createGetCall(valueExpr, node.property);
             }
 
@@ -1157,6 +1168,12 @@ export function transformFunctionArgument(arg: any, namespace: string, scopeMana
             // Recursively transform identifiers inside complex index expressions
             // e.g. close[strideInput * 2] → ta.param(close, $.get($.let.glb1_strideInput, 0) * 2, 'p2')
             transformedProperty = transformOperand(arg.property, scopeManager, namespace);
+        } else if (arg.property.type === 'CallExpression') {
+            // Dynamic call-result index: `close[array.get(divs, i)]`. Transform the call
+            // (rename + param-wrap + hoist) so its identifiers don't escape the global
+            // rename — same treatment as BinaryExpression indexes above.
+            transformCallExpression(arg.property, scopeManager);
+            transformedProperty = arg.property;
         } else {
             transformedProperty = arg.property;
         }
