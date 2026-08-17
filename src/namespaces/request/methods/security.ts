@@ -105,6 +105,34 @@ function resolveExprValue(v: any): any {
     return v;
 }
 
+// Throttle for the missing-expression warning: the expression is either
+// captured in the secondary context or it isn't — a per-call-site property,
+// NOT a per-bar one. Without the Set, an `options`-bag call whose expression
+// has no param name (or a conditional call site that never fired) would
+// flood stderr with one warning per bar. Keyed per context (one Set per
+// engine run) on symbol + timeframe + expression name.
+const nanWarnContexts = new WeakMap<object, Set<string>>();
+
+/**
+ * Emit a single `console.warn` (per context × symbol × timeframe ×
+ * expression) when `request.security` returns NaN because the expression
+ * was never captured in the secondary context. Kept discoverable by the
+ * scan-tv-corpus pipeline, which surfaces worker stderr on OK runs.
+ */
+function warnMissingExprValue(context: object, symbol: unknown, timeframe: string, expressionName: string | undefined): void {
+    const key = `${String(symbol)}_${timeframe}_${String(expressionName)}`;
+    let warned = nanWarnContexts.get(context);
+    if (!warned) {
+        warned = new Set();
+        nanWarnContexts.set(context, warned);
+    }
+    if (warned.has(key)) return;
+    warned.add(key);
+    console.warn(
+        `[request.security] expression "${String(expressionName)}" never captured in the secondary context (${String(symbol)} ${timeframe}) — returning NaN`
+    );
+}
+
 export function security(context: any) {
     return async (...rawArgs: any[]) => {
         // Pine named-arg semantics: bind to the function's known signature by name,
@@ -242,7 +270,17 @@ export function security(context: any) {
                 return NaN;
             }
 
-            const value = secContext.params[_expression_name][secContextIdx];
+            // Expression was never captured in the secondary (e.g. an
+            // options-bag call whose expression had no param name, or a
+            // conditional call site that never fired): no value to read.
+            // Mirror of security_lower_tf's guard — return NaN instead of
+            // crashing on `undefined[secContextIdx]`.
+            const cachedValues = secContext.params[_expression_name];
+            if (!cachedValues) {
+                warnMissingExprValue(context, _symbol, _timeframe, _expression_name);
+                return NaN;
+            }
+            const value = cachedValues[secContextIdx];
 
             // Handle gaps for HTF (Higher Timeframe)
             if (!isLTF && _gaps) {
@@ -344,7 +382,14 @@ export function security(context: any) {
             return NaN;
         }
 
-        const value = secContext.params[_expression_name][secContextIdx];
+        // Expression was never captured in the secondary — no value to
+        // read (mirror of security_lower_tf's guard; see cache-hit path).
+        const freshValues = secContext.params[_expression_name];
+        if (!freshValues) {
+            warnMissingExprValue(context, _symbol, _timeframe, _expression_name);
+            return NaN;
+        }
+        const value = freshValues[secContextIdx];
 
         // Handle gaps for HTF (Higher Timeframe) - First call
         if (!isLTF && _gaps) {

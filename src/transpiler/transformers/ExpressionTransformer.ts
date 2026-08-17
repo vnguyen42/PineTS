@@ -1503,6 +1503,29 @@ export function transformCallExpression(node: any, scopeManager: ScopeManager, n
         }
 
         const namespace = node.callee.object.name;
+        // For `request.security(...)` / `request.security_lower_tf(...)`
+        // called with the named-args options bag (`{symbol, timeframe,
+        // expression, …}`), the `expression` property must be wrapped in
+        // `request.param(value, undefined, 'pN')` so it carries a param
+        // name into the secondary context. The generic ObjectExpression
+        // handling keeps context-bound identifiers (e.g. `close`) raw,
+        // leaving the security() runtime with `_expression_name ===
+        // undefined` → `secContext.params[undefined]` is undefined → the
+        // `[secContextIdx]` read crashes with « Cannot read properties of
+        // undefined (reading '0') ». Pre-transform the bag's expression
+        // value BEFORE the generic per-arg wrapping runs.
+        const methodNameForBag = node.callee.property.name;
+        if (namespace === 'request' && (methodNameForBag === 'security' || methodNameForBag === 'security_lower_tf')) {
+            for (const arg of node.arguments) {
+                if (!arg || arg.type !== 'ObjectExpression') continue;
+                for (const prop of arg.properties) {
+                    if (prop?.key?.type === 'Identifier' && prop.key.name === 'expression' && prop.value) {
+                        if (prop.value._isParamCall) continue; // already wrapped
+                        prop.value = transformFunctionArgument(prop.value, 'request', scopeManager);
+                    }
+                }
+            }
+        }
         // Transform arguments using the namespace's param
         const newArgs: any[] = [];
         node.arguments.forEach((arg: any) => {

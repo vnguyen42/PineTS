@@ -54,17 +54,32 @@ function resolveIterableUdtValueType(expr: any, state: ScopeManager): string | u
 export function propagateAsyncAwait(ast: any): void {
     const baseVisitor = { ...walk.base, LineComment: () => {} };
 
+    // Pine methods carry a `$M_` JS prefix at codegen; receiver-type variants
+    // are renamed to `$M_<name>_<Type>` (Pine name preserved on
+    // `id.__pineName`). Runtime invocations always target the dispatcher
+    // `$.call($M_<name>, …)`. All shapes must collapse onto the plain Pine
+    // name so the async infection reaches the dispatcher call sites — mirror
+    // of buildLtfSlices.canonicalFnName.
+    function stripMethodPrefix(name: string): string {
+        return name.startsWith('$M_') ? name.slice(3) : name;
+    }
+    function canonicalFnName(node: any): string | null {
+        if (!node || typeof node.name !== 'string' || node.name.length === 0) return null;
+        if (typeof node.__pineName === 'string' && node.__pineName.length > 0) return node.__pineName;
+        return stripMethodPrefix(node.name);
+    }
+
     // Helper: extract function name from $.call() first argument
     // Handles both: $.call(funcName, ...) and $.call($.get(funcName, 0), ...)
     function getCallTargetName(arg: any): string | null {
         if (!arg) return null;
-        if (arg.type === 'Identifier') return arg.name;
+        if (arg.type === 'Identifier') return canonicalFnName(arg);
         if (arg.type === 'CallExpression' &&
             arg.callee?.type === 'MemberExpression' &&
             arg.callee.object?.name === '$' &&
             arg.callee.property?.name === 'get' &&
             arg.arguments?.[0]?.type === 'Identifier') {
-            return arg.arguments[0].name;
+            return canonicalFnName(arg.arguments[0]);
         }
         return null;
     }
@@ -73,7 +88,8 @@ export function propagateAsyncAwait(ast: any): void {
     const funcDecls = new Map<string, any>();
     walk.simple(ast, {
         FunctionDeclaration(node: any) {
-            if (node.id?.name) funcDecls.set(node.id.name, node);
+            const key = canonicalFnName(node.id);
+            if (key) funcDecls.set(key, node);
         },
     }, baseVisitor);
 

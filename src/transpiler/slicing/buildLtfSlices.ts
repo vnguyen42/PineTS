@@ -177,10 +177,56 @@ function sliceAlongPath(node: any, path: any[], depth: number): any {
 }
 
 /**
+ * Strip the `$M_` JS prefix Pine methods get at codegen. Pine identifiers
+ * cannot contain `$`, so the prefix is collision-proof and unambiguous.
+ */
+function stripMethodPrefix(name: string): string {
+    return name.startsWith('$M_') ? name.slice(3) : name;
+}
+
+/**
+ * Canonical user-function name for the call graph. A Pine method is
+ * emitted with a `$M_` JS prefix (`$M_fetch`); when it declares a UDT
+ * receiver, `renameMethodVariants` renames the declaration to
+ * `$M_fetch_Tracker` (the plain Pine name is preserved on
+ * `id.__pineName`). Runtime invocations always target the dispatcher
+ * (`$.call($M_fetch, …)`). Both shapes must collapse onto the plain
+ * Pine name (`fetch`) so the graph keyed on declaration ids matches the
+ * invocation targets.
+ */
+function canonicalFnName(id: { name?: string; __pineName?: string } | string | null | undefined): string | null {
+    if (typeof id === 'string') return stripMethodPrefix(id);
+    if (!id || typeof id.name !== 'string' || id.name.length === 0) return null;
+    if (typeof id.__pineName === 'string' && id.__pineName.length > 0) return id.__pineName;
+    return stripMethodPrefix(id.name);
+}
+
+/**
+ * Extract the user-function name from the first argument of a
+ * `$.call(fnRef, id, …)` invocation. The codegen emits two shapes:
+ *   - `$.call(fnName, "_fn0", …)`         — bare function reference
+ *   - `$.call($.get(fnName, 0), "_fn0", …)` — via a `$.get` wrapper
+ *     (function parameters bound to a Series of fn refs). Both must be
+ *     recognized when locating runtime invocations of a user function.
+ */
+function dollarCallRefName(arg0: any): string | null {
+    if (!arg0 || typeof arg0 !== 'object') return null;
+    if (arg0.type === 'Identifier' && typeof arg0.name === 'string') return canonicalFnName(arg0.name);
+    if (arg0.type === 'CallExpression' && arg0.callee?.type === 'MemberExpression') {
+        const obj = arg0.callee.object;
+        const prop = arg0.callee.property;
+        if (obj?.name === '$' && prop?.name === 'get' && arg0.arguments?.[0]?.type === 'Identifier') {
+            return canonicalFnName(arg0.arguments[0].name);
+        }
+    }
+    return null;
+}
+
+/**
  * Test if a CallExpression is `$.call(fnRef, ...)` and return the
- * fnRef Identifier name. Used to locate top-level invocations of a
- * given user function. Returns null if the node is not a `$.call`
- * or its first arg is not an Identifier.
+ * fnRef name. Used to locate top-level invocations of a given user
+ * function. Returns null if the node is not a `$.call` or its first
+ * arg is not an Identifier / `$.get(Identifier, 0)`.
  */
 function dollarCallTarget(node: any): string | null {
     if (!node || node.type !== 'CallExpression') return null;
@@ -188,37 +234,73 @@ function dollarCallTarget(node: any): string | null {
     if (!callee || callee.type !== 'MemberExpression' || callee.computed) return null;
     if (callee.object?.type !== 'Identifier' || callee.object.name !== '$') return null;
     if (callee.property?.type !== 'Identifier' || callee.property.name !== 'call') return null;
-    const arg0 = node.arguments?.[0];
-    if (arg0?.type === 'Identifier' && typeof arg0.name === 'string') return arg0.name;
-    return null;
+    return dollarCallRefName(node.arguments?.[0]);
 }
 
 /**
- * Find the earliest top-level statement in `wrapperBody.body` whose
- * subtree contains a `$.call(<fnName>, ...)` invocation. Returns the
- * statement index, or -1 if no invocation is found.
- *
- * Skips the function declaration itself (a fn calling itself wouldn't
- * count — and would put us in recursion territory).
+ * Build the user-function call graph of the wrapper body: fnName →
+ * the set of user function names its body calls directly (via
+ * `$.call(fn, …)` / `$.call($.get(fn, 0), …)`). Used to decide which
+ * top-level statements can (transitively) invoke a given function.
  */
-function findEarliestInvocationIdx(wrapperBody: any, fnName: string, fnDeclNode: any): number {
-    const stmts: any[] = wrapperBody.body || [];
-    for (let i = 0; i < stmts.length; i++) {
-        const stmt = stmts[i];
-        if (stmt === fnDeclNode) continue;
-        if (subtreeContainsDollarCall(stmt, fnName)) return i;
+function buildWrapperCallGraph(wrapperBody: any): Map<string, Set<string>> {
+    const graph = new Map<string, Set<string>>();
+    for (const stmt of wrapperBody.body || []) {
+        if (!isFunctionLike(stmt) || stmt.type !== 'FunctionDeclaration' || !stmt.id?.name) continue;
+        // Methods (renamed variants included) collapse onto their Pine name —
+        // the same canonical form dollarCallRefName returns for `$.call` targets.
+        const name = canonicalFnName(stmt.id);
+        if (!name) continue;
+        const targets = new Set<string>();
+        const seen = new WeakSet<object>();
+        (function walk(n: any) {
+            if (!n || typeof n !== 'object') return;
+            if (seen.has(n)) return;
+            seen.add(n);
+            const t = dollarCallTarget(n);
+            if (t) targets.add(t);
+            for (const key of Object.keys(n)) {
+                if (AST_SKIP_KEYS.has(key)) continue;
+                const v = n[key];
+                if (Array.isArray(v)) {
+                    for (const item of v) walk(item);
+                } else if (v && typeof v === 'object') {
+                    walk(v);
+                }
+            }
+        })(stmt);
+        graph.set(name, targets);
     }
-    return -1;
+    return graph;
 }
 
-function subtreeContainsDollarCall(root: any, fnName: string): boolean {
+/**
+ * True if executing `stmt` can (transitively through user functions)
+ * invoke the user function `fnName` — the statement either calls it
+ * directly, or calls another user function whose body eventually
+ * calls it. Recursion-safe (visited set per `reaches` query).
+ */
+function statementReaches(stmt: any, fnName: string, graph: Map<string, Set<string>>): boolean {
+    const reachesFn = (name: string, visited: Set<string>): boolean => {
+        if (name === fnName) return true;
+        if (visited.has(name)) return false;
+        visited.add(name);
+        const targets = graph.get(name);
+        if (!targets) return false;
+        for (const t of targets) {
+            if (reachesFn(t, visited)) return true;
+        }
+        return false;
+    };
+
     let found = false;
     const seen = new WeakSet<object>();
-    function walk(n: any) {
+    (function walk(n: any) {
         if (found || !n || typeof n !== 'object') return;
         if (seen.has(n)) return;
         seen.add(n);
-        if (dollarCallTarget(n) === fnName) {
+        const t = dollarCallTarget(n);
+        if (t && reachesFn(t, new Set<string>())) {
             found = true;
             return;
         }
@@ -231,9 +313,34 @@ function subtreeContainsDollarCall(root: any, fnName: string): boolean {
                 walk(v);
             }
         }
-    }
-    walk(root);
+    })(stmt);
     return found;
+}
+
+/**
+ * Find the LAST top-level statement in `wrapperBody.body` whose
+ * execution can (transitively) invoke `fnName`. Returns -1 when no
+ * statement reaches the function.
+ *
+ * The Phase 3 slice must extend through EVERY runtime invocation of
+ * the function, not just the first: the runtime `_expression_name`
+ * is per-call-path (`$$.id + 'pN'`), so a slice that stops at the
+ * first invocation leaves `secContext.params[$$.id + 'pN']` empty
+ * for the later call sites — request.security then crashes reading
+ * `[0]` off `undefined`. Statement reachability is transitive: a
+ * statement that invokes a *wrapper* function whose body calls the
+ * target (e.g. `f_get_donchian()` → `f_secureSecurity()`) must be
+ * kept, and a nested function *declaration* whose body calls the
+ * target counts too (its invocation statements must be included for
+ * the nested calls to ever execute in the slice).
+ */
+function findLastReachingIdx(wrapperBody: any, fnName: string, graph: Map<string, Set<string>>): number {
+    const stmts: any[] = wrapperBody.body || [];
+    let last = -1;
+    for (let i = 0; i < stmts.length; i++) {
+        if (statementReaches(stmts[i], fnName, graph)) last = i;
+    }
+    return last;
 }
 
 /**
@@ -277,18 +384,29 @@ function buildPhase3SliceStmts(wrapperBody: any, path: any[]): any[] | null {
     // Only handle FunctionDeclarations — anonymous fn-expressions
     // can't be looked up by name in the call graph.
     if (fnNode.type !== 'FunctionDeclaration' || !fnNode.id?.name) return null;
-    const fnName = fnNode.id.name;
+    // Methods carry a `$M_` JS prefix and may have been renamed to a
+    // `$M_<name>_<ReceiverType>` variant — canonicalize to the Pine name
+    // so the reachability query matches the `$.call($M_<name>, …)`
+    // invocation targets (see canonicalFnName).
+    const fnName = canonicalFnName(fnNode.id);
+    if (!fnName) return null;
 
     // Slice the function's body at the call.
     const fnSlicePath = path.slice(fnIdx); // [fnDecl, fnDecl.body?, …, call]
     const slicedFn = sliceAlongPath(fnNode, fnSlicePath, 0);
 
-    // Find the earliest top-level invocation of this function.
-    const invIdx = findEarliestInvocationIdx(wrapperBody, fnName, fnNode);
-    if (invIdx < 0) return null;
+    // Keep every wrapper statement that can (transitively) invoke this
+    // function — the runtime expression name is per-call-path, so a
+    // slice ending at the FIRST invocation would leave the later call
+    // sites without their per-bar captured values in the secondary
+    // context (→ TypeError in request.security). Include all statements
+    // up to the LAST reaching one.
+    const graph = buildWrapperCallGraph(wrapperBody);
+    const lastReachingIdx = findLastReachingIdx(wrapperBody, fnName, graph);
+    if (lastReachingIdx < 0) return null;
 
-    // Build the wrapper.body slice: keep [0..invIdx] inclusive, with
-    // fnNode replaced by slicedFn. The fn declaration may sit AFTER
+    // Build the wrapper.body slice: keep [0..lastReachingIdx] inclusive,
+    // with fnNode replaced by slicedFn. The fn declaration may sit AFTER
     // the invocation in source order — when the fn is hoisted by the
     // pineToJS step. Handle either case:
     const stmts: any[] = wrapperBody.body || [];
@@ -296,7 +414,7 @@ function buildPhase3SliceStmts(wrapperBody: any, path: any[]): any[] | null {
     if (fnDeclIdx < 0) return null;
 
     const result: any[] = [];
-    const lastIdx = Math.max(invIdx, fnDeclIdx);
+    const lastIdx = Math.max(lastReachingIdx, fnDeclIdx);
     for (let i = 0; i <= lastIdx; i++) {
         const s = stmts[i];
         result.push(s === fnNode ? slicedFn : s);
