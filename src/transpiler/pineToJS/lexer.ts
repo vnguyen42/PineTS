@@ -253,8 +253,10 @@ export class Lexer {
      * with an infix operator, so this can never suppress a real block
      * indent: the only legitimate INDENT position is the first statement of
      * a block body, which always begins with a keyword, identifier, literal
-     * or opening bracket. The set mirrors what the parser's `peekOperatorEx`
-     * / `matchEx` continuation crosses NEWLINE for.
+     * or opening bracket — except a SIGNED NUMERIC LITERAL (`-1`, `+.5`),
+     * which is a statement start and excluded below. The set mirrors what
+     * the parser's `peekOperatorEx` / `matchEx` continuation crosses NEWLINE
+     * for.
      */
     private lineStartsWithInfixOperator(): boolean {
         const ch = this.peek();
@@ -281,7 +283,20 @@ export class Lexer {
 
         // Single-char infix operators. `!` is unary and excluded; `?` and `:`
         // are ternary continuations (`?` lexes as an OPERATOR, `:` as COLON).
-        if ('+-*/%=<>?:'.includes(ch)) return true;
+        if ('+-*/%=<>?:'.includes(ch)) {
+            // A `+`/`-` that starts a SIGNED NUMERIC LITERAL (a digit or `.`
+            // follows after optional spaces) is the first token of a new
+            // statement — e.g. an `if`/`else if` branch body `-1` — never a
+            // continuation. Real line continuations (1715/1761) resume with
+            // an operator followed by a string literal or identifier; a Pine
+            // statement can never start with a bare binary operator but CAN
+            // start with a signed literal.
+            if (ch === '+' || ch === '-') {
+                const rest = this.source.slice(this.pos + 1).replace(/^\s+/, '');
+                if (/^[\d.]/.test(rest)) return false;
+            }
+            return true;
+        }
 
         // Logical keywords `and` / `or` continue boolean expressions.
         if (ch === 'a' && this.source.startsWith('and', this.pos) && !this.isIdentifierChar(this.peek(3))) return true;
