@@ -1428,6 +1428,54 @@ export function transformCallExpression(node: any, scopeManager: ScopeManager, n
         // console.log('Arguments before:', node.arguments.map((a: any) => a.name));
     }
 
+    // Lower namespace-rooted member chains in the CALLEE position.
+    //
+    // transformMemberExpression's direct-namespace branch converts a single
+    // level (`ta.tr` → `ta.tr()`, `strategy.closedtrades` →
+    // `strategy.closedtrades()`) but only when the member's OBJECT is a plain
+    // Identifier. A two-level callee chain like
+    // `strategy.closedtrades.entry_time(0)` never reaches that branch (its
+    // object is a MemberExpression), `isNamespaceCall` below requires a
+    // direct Identifier namespace, and the method-on-variable branch only
+    // dispatches user UDT methods. The chain therefore stayed raw and ran
+    // `strategy.closedtrades.entry_time(...)` on the namespace FACTORY →
+    // "strategy.closedtrades.entry_time is not a function" (campaign cluster
+    // n=29: the strategy.{closedtrades,opentrades}.* per-trade getters used
+    // inside call arguments, user-function returns, and conditional/operator
+    // expressions — the statement-level positions only worked because the
+    // main walker happened to visit the inner member first).
+    //
+    // Fix: when the callee chain is rooted at a known Pine namespace, apply
+    // the same member lowering to every nested member so the namespace member
+    // becomes a call (`strategy.closedtrades().entry_time(0)`), reaching the
+    // runtime hybrid object (valueOf count + per-trade methods). Generic:
+    // covers the whole `closedtrades.*` / `opentrades.*` family plus any
+    // future nested namespace member — not method by method.
+    if (
+        node.callee &&
+        node.callee.type === 'MemberExpression' &&
+        !node.callee.computed &&
+        node.callee.object &&
+        node.callee.object.type === 'MemberExpression'
+    ) {
+        const chain: any[] = [];
+        let cursor: any = node.callee.object;
+        while (cursor && cursor.type === 'MemberExpression' && !cursor.computed) {
+            chain.unshift(cursor);
+            cursor = cursor.object;
+        }
+        if (
+            cursor &&
+            cursor.type === 'Identifier' &&
+            KNOWN_NAMESPACES.includes(cursor.name) &&
+            scopeManager.isContextBound(cursor.name)
+        ) {
+            for (const member of chain) {
+                transformMemberExpression(member, '', scopeManager);
+            }
+        }
+    }
+
     // Check if this is a direct call to a known namespace (e.g. input(...))
     if (
         node.callee &&
