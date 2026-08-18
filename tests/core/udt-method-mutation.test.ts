@@ -495,4 +495,70 @@ plot(aZZ.v, "v")
         // from 0 to 1. The last bar's plot value is what we check.
         expect(v?.[v.length - 1]?.value).toBe(1);
     });
+    it('retargets a direct UDT constructor method chain', async () => {
+        const code = `
+//@version=6
+indicator("direct UDT chain")
+type Foo
+    int value = 0
+method init(Foo this, int x) =>
+    this.value := x
+    this
+f = Foo.new().init(7)
+plot(f.value, "value")
+`;
+        const jsCode = transpile(code).toString();
+        expect(jsCode).toMatch(/\$\.call\(\$M_init\b/);
+
+        const { plots } = await makePineTS().run(code);
+        const values = plots['value']?.data ?? [];
+        expect(values.length).toBeGreaterThan(0);
+        expect(values[values.length - 1]?.value).toBe(7);
+    });
+
+    it('retargets a constructor-chain method in a ternary constructor argument', async () => {
+        const code = `
+//@version=6
+indicator("nested UDT chain")
+type Baz
+    int value = 0
+method init(Baz this) =>
+    this.value := 7
+    this
+type Bar
+    Baz child
+var Baz d = na
+var Bar bar = Bar.new(na(d) ? Baz.new().init() : d)
+plot(bar.child.value, "value")
+`;
+        const jsCode = transpile(code).toString();
+        expect(jsCode).toMatch(/\$\.call\(\$M_init\b/);
+
+        const { plots } = await makePineTS().run(code);
+        const values = plots['value']?.data ?? [];
+        expect(values.length).toBeGreaterThan(0);
+        expect(values[values.length - 1]?.value).toBe(7);
+    });
+
+    it('retargets a method after a direct UDT copy', async () => {
+        const code = `
+//@version=6
+indicator("copied UDT chain")
+type Foo
+    int value = 0
+method init(Foo this, int x) =>
+    this.value := x
+    this
+var Foo f = Foo.new(1)
+var Foo g = Foo.copy(f).init(2)
+plot(g.value, "value")
+`;
+        const jsCode = transpile(code).toString();
+        expect(jsCode).toMatch(/\$\.call\(\$M_init\b/);
+
+        const { plots } = await makePineTS().run(code);
+        const values = plots['value']?.data ?? [];
+        expect(values.length).toBeGreaterThan(0);
+        expect(values[values.length - 1]?.value).toBe(2);
+    });
 });

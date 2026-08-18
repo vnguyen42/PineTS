@@ -302,6 +302,43 @@ function collectReturnArguments(body: any): any[] {
 }
 
 /**
+ * Return the UDT type name for a direct `<UDT>.new(...)` or
+ * `<UDT>.copy(...)` call, or undefined for every other call shape.
+ *
+ * This deliberately only recognizes direct factory calls. Callers that need
+ * the broader initializer inference (user-function return types and
+ * conditionals) should use `inferUdtTypeFromInit` instead.
+ */
+export function inferDirectUdtFactoryType(init: unknown, scopeManager: ScopeManager): string | undefined {
+    if (!init || typeof init !== 'object') return undefined;
+
+    const candidate = init as {
+        type?: string;
+        callee?: {
+            type?: string;
+            computed?: boolean;
+            object?: { type?: string; name?: string };
+            property?: { type?: string; name?: string };
+        };
+    };
+    const objectName = candidate.callee?.object?.name;
+    const propertyName = candidate.callee?.property?.name;
+    if (
+        candidate.type === 'CallExpression' &&
+        candidate.callee?.type === 'MemberExpression' &&
+        !candidate.callee.computed &&
+        candidate.callee.object?.type === 'Identifier' &&
+        candidate.callee.property?.type === 'Identifier' &&
+        (propertyName === 'new' || propertyName === 'copy') &&
+        objectName &&
+        scopeManager.isUdtTypeName(objectName)
+    ) {
+        return objectName;
+    }
+    return undefined;
+}
+
+/**
  * Inspect an initializer expression and return the UDT type name if it
  * unambiguously resolves to a UDT instance — otherwise undefined.
  *
@@ -321,18 +358,8 @@ function collectReturnArguments(body: any): any[] {
 function inferUdtTypeFromInit(init: any, scopeManager: ScopeManager): string | undefined {
     if (!init) return undefined;
 
-    // `<UDT>.new(...)` / `<UDT>.copy(...)`
-    if (
-        init.type === 'CallExpression' &&
-        init.callee?.type === 'MemberExpression' &&
-        !init.callee.computed &&
-        init.callee.object?.type === 'Identifier' &&
-        init.callee.property?.type === 'Identifier' &&
-        (init.callee.property.name === 'new' || init.callee.property.name === 'copy') &&
-        scopeManager.isUdtTypeName(init.callee.object.name)
-    ) {
-        return init.callee.object.name;
-    }
+    const directFactoryType = inferDirectUdtFactoryType(init, scopeManager);
+    if (directFactoryType) return directFactoryType;
 
     // `<userFunc>(...)` — when the function's return type has been inferred
     // as a UDT (see Pass 1.5 in preProcessUdtRegistry).

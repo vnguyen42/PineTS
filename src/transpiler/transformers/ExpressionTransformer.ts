@@ -3,6 +3,7 @@
 
 import * as walk from 'acorn-walk';
 import ScopeManager from '../analysis/ScopeManager';
+import { inferDirectUdtFactoryType } from '../analysis/AnalysisPass';
 import { ASTFactory, CONTEXT_NAME } from '../utils/ASTFactory';
 import { KNOWN_NAMESPACES, NAMESPACES_LIKE, ASYNC_METHODS, CALLSITE_ID_NAMESPACES } from '../settings';
 
@@ -1889,6 +1890,11 @@ export function transformCallExpression(node: any, scopeManager: ScopeManager, n
         // For UDT-field chains (`self.schema.channelDesc`) the chain is walked
         // down to its base; the base name is preserved on the `$.get(self, 0)`
         // leaf (or is a plain Identifier when the chain was not yet lowered).
+        // Direct UDT factory calls (`Type.new(...)` / `Type.copy(...)`) are
+        // statically known to return a UDT instance. Other CallExpression
+        // receivers remain unknown: their return type is not available here.
+        const isDirectUdtFactory = _obj.type === 'CallExpression' &&
+            inferDirectUdtFactoryType(_obj, scopeManager) !== undefined;
         const receiverRootName = (() => {
             if (_obj.type === 'Identifier') return _obj.name;
             let cursor: any = _obj;
@@ -1897,7 +1903,8 @@ export function transformCallExpression(node: any, scopeManager: ScopeManager, n
             }
             return cursor && typeof cursor.name === 'string' ? cursor.name : null;
         })();
-        const isReceiverUdtInstance = !!receiverRootName && scopeManager.isUdtInstance(receiverRootName);
+        const isReceiverUdtInstance = isDirectUdtFactory ||
+            (!!receiverRootName && scopeManager.isUdtInstance(receiverRootName));
 
         // Guard: if the callee object is a MemberExpression (property chain like
         // aZZ.x.set(0, val)), this is a method call on a sub-property, NOT a user
@@ -2038,14 +2045,18 @@ export function transformCallExpression(node: any, scopeManager: ScopeManager, n
                     c(node.argument, newState);
                 },
                 CallExpression(node: any, state: any, c: any) {
-                    // Traverse callee chain to resolve inner identifiers (e.g. obj.get(i).out.avg())
+                    // Transform the call before descending into its receiver.
+                    // For `Type.new().init()` nested in another call's args,
+                    // descending first lowers `Type.new()` to `$.get(...).new?.()`
+                    // and hides the direct UDT factory shape from the receiver
+                    // predicate. The call transformer already handles its own
+                    // arguments, so the existing traversal remains complete.
+                    if (!node._transformed) {
+                        transformCallExpression(node, scopeManager);
+                    }
                     if (node.callee && node.callee.type === 'MemberExpression' && node.callee.object) {
                         node.callee.object.parent = node.callee;
                         c(node.callee.object, { parent: node.callee });
-                    }
-                    if (!node._transformed) {
-                        // First transform the call expression itself
-                        transformCallExpression(node, scopeManager);
                     }
                 },
                 MemberExpression(node: any, state: any, c: any) {
