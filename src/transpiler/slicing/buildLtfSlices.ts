@@ -5,11 +5,11 @@
  * LTF / HTF request slicing — Phases 1 + 2 + 3.
  *
  * For every `request.security_lower_tf` (and `request.security`) call
- * site in the post-transpile AST, build a "slice" — a pre-built async
- * JavaScript Function whose body is a *path-projection* of the user's
- * code: every statement on the execution chain that leads to the call,
- * with sibling/post-call statements dropped at every nesting level.
- *
+ * site in the post-transpile AST, build a pre-built async JavaScript
+ * Function. Phase 1 + 2 use a path-projection of the statements that
+ * lead to the call; Phase 3 keeps the complete invoking statement and
+ * removes only consumers of the truncated function return.
+
  * Coverage:
  *   - Phase 1 — call at top level of the wrapper function.
  *   - Phase 2 — call nested inside `if` / `for` / `while` / `do-while`
@@ -17,7 +17,7 @@
  *   - Phase 3 — call inside a user-defined function (or UDT method —
  *     methods compile to regular FunctionDeclarations). Slice
  *     preserves the function definition with its body truncated at
- *     the call, plus the EARLIEST top-level statement that invokes
+ *     the call, plus the LAST top-level statement that invokes
  *     that function. Multi-level nesting (A→B→C with the call inside
  *     C, only B called from top level) is currently NOT handled
  *     specially; in that case the runtime falls back to today's
@@ -275,24 +275,30 @@ function buildWrapperCallGraph(wrapperBody: any): Map<string, Set<string>> {
 }
 
 /**
+ * True if executing user function `name` can (transitively) invoke
+ * user function `target` — `name` either is `target`, or its body
+ * calls another user function whose body eventually calls `target`.
+ * Recursion-safe via the shared `visited` set.
+ */
+function fnReachesTarget(name: string, target: string, graph: Map<string, Set<string>>, visited: Set<string> = new Set()): boolean {
+    if (name === target) return true;
+    if (visited.has(name)) return false;
+    visited.add(name);
+    const targets = graph.get(name);
+    if (!targets) return false;
+    for (const t of targets) {
+        if (fnReachesTarget(t, target, graph, visited)) return true;
+    }
+    return false;
+}
+
+/**
  * True if executing `stmt` can (transitively through user functions)
  * invoke the user function `fnName` — the statement either calls it
  * directly, or calls another user function whose body eventually
  * calls it. Recursion-safe (visited set per `reaches` query).
  */
 function statementReaches(stmt: any, fnName: string, graph: Map<string, Set<string>>): boolean {
-    const reachesFn = (name: string, visited: Set<string>): boolean => {
-        if (name === fnName) return true;
-        if (visited.has(name)) return false;
-        visited.add(name);
-        const targets = graph.get(name);
-        if (!targets) return false;
-        for (const t of targets) {
-            if (reachesFn(t, visited)) return true;
-        }
-        return false;
-    };
-
     let found = false;
     const seen = new WeakSet<object>();
     (function walk(n: any) {
@@ -300,7 +306,7 @@ function statementReaches(stmt: any, fnName: string, graph: Map<string, Set<stri
         if (seen.has(n)) return;
         seen.add(n);
         const t = dollarCallTarget(n);
-        if (t && reachesFn(t, new Set<string>())) {
+        if (t && fnReachesTarget(t, fnName, graph)) {
             found = true;
             return;
         }
@@ -315,6 +321,187 @@ function statementReaches(stmt: any, fnName: string, graph: Map<string, Set<stri
         }
     })(stmt);
     return found;
+}
+
+/**
+ * Walk only the executable representation of the generated AST. Tuple
+ * destructuring carries vestigial `declarations` / `kind` fields beside
+ * the `body` / `expression` that astring actually emits; following those
+ * fields would find a call on the wrong chain.
+ */
+function walkExecutableAst(root: any, visit: (node: any) => void): void {
+    const seen = new WeakSet<object>();
+    (function walk(node: any): void {
+        if (!node || typeof node !== 'object') return;
+        if (seen.has(node)) return;
+        seen.add(node);
+        visit(node);
+        for (const key of Object.keys(node)) {
+            if (AST_SKIP_KEYS.has(key)) continue;
+            if ((key === 'declarations' || key === 'kind') && (node.body !== undefined || node.expression !== undefined)) continue;
+            const value = node[key];
+            if (Array.isArray(value)) {
+                for (const item of value) walk(item);
+            } else if (value && typeof value === 'object') {
+                walk(value);
+            }
+        }
+    })(root);
+}
+
+/** Canonical key for a non-computed member chain such as `$.let.temp`. */
+function memberChainKey(node: any): string | null {
+    const parts: string[] = [];
+    let current = node;
+    while (current?.type === 'MemberExpression' &&
+           !current.computed &&
+           current.property?.type === 'Identifier') {
+        parts.unshift(current.property.name);
+        current = current.object;
+    }
+    if (current?.type !== 'Identifier' || parts.length === 0) return null;
+    parts.unshift(current.name);
+    return parts.join('.');
+}
+
+function isDollarMethodCall(node: any, method: string): boolean {
+    return node?.type === 'CallExpression' &&
+        node.callee?.type === 'MemberExpression' &&
+        !node.callee.computed &&
+        node.callee.object?.type === 'Identifier' &&
+        node.callee.object.name === '$' &&
+        node.callee.property?.type === 'Identifier' &&
+        node.callee.property.name === method;
+}
+
+function containsReachingCall(node: any, fnName: string, graph: Map<string, Set<string>>): boolean {
+    let found = false;
+    walkExecutableAst(node, (candidate) => {
+        const target = dollarCallTarget(candidate);
+        if (target && fnReachesTarget(target, fnName, graph)) found = true;
+    });
+    return found;
+}
+
+/**
+ * Locate the series slots that hold returns from calls to the truncated
+ * function. A tuple assignment is emitted as
+ * `$.let.temp = $.init($.let.temp, await $.call(fn, ...))`; only later
+ * `$.get($.let.temp, 0)[i]` statements consume that return.
+ */
+function findTruncatedReturnTemps(stmt: any, fnName: string, graph: Map<string, Set<string>>): Set<string> {
+    const temps = new Set<string>();
+    walkExecutableAst(stmt, (node) => {
+        if (!isDollarMethodCall(node, 'init')) return;
+        const temp = memberChainKey(node.arguments?.[0]);
+        const value = node.arguments?.[1];
+        if (temp && value && containsReachingCall(value, fnName, graph)) temps.add(temp);
+    });
+    return temps;
+}
+
+function containsTruncatedReturnRead(node: any, temps: Set<string>): boolean {
+    let found = false;
+    walkExecutableAst(node, (candidate) => {
+        if (!isDollarMethodCall(candidate, 'get')) return;
+        const temp = memberChainKey(candidate.arguments?.[0]);
+        if (temp && temps.has(temp)) found = true;
+    });
+    return found;
+}
+
+/**
+ * A direct consumer is a statement whose own expression reads a truncated
+ * return. Container statements are kept so their tests and non-consuming
+ * branches can be traversed and preserved. Generated tuple consumers are
+ * standalone assignment statements; a future mixed-effect consumer is
+ * conservatively removed as one statement rather than partially rewritten.
+ */
+function isTruncatedReturnConsumer(stmt: any, temps: Set<string>): boolean {
+    if (!stmt || typeof stmt !== 'object') return false;
+    switch (stmt.type) {
+        case 'BlockStatement':
+        case 'FunctionDeclaration':
+        case 'FunctionExpression':
+        case 'ArrowFunctionExpression':
+        case 'IfStatement':
+        case 'ForStatement':
+        case 'WhileStatement':
+        case 'DoWhileStatement':
+        case 'ForInStatement':
+        case 'ForOfStatement':
+        case 'SwitchStatement':
+        case 'SwitchCase':
+        case 'TryStatement':
+        case 'LabeledStatement':
+            return false;
+        default:
+            return containsTruncatedReturnRead(stmt, temps);
+    }
+}
+
+function removeTruncatedReturnConsumers(node: any, temps: Set<string>): any {
+    if (!node || typeof node !== 'object' || temps.size === 0) return node;
+    switch (node.type) {
+        case 'BlockStatement':
+            return {
+                ...node,
+                body: (node.body || [])
+                    .filter((stmt: any) => !isTruncatedReturnConsumer(stmt, temps))
+                    .map((stmt: any) => removeTruncatedReturnConsumers(stmt, temps)),
+            };
+        // A kept function whose body destructures the truncated fn's return
+        // carries the same dead temp reads one nesting level deeper (probe C:
+        // `outer()` destructures `inner()`'s truncated return). Recurse into
+        // the body — expression-bodied arrows fall through to the default
+        // (kept whole), matching the conservative container policy.
+        case 'FunctionDeclaration':
+        case 'FunctionExpression':
+        case 'ArrowFunctionExpression':
+            return { ...node, body: removeTruncatedReturnConsumers(node.body, temps) };
+        case 'IfStatement':
+            return {
+                ...node,
+                consequent: removeTruncatedReturnConsumers(node.consequent, temps),
+                alternate: node.alternate ? removeTruncatedReturnConsumers(node.alternate, temps) : node.alternate,
+            };
+        case 'ForStatement':
+        case 'WhileStatement':
+        case 'DoWhileStatement':
+        case 'ForInStatement':
+        case 'ForOfStatement':
+            return { ...node, body: removeTruncatedReturnConsumers(node.body, temps) };
+        case 'SwitchStatement':
+            return {
+                ...node,
+                cases: (node.cases || []).map((caseNode: any) => removeTruncatedReturnConsumers(caseNode, temps)),
+            };
+        case 'SwitchCase':
+            return {
+                ...node,
+                consequent: (node.consequent || [])
+                    .filter((stmt: any) => !isTruncatedReturnConsumer(stmt, temps))
+                    .map((stmt: any) => removeTruncatedReturnConsumers(stmt, temps)),
+            };
+        case 'TryStatement':
+            return {
+                ...node,
+                block: removeTruncatedReturnConsumers(node.block, temps),
+                handler: node.handler
+                    ? { ...node.handler, body: removeTruncatedReturnConsumers(node.handler.body, temps) }
+                    : node.handler,
+                finalizer: node.finalizer ? removeTruncatedReturnConsumers(node.finalizer, temps) : node.finalizer,
+            };
+        case 'LabeledStatement':
+            return { ...node, body: removeTruncatedReturnConsumers(node.body, temps) };
+        default:
+            return node;
+    }
+}
+
+function stripTruncatedReturnConsumers(stmt: any, fnName: string, graph: Map<string, Set<string>>): any {
+    const temps = findTruncatedReturnTemps(stmt, fnName, graph);
+    return temps.size > 0 ? removeTruncatedReturnConsumers(stmt, temps) : stmt;
 }
 
 /**
@@ -350,12 +537,14 @@ function findLastReachingIdx(wrapperBody: any, fnName: string, graph: Map<string
  *   1. The call's path = [wrapperBody, …, fnDecl, fnDecl.body, …, call].
  *   2. Slice fnDecl.body at the call (using sliceAlongPath rooted at
  *      fnDecl).
- *   3. Find the earliest top-level statement that invokes fnDecl via
+ *   3. Find the LAST top-level statement that invokes fnDecl via
  *      `$.call(fnDecl.id, …)`. If none, bail (defensive — shouldn't
  *      happen in practice).
- *   4. Build the wrapper-body slice: keep statements [0..invIdx]
- *      inclusive, with fnDecl swapped for its sliced version. The
- *      kept statements include any `var` instance initializers the
+ *   4. Build the wrapper-body slice: keep statements [0..lastIdx]
+ *      inclusive, with fnDecl swapped for its sliced version. Within
+ *      those statements, remove only reads of the truncated return;
+ *      invocation branches and non-consuming side effects stay intact.
+ *      The kept statements include any `var` instance initializers the
  *      method needs (e.g. `var Counter c = Counter.new()`), preserving
  *      the var-once semantics observed in TV (Probe 3).
  *
@@ -417,7 +606,14 @@ function buildPhase3SliceStmts(wrapperBody: any, path: any[]): any[] | null {
     const lastIdx = Math.max(lastReachingIdx, fnDeclIdx);
     for (let i = 0; i <= lastIdx; i++) {
         const s = stmts[i];
-        result.push(s === fnNode ? slicedFn : s);
+        if (s === fnNode) {
+            result.push(slicedFn);
+            continue;
+        }
+        // Preserve the invocation and every non-consuming side effect in a
+        // kept statement. Remove only reads from the truncated return value
+        // (the tuple-consumer statements that would otherwise index undefined).
+        result.push(stripTruncatedReturnConsumers(s, fnName, graph));
     }
     return result;
 }
