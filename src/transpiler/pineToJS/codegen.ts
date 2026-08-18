@@ -20,6 +20,10 @@ export class CodeGenerator {
     private lastCommentedLine: number;
     private includeSourceComments: boolean;
     private paramRenameCounter: number;
+    // Set once a Pine discard identifier `_` has been emitted (tuple
+    // destructuring). Later `_` occurrences are renamed to unique bindings
+    // (see writeArrayPatternElements).
+    private discardSeen: boolean;
     // Maps user-defined function names to their ordered parameter names.
     // Used to resolve named arguments to correct positional slots.
     private functionParams: Map<string, string[]>;
@@ -32,6 +36,7 @@ export class CodeGenerator {
         this.lastCommentedLine = -1;
         this.includeSourceComments = options.includeSourceComments || false; // default false
         this.paramRenameCounter = 0;
+        this.discardSeen = false;
         this.functionParams = new Map();
     }
 
@@ -114,6 +119,47 @@ export class CodeGenerator {
      */
     private isReservedName(name: string | undefined): boolean {
         return !!name && (NAMESPACE_COLLISION_NAMES.has(name) || JS_RESERVED_WORDS.has(name));
+    }
+
+    /**
+     * Write an ArrayPattern (`[a, b, c]`) for a tuple destructuring, emitting
+     * unique JS bindings for Pine's discard identifier `_`.
+     *
+     * Pine allows re-declaring `_` any number of times in the same scope
+     * (TV docs: "Using an underscore as an identifier") — each occurrence is
+     * a throwaway slot that is never referenced afterwards. JS forbids
+     * duplicate names inside one destructuring and duplicate `let` bindings
+     * in one scope, so every occurrence after the first is emitted under a
+     * fresh `_$<n>` name. The `$` character cannot appear in Pine
+     * identifiers, so `_$<n>` can never collide with (or shadow) a user
+     * variable — unlike a bare counter scheme (`_0`, `_1`, …) which would
+     * silently rebind user variables named like the counter. The original
+     * AST is left untouched: the renamed binding is only used for emission
+     * and nothing downstream reads it back. Duplicate non-discard names
+     * within a single pattern (invalid Pine, tolerated here) keep the
+     * pre-existing suffix-rename behavior.
+     */
+    private writeArrayPatternElements(elements: any[]): void {
+        const seen = new Set<string>();
+        this.write('[');
+        for (let j = 0; j < elements.length; j++) {
+            const original = elements[j].name;
+            let name = original;
+            if (original === '_') {
+                if (seen.has('_') || this.discardSeen) {
+                    name = `_$${this.paramRenameCounter++}`;
+                }
+                this.discardSeen = true;
+            } else if (seen.has(original)) {
+                name = `${original}${this.paramRenameCounter++}`;
+            }
+            seen.add(name);
+            this.write(name);
+            if (j < elements.length - 1) {
+                this.write(', ');
+            }
+        }
+        this.write(']');
     }
 
     /**
@@ -690,24 +736,10 @@ export class CodeGenerator {
             if (decl.id.type === 'Identifier') {
                 this.write(decl.id.name);
             } else if (decl.id.type === 'ArrayPattern') {
-                // Tuple destructuring — deduplicate discard placeholders like `_`
-                // Pine Script allows [a, _, _] but JS forbids duplicate names in destructuring
-                const seen = new Set<string>();
-                this.write('[');
-                for (let j = 0; j < decl.id.elements.length; j++) {
-                    let name = decl.id.elements[j].name;
-                    if (seen.has(name)) {
-                        const unique = `${name}${this.paramRenameCounter++}`;
-                        decl.id.elements[j].name = unique;
-                        name = unique;
-                    }
-                    seen.add(name);
-                    this.write(name);
-                    if (j < decl.id.elements.length - 1) {
-                        this.write(', ');
-                    }
-                }
-                this.write(']');
+                // Tuple destructuring — see writeArrayPatternElements: Pine's
+                // discard `_` may be re-declared in the same scope, so each
+                // occurrence after the first gets a unique JS binding.
+                this.writeArrayPatternElements(decl.id.elements);
             }
 
             if (decl.init) {
@@ -1095,23 +1127,9 @@ export class CodeGenerator {
                 if (decl.id.type === 'Identifier') {
                     this.write(decl.id.name);
                 } else if (decl.id.type === 'ArrayPattern') {
-                    // Destructuring: [a, b] — deduplicate discard placeholders
-                    const seen = new Set<string>();
-                    this.write('[');
-                    for (let i = 0; i < decl.id.elements.length; i++) {
-                        let name = decl.id.elements[i].name;
-                        if (seen.has(name)) {
-                            const unique = `${name}${this.paramRenameCounter++}`;
-                            decl.id.elements[i].name = unique;
-                            name = unique;
-                        }
-                        seen.add(name);
-                        this.write(name);
-                        if (i < decl.id.elements.length - 1) {
-                            this.write(', ');
-                        }
-                    }
-                    this.write(']');
+                    // Destructuring: [a, b] — same discard-`_` uniqueness as
+                    // tuple declarations (see writeArrayPatternElements).
+                    this.writeArrayPatternElements(decl.id.elements);
                 }
 
                 this.write(' of ');
