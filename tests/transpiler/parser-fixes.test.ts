@@ -2024,3 +2024,76 @@ plot(flip(true) == label.style_label_down ? 1 : 0, "ok")
         expect(okEntries.length).toBeGreaterThan(0);
     });
 });
+
+// ---------------------------------------------------------------------------
+// Single-Line Function Bodies (declaration / sequence / expression)
+// ---------------------------------------------------------------------------
+// TV docs user-defined-functions #single-line-functions : la grammaire d'un
+// corps mono-ligne est `<functionHeader> => {statement, }<returnExpression>` —
+// pas seulement une expression nue. Un corps `f(x) => y = x * 2` est une
+// déclaration locale dont la valeur (y) est la valeur de retour du call-site.
+// La branche sans INDENT de parseFunctionBody jetait sur le `=` restant
+// (parseExpression ne consomme que l'identifiant) → TRANSPILE_CRASH.
+describe('Single-Line Function Bodies', () => {
+    it('should transpile a single-line declaration body and return the declared value (runtime)', async () => {
+        const pineTS = new PineTS(Provider.Mock, 'BTCUSDC', 'D', null, new Date('2024-01-01').getTime(), new Date('2024-01-10').getTime());
+        const code = `
+//@version=5
+indicator("SingleLine Decl Body")
+
+f(x) => y = x * 2
+
+plot(f(21), "result")
+`;
+        const { plots } = await pineTS.run(code);
+        const data = plots['result']?.data || [];
+        expect(data.length).toBeGreaterThan(0);
+        // Chaque barre : le call-site reçoit bien la valeur de la déclaration y.
+        const vals = new Set(data.map((e: any) => e.value));
+        expect(vals.has(42)).toBe(true);
+        expect(vals.has(undefined)).toBe(false);
+    });
+
+    it('should transpile a single-line comma sequence body returning the last declared value (runtime)', () => {
+        const pineTS = new PineTS(Provider.Mock, 'BTCUSDC', 'D', null, new Date('2024-01-01').getTime(), new Date('2024-01-10').getTime());
+        const code = `
+//@version=5
+indicator("SingleLine Seq Body")
+
+f(x) => a = x + 1, b = a * 2
+
+plot(f(10), "result")
+`;
+        return pineTS.run(code).then(({ plots }) => {
+            const data = plots['result']?.data || [];
+            expect(data.length).toBeGreaterThan(0);
+            // Dernier declarator de la séquence : (10 + 1) * 2 = 22.
+            const vals = new Set(data.map((e: any) => e.value));
+            expect(vals.has(22)).toBe(true);
+        });
+    });
+
+    it('should keep a single-line naked expression body byte-identical', () => {
+        const code = `
+//@version=5
+indicator("SingleLine Expr Body")
+
+double(x) => x * 2
+neg(x) => -x
+sel(x, y) => x > 0 ? x : y
+
+plot(double(2))
+plot(neg(1))
+plot(sel(1, 2))
+`;
+        const pine2js = pineToJS(code);
+        expect(pine2js.success).toBe(true);
+        // Un corps expression nue doit rester un ReturnStatement direct —
+        // jamais un ExpressionStatement suivi d'un return séparé. Le chemin
+        // parseStatementOrSequence → _addImplicitReturn doit produire
+        // exactement `return <expr>;` pour chaque fonction mono-ligne.
+        expect(pine2js.code).toContain('function double(x) {\n  return x * 2;\n}');
+        expect(pine2js.code).toContain('function neg(x) {\n  return -x;\n}');
+        expect(pine2js.code).toContain('function sel(x, y) {\n  return (x > 0 ? x : y);\n}');
+    });
+});

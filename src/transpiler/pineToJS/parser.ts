@@ -1143,8 +1143,22 @@ export class Parser {
 
         // Check if it's a single expression (no INDENT)
         if (!this.match(TokenType.INDENT)) {
-            const expr = this.parseExpression();
-            return new BlockStatement([new ReturnStatement(expr)]);
+            // Un corps mono-ligne peut être une déclaration locale
+            // (`f(x) => y = x * 2`, séquences à virgules) et pas seulement une
+            // expression nue (docs user-defined-functions #single-line-functions :
+            // `<functionHeader> => {statement, }<returnExpression>`). Le chemin
+            // parseExpression jetait sur le `=` restant. parseStatementOrSequence
+            // gère les deux ; _addImplicitReturn rend la dernière valeur.
+            const stmts = this.parseStatementOrSequence();
+            if (Array.isArray(stmts)) {
+                statements.push(...stmts);
+            } else if (stmts) {
+                statements.push(stmts);
+            }
+            if (statements.length > 0) {
+                this._addImplicitReturn(statements);
+            }
+            return new BlockStatement(statements);
         }
 
         this.advance(); // consume INDENT
