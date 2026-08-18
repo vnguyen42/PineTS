@@ -15,25 +15,37 @@ export class TableHelper {
 
     private _ensurePlotsEntry() {
         if (!this.context.plots['__tables__']) {
-            this.context.plots['__tables__'] = {
+            const helper = this;
+            // Lazy serialization. TV only displays a table's LAST state, and no
+            // consumer reads __tables__ mid-run (scanner/audit exclude `__*`
+            // channels; diff-engine compares final output vs the reference,
+            // which serializes identically). Rebuilding the full cell grid on
+            // every bar was O(bars × cells) — a 200-row table got re-serialized
+            // once per bar. The getter produces the byte-identical final shape
+            // once, on first read after the run. Key order (title, data,
+            // options) matches the reference 0.9.31 output exactly.
+            const entry: any = {
                 title: '__tables__',
-                data: [],
+                get data() {
+                    return [{
+                        time: helper.context.marketData[0]?.openTime || 0,
+                        value: helper._tables.map(tbl => tbl.toPlotData()),
+                        options: { style: 'table' },
+                    }];
+                },
                 options: { style: 'table', overlay: true },
             };
+            this.context.plots['__tables__'] = entry;
         }
     }
 
     public syncToPlot() {
         this._ensurePlotsEntry();
-        const time = this.context.marketData[0]?.openTime || 0;
         // Compact out deleted tables — bounded array (RC3), transparent output;
         // rollbackFromBar filters by _createdAtBar, orthogonal to _deleted.
+        // The serialized payload is produced lazily on read (_ensurePlotsEntry
+        // getter), so this stays O(#tables) per bar instead of O(#tables × cells).
         this._tables = this._tables.filter(tbl => !tbl._deleted);
-        this.context.plots['__tables__'].data = [{
-            time,
-            value: this._tables.map(tbl => tbl.toPlotData()),
-            options: { style: 'table' },
-        }];
     }
 
     private _resolve(val: any): any {
