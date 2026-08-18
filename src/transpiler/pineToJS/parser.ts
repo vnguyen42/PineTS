@@ -647,6 +647,16 @@ export class Parser {
 
                 name = this.expectIdentifierOrContextual().value;
             } else {
+                // Multi-qualifier types (`var const string x = ...`,
+                // `var series float y = ...`): `const`/`simple`/`series`/`input`
+                // are plain IDENTIFIER tokens, so reading one word as the type
+                // and the next as the name would misparse `string` as the name
+                // and then fail on the real one — "Expected OPERATOR but got
+                // IDENTIFIER". Accumulate every IDENTIFIER run that ends at '='
+                // as type qualifiers, mirroring parseTypedVarDeclaration.
+                while (this.peek().type === TokenType.IDENTIFIER && this.peek(1).type === TokenType.IDENTIFIER) {
+                    varType += ' ' + this.advance().value;
+                }
                 name = this.expectIdentifierOrContextual().value;
             }
         } else if (this.peek().type === TokenType.IDENTIFIER) {
