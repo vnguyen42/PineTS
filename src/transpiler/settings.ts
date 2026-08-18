@@ -150,6 +150,12 @@ export const NAMESPACE_COLLISION_NAMES = new Set([
     'log',
     'str',
     'runtime',
+    // Table-position constants namespace (position.top_right, …), member
+    // access only — same class as size/location. Without the rename, a user
+    // function named `position` (script 2013) keeps the InjectionTransformer
+    // from destructuring the namespace, and the member root then fails at
+    // runtime with 'position is not defined'.
+    'position',
     // Global drawing builtins (bar/bg coloring). A user variable named
     // `barcolor`/`bgcolor` (e.g. `barcolor = close > open`) must be renamed
     // so the builtin call sites keep resolving to the injected binding —

@@ -41,6 +41,14 @@ export class Parser {
     private tokens: Token[];
     private pos: number;
     private functionNames: Set<string> = new Set();
+    // Names of user variables that were actually renamed to `<name>_var` at a
+    // declaration site because they shadow a user function. References are
+    // renamed to match ONLY for these names — the blanket rule (rename any
+    // non-call identifier matching a function name) also hit namespace member
+    // roots (`position.top_right` with a user `position()` function → phantom
+    // `position_var` → ReferenceError). Namespace roots are never declared, so
+    // they never enter this set and keep resolving to `$.pine`.
+    private varShadowNames: Set<string> = new Set();
     // Stack of parameter-name sets for currently-being-parsed function bodies.
     // When the body of fn `f(x, y) =>` is being parsed, the top frame is {x, y}.
     // Used to suppress the `name → name_var` rewrite for identifiers that are
@@ -54,6 +62,57 @@ export class Parser {
     constructor(tokens: Token[]) {
         this.tokens = tokens;
         this.pos = 0;
+        this.preScanFunctionNames();
+    }
+
+    // Pre-scan every token for function declaration signatures —
+    // `[type] name(...) =>` — so `name` is registered in functionNames even
+    // when its declaration comes AFTER variables that share the name. Pine
+    // allows both declaration orders (TV scripts like 2148 declare the
+    // variable first); without the pre-scan, a var declared before its
+    // same-named function is never renamed and the generated JS collides at
+    // the acorn stage ("Identifier 'X' has already been declared"). Mirrors
+    // isFunctionDeclaration's lookahead (optional return type, paren
+    // matching, `=>` after optional newlines).
+    private preScanFunctionNames(): void {
+        const toks = this.tokens;
+        for (let i = 0; i < toks.length; i++) {
+            if (toks[i].type !== TokenType.IDENTIFIER) continue;
+            // Member property calls (`obj.name(`) are not declarations.
+            if (i > 0 && toks[i - 1].type === TokenType.DOT) continue;
+            // Optional return type: `float name(` — the second IDENT is the name.
+            let nameIdx = i;
+            if (toks[i + 1] && toks[i + 1].type === TokenType.IDENTIFIER) nameIdx = i + 1;
+            // Method declarations (`method name(` / `method retType name(`)
+            // are NOT pre-scanned: the codegen prefixes them with `$M_`
+            // (collision-proof by construction) and the sequential parser
+            // never added them to functionNames either — adding them here
+            // would rename unrelated locals that merely share a method's
+            // name (e.g. `float atr = b.atr(len)` with a `method atr`).
+            if (toks[nameIdx - 1]?.type === TokenType.KEYWORD && toks[nameIdx - 1]?.value === 'method') continue;
+            if (
+                toks[nameIdx - 1]?.type === TokenType.IDENTIFIER &&
+                toks[nameIdx - 2]?.type === TokenType.KEYWORD &&
+                toks[nameIdx - 2]?.value === 'method'
+            ) continue;
+            if (!toks[nameIdx + 1] || toks[nameIdx + 1].type !== TokenType.LPAREN) continue;
+            // Find the matching `)`.
+            let depth = 0;
+            let j = nameIdx + 1;
+            for (; j < toks.length; j++) {
+                if (toks[j].type === TokenType.LPAREN) depth++;
+                else if (toks[j].type === TokenType.RPAREN) {
+                    depth--;
+                    if (depth === 0) break;
+                }
+            }
+            if (j >= toks.length) continue;
+            j++;
+            while (toks[j] && toks[j].type === TokenType.NEWLINE) j++;
+            if (toks[j] && toks[j].type === TokenType.OPERATOR && toks[j].value === '=>') {
+                this.functionNames.add(toks[nameIdx].value);
+            }
+        }
     }
 
     // Utility methods
@@ -67,6 +126,38 @@ export class Parser {
     private isCurrentFunctionParam(name: string): boolean {
         for (const frame of this.paramScopes) {
             if (frame.has(name)) return true;
+        }
+        return false;
+    }
+
+    /**
+     * Promote a simple `name = expr` statement to a variable declaration,
+     * applying the function-shadow rename + tracking. The identifier was
+     * parsed by parsePrimary, which only renames shadowing names already in
+     * varShadowNames; registering the rename here keeps the declaration and
+     * its references consistent (mirrors the typed/var declaration paths).
+     */
+    private assignmentToDeclaration(expr: any, right: any): VariableDeclaration {
+        if (this.functionNames.has(expr.name)) {
+            this.varShadowNames.add(expr.name);
+            expr.name = expr.name + '_var';
+        }
+        return new VariableDeclaration([new VariableDeclarator(expr, right)], VariableDeclarationKind.LET);
+    }
+
+    /**
+     * True when the next token starts on a different line than the last
+     * content token (skipping NEWLINE/COMMENT/INDENT/DEDENT layout tokens).
+     * Pine statements end at newlines, so a continuation token (`(`, `.`,
+     * `[`, `<`) that begins on a new line — e.g. right after a DEDENT —
+     * belongs to the NEXT statement, not to the current expression.
+     */
+    private isOnNewLine(): boolean {
+        const next = this.peek();
+        for (let i = this.pos - 1; i >= 0; i--) {
+            const t = this.tokens[i];
+            if (t.type === TokenType.NEWLINE || t.type === TokenType.COMMENT || t.type === TokenType.INDENT || t.type === TokenType.DEDENT) continue;
+            return t.line !== next.line;
         }
         return false;
     }
@@ -344,7 +435,7 @@ export class Parser {
 
                     // Simple assignment with = creates variable declaration
                     if (op === '=' && expr.type === 'Identifier') {
-                        stmt = new VariableDeclaration([new VariableDeclarator(expr, right)], VariableDeclarationKind.LET);
+                        stmt = this.assignmentToDeclaration(expr, right);
                     } else {
                         // Other assignments
                         stmt = new ExpressionStatement(new AssignmentExpression(op === ':=' ? '=' : op, expr, right));
@@ -667,6 +758,7 @@ export class Parser {
         }
 
         if (this.functionNames.has(name)) {
+            this.varShadowNames.add(name);
             name = name + '_var';
         }
 
@@ -806,6 +898,7 @@ export class Parser {
 
         let name = this.expectIdentifierOrContextual().value;
         if (this.functionNames.has(name)) {
+            this.varShadowNames.add(name);
             name = name + '_var';
         }
 
@@ -838,6 +931,7 @@ export class Parser {
             this.skipNewlines(true);
             let nextName = this.expectIdentifierOrContextual().value;
             if (this.functionNames.has(nextName)) {
+                this.varShadowNames.add(nextName);
                 nextName = nextName + '_var';
             }
             this.expect(TokenType.OPERATOR, '=');
@@ -1179,7 +1273,7 @@ export class Parser {
                                 this.skipNewlines(true);
                                 const right = this.parseExpression();
                                 if (op === '=' && expr.type === 'Identifier') {
-                                    declarations.push(new VariableDeclaration([new VariableDeclarator(expr, right)], VariableDeclarationKind.LET));
+                                    declarations.push(this.assignmentToDeclaration(expr, right));
                                 } else {
                                     declarations.push(new ExpressionStatement(new AssignmentExpression(op === ':=' ? '=' : op, expr, right)));
                                 }
@@ -1212,7 +1306,7 @@ export class Parser {
 
                     // Simple assignment with = creates variable declaration
                     if (op === '=' && expr.type === 'Identifier') {
-                        sequenceItems.push(new VariableDeclaration([new VariableDeclarator(expr, right)], VariableDeclarationKind.LET));
+                        sequenceItems.push(this.assignmentToDeclaration(expr, right));
                     } else {
                         sequenceItems.push(new ExpressionStatement(new AssignmentExpression(op === ':=' ? '=' : op, expr, right)));
                     }
@@ -1492,6 +1586,7 @@ export class Parser {
             this.skipNewlines();
             let name = this.expectIdentifierOrContextual().value;
             if (this.functionNames.has(name)) {
+                this.varShadowNames.add(name);
                 name = name + '_var';
             }
             elements.push(new Identifier(name));
@@ -1641,6 +1736,17 @@ export class Parser {
         while (true) {
             // Don't skip newlines at the start of the loop - newlines terminate expressions in PineScript
             // We'll skip them in specific contexts where they're allowed (like after `.`)
+
+            // A continuation token starting on a new line relative to the last
+            // content token (typically right after a DEDENT, which the lexer
+            // emits without an intervening NEWLINE) opens the NEXT statement,
+            // not a postfix on this expression. Without this guard, a
+            // switch/if/for expression statement followed by a bare `[a, b]`
+            // tuple return is misparsed as an index of the block expression —
+            // "Expected RBRACKET but got COMMA" at the tuple's comma.
+            if (this.isOnNewLine()) {
+                break;
+            }
 
             // Generic type parameters followed by call: array.new<float>(...)
             // Capture the generic type and, for known types, rewrite
@@ -1813,6 +1919,7 @@ export class Parser {
             let name = id.value;
             if (
                 this.functionNames.has(name) &&
+                this.varShadowNames.has(name) &&
                 this.peek().type !== TokenType.LPAREN &&
                 !this.isCurrentFunctionParam(name)
             ) {
