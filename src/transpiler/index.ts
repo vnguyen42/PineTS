@@ -94,14 +94,42 @@ export function transpile(source: string | Function, options: { debug: boolean; 
     // Pre-process: Wrap in context function if not already wrapped
     code = wrapInContextFunction(code);
 
-    const sourceLines = debug ? code.split('\n') : [];
+    // Parse the code into an AST.
+    //
+    // Version-less Pine sources (no //@version header) reach here verbatim:
+    // getPineTSFromSource assumes version-less strings are PineTS/JS syntax.
+    // Real TradingView sources can lose their header in storage, and their
+    // Pine-only syntax (function declarations `f(x) => …`, `and`/`or`
+    // operators) then fails this parse with `SyntaxError: Unexpected token`.
+    // Retry such sources as Pine v5 — the closest version this engine
+    // supports (TV itself compiles version-less scripts as v1, which is
+    // refused here). Valid-JS PineTS sources are untouched: the retry only
+    // fires where the as-is path threw.
+    let ast;
+    try {
+        ast = acorn.parse(code, {
+            ecmaVersion: 'latest',
+            sourceType: 'module',
+            locations: debug,
+        });
+    } catch (jsParseError) {
+        if (typeof source === 'string' && extractPineScriptVersion(source) === null) {
+            const pineResult = pineToJS(source, { forceVersion: 5 });
+            if (!pineResult.success) {
+                throw new Error(`Failed to transpile Pine Script (assumed version 5): ${pineResult.error}`);
+            }
+            code = wrapInContextFunction(pineResult.code);
+            ast = acorn.parse(code, {
+                ecmaVersion: 'latest',
+                sourceType: 'module',
+                locations: debug,
+            });
+        } else {
+            throw jsParseError;
+        }
+    }
 
-    // Parse the code into an AST
-    const ast = acorn.parse(code, {
-        ecmaVersion: 'latest',
-        sourceType: 'module',
-        locations: debug,
-    });
+    const sourceLines = debug ? code.split('\n') : [];
 
     // Pre-process: Transform all nested arrow functions
     transformNestedArrowFunctions(ast);

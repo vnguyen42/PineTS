@@ -33,8 +33,12 @@ export function extractPineScriptVersion(sourceCode: string): number | null {
 }
 
 export function pineToJS(sourceCode: string, options: any = {}) {
-    // Step 0: Detect Pine Script version
-    const version = extractPineScriptVersion(sourceCode);
+    // Step 0: Detect Pine Script version. `options.forceVersion` lets callers
+    // transpile version-less sources (no //@version header) under an assumed
+    // version — used by the transpile() fallback for corpus sources whose
+    // header was lost (TradingView itself assumes v1 for version-less
+    // scripts, which this engine refuses; v5 is the closest supported one).
+    const version = options.forceVersion ?? extractPineScriptVersion(sourceCode);
     if (version === null) {
         return {
             success: false,
