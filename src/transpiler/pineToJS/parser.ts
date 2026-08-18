@@ -111,6 +111,26 @@ export class Parser {
             || (token.type === TokenType.KEYWORD && Parser.CONTEXTUAL_KEYWORDS.has(token.value));
     }
 
+    // Lookahead: does the current statement introduce a method declaration?
+    // `method` is a contextual keyword in Pine v5/v6 — it is NOT in TV's
+    // reserved-words list (catch/class/do/ellipse/in/is/polygon/range/return/
+    // struct/text/throw/try), so `method = ...` is a valid variable name.
+    // Only `method name(` and `method retType name(` (the two shapes
+    // parseMethodDeclaration accepts) must still dispatch there; otherwise the
+    // statement falls through to the identifier/expression path.
+    // Mirrors parseMethodDeclaration's own lookahead exactly.
+    private isMethodDeclaration(): boolean {
+        const t1 = this.peek(1);
+        const t2 = this.peek(2);
+        // method name( — name may be a contextual keyword too
+        if (this.isIdentifierLike(t1) && t2.type === TokenType.LPAREN) return true;
+        // method retType name(
+        const t3 = this.peek(3);
+        return t1.type === TokenType.IDENTIFIER
+            && t2.type === TokenType.IDENTIFIER
+            && t3.type === TokenType.LPAREN;
+    }
+
     /**
      * Consume an identifier OR a contextual keyword used as an identifier.
      * Used in positions where Pine permits soft keywords as names — most notably
@@ -265,8 +285,15 @@ export class Parser {
         else if (this.match(TokenType.KEYWORD, 'var') || this.match(TokenType.KEYWORD, 'varip')) {
             stmt = this.parseVarDeclaration();
         }
-        // Method declaration
-        else if (this.match(TokenType.KEYWORD, 'method')) {
+        // Method declaration — `method` is a contextual keyword: only
+        // declaration-shaped continuations (`method name(` / `method retType
+        // name(`) dispatch here; `method = ...` is a plain variable name and
+        // falls through to the identifier/expression path below.
+        else if (
+            this.peek().type === TokenType.KEYWORD &&
+            this.peek().value === 'method' &&
+            this.isMethodDeclaration()
+        ) {
             stmt = this.parseMethodDeclaration();
         }
         // Function declaration
