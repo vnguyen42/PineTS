@@ -2223,8 +2223,11 @@ plot(close)
         // Method declarations get a `$M_` JS prefix that is collision-proof
         // by construction — no `_$N` reserved-name suffix is needed (and adding
         // one would break Pine-name lookup at the call site, since the AnalysisPass
-        // strips only `$M_` to recover the Pine name `delete`).
-        expect(jsCode).toMatch(/function\s+\$M_delete\s*\(/);
+        // strips only `$M_` to recover the Pine name `delete`). The declaration
+        // also carries the receiver-type suffix from the per-type rename, and the
+        // bare `$M_delete` name survives as the injected dispatcher.
+        expect(jsCode).toMatch(/function\s+\$M_delete_Foo\s*\(/);
+        expect(jsCode).toMatch(/var\s+\$M_delete\s*=\s*\(function\s*\(_fallback\)/);
         // The Pine call site `f.delete()` retargets to `$.call($M_delete, ...)`
         // when the receiver is a known UDT instance.
         expect(jsCode).toMatch(/\$\.call\s*\(\s*\$M_delete\b/);

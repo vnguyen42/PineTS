@@ -53,11 +53,14 @@ plot(close)
         const result = transpile(code);
         const jsCode = result.toString();
 
-        // Receiver appears as `self` in both param list and body. The body
-        // member access is wrapped as `$.get(self, 0).lastPrice` by the
-        // expression transformer (series-of-UDT unwrap), but the leaf
-        // identifier remains `self`.
-        expect(jsCode).toMatch(/function\s+\$M_updatePattern\s*\(\s*self\s*,/);
+        // Receiver appears as `self` in both param list and body — the
+        // declaration carries the receiver-type suffix from the per-type
+        // rename (`$M_updatePattern_BAR`), and the call site routes through
+        // the bare-name dispatcher. The body member access is wrapped as
+        // `$.get(self, 0).lastPrice` by the expression transformer
+        // (series-of-UDT unwrap), but the leaf identifier remains `self`.
+        expect(jsCode).toMatch(/function\s+\$M_updatePattern_BAR\s*\(\s*self\s*,/);
+        expect(jsCode).toMatch(/var\s+\$M_updatePattern\s*=\s*\(function\s*\(_fallback\)/);
         expect(jsCode).toMatch(/\$\.get\(\s*self\s*,\s*0\s*\)\.lastPrice/);
         // No bare `this.x` references in method body (would be globalThis writes)
         expect(jsCode).not.toMatch(/\bthis\.lastPrice\b/);
@@ -82,9 +85,13 @@ plot(close)
         const result = transpile(code);
         const jsCode = result.toString();
 
-        // BOTH declarations must coexist
+        // BOTH declarations must coexist — the method one carries the
+        // receiver-type suffix from the per-type rename
+        // (`$M_sameName_FOO`), the call sites route through the bare-name
+        // dispatcher.
         expect(jsCode).toMatch(/function\s+sameName\s*\(\s*a\s*,\s*b\s*\)/);
-        expect(jsCode).toMatch(/function\s+\$M_sameName\s*\(\s*self\s*,/);
+        expect(jsCode).toMatch(/function\s+\$M_sameName_FOO\s*\(\s*self\s*,/);
+        expect(jsCode).toMatch(/var\s+\$M_sameName\s*=\s*\(function\s*\(_fallback\)/);
         // The marker should be on the prefixed identifier
         expect(jsCode).toContain('$M_sameName.__pineMethod__ = true');
     });
@@ -347,7 +354,7 @@ plot(close)
     // the Pine name visible at the call site (`obj.delete()` looks up
     // `delete`, not `delete_$0`) and break the UFCS retargeting.
     // Codegen must skip the reserved-name rename for methods.
-    it('codegen: method named `delete` keeps the bare $M_<name> identifier', () => {
+    it('codegen: method named `delete` emits a receiver-typed variant behind a bare $M_<name> dispatcher', () => {
         const code = `
 //@version=6
 indicator("delete method", overlay=true)
@@ -363,10 +370,13 @@ plot(close)
         const js = transpile(code).toString();
         // Bare `delete(` must not appear (would be a JS parse error)
         expect(js).not.toMatch(/function\s+delete\s*\(/);
-        // Method name must be the bare `$M_delete` form — no `_$N` suffix
-        expect(js).toMatch(/function\s+\$M_delete\s*\(/);
+        // The declaration is the receiver-typed variant `$M_delete_Foo` —
+        // no `_$N` reserved-name suffix on top of it.
+        expect(js).toMatch(/function\s+\$M_delete_Foo\s*\(/);
         expect(js).not.toMatch(/function\s+\$M_delete_\$\d+\s*\(/);
-        // Call site `f.delete()` must retarget to `$.call($M_delete, ..., f)`.
+        // The bare `$M_delete` name survives as the injected per-name
+        // dispatcher, and the call site `f.delete()` routes through it.
+        expect(js).toMatch(/var\s+\$M_delete\s*=\s*\(function\s*\(_fallback\)/);
         expect(js).toMatch(/\$\.call\s*\(\s*\$M_delete\b/);
     });
 

@@ -289,6 +289,8 @@ export function transpile(source: string | Function, options: { debug: boolean; 
  *       if (t === 'WordDesc') return $M_init_WordDesc.apply(null, arguments);
  *       ...
  *       if (_fallback) return _fallback.apply(null, arguments);
+ *       if (!t && inst != null && typeof inst.init === 'function')
+ *           return inst.init.apply(inst, Array.prototype.slice.call(arguments, 1));
  *       throw new Error(...);
  *     };
  *   })($M_init);
@@ -304,8 +306,19 @@ export function transpile(source: string | Function, options: { debug: boolean; 
  * The dispatcher statement is PREPENDED to the wrapped context function so
  * the inert `$M_init.__pineMethod__ / __pineParamTypes__` markers (which
  * follow each declaration) bind to the dispatcher without a ReferenceError.
- * The IIFE captures the plain `$M_init` binding (last declared non-renamed
- * variant) as the fallback for receivers outside the registered set.
+ *
+ * Receivers that match no registered variant fall back in order:
+ *   1. the plain `$M_init` binding captured by the IIFE (last declared
+ *      non-renamed variant — preserves pre-overload behavior for methods
+ *      whose receiver type was not renamed);
+ *   2. the receiver's own builtin method of the same name, when the receiver
+ *      is NOT a UDT instance (`t` undefined) and such a method exists — e.g.
+ *      `this.ln.delete()` inside a user method body is retargeted here with
+ *      a native Line receiver and must invoke the builtin `line.delete`,
+ *      never an undefined binding;
+ *   3. an explicit error for genuinely unknown receivers (UDT instances
+ *      whose type matches no variant, or receivers without the builtin),
+ *      preserving the iteration-5 guard against silent no-ops.
  */
 function injectMethodDispatchers(ast: any, scopeManager: ScopeManager): void {
     const program = ast.body?.[0]?.expression?.body;
@@ -325,6 +338,7 @@ function injectMethodDispatchers(ast: any, scopeManager: ScopeManager): void {
     var t = inst && inst._udt && inst._udt.__pineName;
     ${checks.join('\n    ')}
     if (_fallback) return _fallback.apply(null, arguments);
+    if (!t && inst != null && typeof inst.${pineName} === 'function') return inst.${pineName}.apply(inst, Array.prototype.slice.call(arguments, 1));
     throw new Error("PineTS: no overload of method '${pineName}' for receiver type " + String(t));
   };
 })(${dispatchName});`);
