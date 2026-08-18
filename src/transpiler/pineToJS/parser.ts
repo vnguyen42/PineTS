@@ -247,13 +247,17 @@ export class Parser {
         let offset = 0;
         let token = this.peek(offset);
 
-        // In single-line switch case bodies, do NOT cross newlines
-        if (token.type === TokenType.NEWLINE && this.noLineContinuation) {
-            return false;
-        }
-
-        // Skip NEWLINE and subsequent INDENT
-        if (token.type === TokenType.NEWLINE) {
+        // Skip COMMENT / NEWLINE layout tokens (with an optional INDENT after
+        // a NEWLINE) before the target token. A `//` comment may precede the
+        // line break of a wrapped expression (trailing comment) or sit on its
+        // own line between two wrapped lines; Pine comments are whitespace —
+        // they can begin anywhere on a line (official docs) — so they must
+        // not hide the continuation token (`?`, `:`, `and`, `or`, …).
+        // `noLineContinuation` (single-line switch case bodies) must be
+        // re-checked after each skipped token: a skipped COMMENT can expose
+        // a NEWLINE that ends the line.
+        while (token.type === TokenType.COMMENT || token.type === TokenType.NEWLINE) {
+            if (this.noLineContinuation) return false;
             offset++;
             token = this.peek(offset);
 

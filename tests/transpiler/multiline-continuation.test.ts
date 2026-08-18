@@ -85,7 +85,7 @@ T.new(0).draw(10, 30)
         // it had escaped to top-level, the transpiler would emit it
         // outside the function and the bare identifiers would be
         // undefined at runtime.
-        const fnStart = js.indexOf('function $M_draw(self, startBar, endBar)');
+        const fnStart = js.indexOf('function $M_draw_T(self, startBar, endBar)');
         expect(fnStart).toBeGreaterThanOrEqual(0);
         const fnEnd = js.indexOf('  $M_draw.__pineMethod__', fnStart);
         expect(fnEnd).toBeGreaterThan(fnStart);
@@ -173,5 +173,63 @@ plot(sm, "sm")
         };
         expect(last('mx')).toEqual(5);
         expect(last('sm')).toEqual(9);
+    });
+});
+
+describe('Comments inside wrapped expressions', () => {
+    // Regression — TradingView corpus cluster 2553/2562 (chrono_utils lib):
+    // a `//` comment trailing the consequent branch of a wrapped ternary hid
+    // the `:` from matchEx's line-continuation lookahead, so the parser
+    // threw "Expected COLON but got COMMENT at 601:194". Pine comments are
+    // whitespace — official docs: "Comments can begin anywhere on the line" —
+    // so they must not break operator continuation. Same root cause for a
+    // trailing comment hiding a wrapped leading `or` (corpus cluster 1568).
+    it('ternary `:` found across a trailing comment + line break', () => {
+        const code = `
+//@version=6
+indicator("x")
+f(bool overnight) =>
+    int a = 1
+    int b = 2
+    overnight
+      ? a <= b or a >= b // consequent branch comment
+      : a >= b and a <= b
+plot(f(close > open))
+`;
+        const r = pineToJS(code);
+        expect(r.success).toBe(true);
+    });
+
+    it('runtime: ternary branches separated by a comment evaluate correctly', async () => {
+        const code = `
+//@version=6
+indicator("x")
+f(bool cond) =>
+    cond
+      ? 1 // yes branch
+      : 2
+plot(f(true), "t")
+plot(f(false), "fv")
+`;
+        const { plots } = await makePineTS().run(code);
+        const last = (k: string) => {
+            const d = plots[k]?.data;
+            return d?.[d.length - 1].value;
+        };
+        expect(last('t')).toEqual(1);
+        expect(last('fv')).toEqual(2);
+    });
+
+    it('wrapped leading `or` found across a trailing comment + line break', () => {
+        const code = `
+//@version=6
+indicator("x")
+f(bool a, bool b, bool c) =>
+    a or b // comment
+    or c
+plot(f(close > open, close > high[1], low < low[1]))
+`;
+        const r = pineToJS(code);
+        expect(r.success).toBe(true);
     });
 });
