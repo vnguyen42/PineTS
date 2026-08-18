@@ -675,3 +675,59 @@ export function renameMethodVariants(ast: any, scopeManager: ScopeManager): void
         pendingFnId = null;
     }
 }
+
+/**
+ * Give each Pine function overload (same name, different arity) a unique JS
+ * binding keyed by declaration index, and register the variants so the
+ * dispatcher emitted at the end of the program can route by `arguments.length`.
+ *
+ * codegen emits every declaration of a regular Pine function as
+ * `function <name>(…)` — JS last-wins collapses all overloads onto the last
+ * declared variant (e.g. `DFT3(x, y, _dir)` and `export DFT3(xval = close,
+ * _dir = 2)` become indistinguishable, and a 3-arg internal call lands in the
+ * 2-param body with the array bound to `xval`). Unlike methods — which carry
+ * their receiver type on the `__pineParamTypes__` marker — plain functions
+ * have no per-declaration discriminator, so the rename is purely positional:
+ * each duplicate declaration gets `<name>_$ov<i>` (declaration order; `$` is
+ * illegal in Pine identifiers, so the suffix cannot collide with user code).
+ *
+ * The original Pine name is preserved on `id.__pineName` so name-keyed
+ * consumers (`propagateAsyncAwait`, `buildLtfSlices`) keep collapsing the
+ * variants onto the Pine name, and `transformFunctionDeclaration`'s
+ * `__pineParamTypes__` lookup still resolves typed params per variant.
+ *
+ * Arity ranges: `minArgs` = params without a default (required), `maxArgs` =
+ * total param count. Same-arity (type-based) overloads stay last-wins — the
+ * dispatcher resolves ties toward the last declared variant; type sniffing is
+ * out of scope (documented in the dispatcher emitter).
+ */
+export function renameFunctionArityVariants(ast: any, scopeManager: ScopeManager): void {
+    const program = ast.body?.[0]?.expression?.body;
+    if (!program || program.type !== 'BlockStatement' || !Array.isArray(program.body)) return;
+
+    // Group top-level regular (non-method) function declarations by JS name.
+    // Methods are `$M_`-prefixed (and handled by renameMethodVariants); only
+    // plain names can collide via Pine overloads.
+    const byName = new Map<string, Array<{ id: any; minArgs: number; maxArgs: number }>>();
+    for (const stmt of program.body) {
+        if (stmt.type !== 'FunctionDeclaration' || !stmt.id?.name) continue;
+        if (stmt.id.name.startsWith('$M_')) continue;
+        const list = byName.get(stmt.id.name) ?? [];
+        let minArgs = 0;
+        for (const p of stmt.params) {
+            if (p.type !== 'AssignmentPattern') minArgs += 1;
+        }
+        list.push({ id: stmt.id, minArgs, maxArgs: stmt.params.length });
+        byName.set(stmt.id.name, list);
+    }
+
+    for (const [pineName, variants] of byName) {
+        if (variants.length < 2) continue;
+        variants.forEach((variant, i) => {
+            const jsName = `${pineName}_$ov${i}`;
+            variant.id.name = jsName;
+            variant.id.__pineName = pineName;
+            scopeManager.registerFunctionVariant(pineName, variant.minArgs, variant.maxArgs, jsName);
+        });
+    }
+}

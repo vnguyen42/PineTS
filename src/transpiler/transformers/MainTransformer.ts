@@ -84,12 +84,21 @@ export function propagateAsyncAwait(ast: any): void {
         return null;
     }
 
-    // Step 1: Collect all function declarations by name
-    const funcDecls = new Map<string, any>();
+    // Step 1: Collect all function declarations by canonical (Pine) name.
+    // Arity variants renamed by `renameFunctionArityVariants` share the Pine
+    // name (preserved on `id.__pineName`), so every variant of an overload is
+    // collected under the same key — async infection must reach ALL variants
+    // of a name (a non-async variant whose body contains `await` would be a
+    // SyntaxError at Function-construction time).
+    const funcDecls = new Map<string, any[]>();
     walk.simple(ast, {
         FunctionDeclaration(node: any) {
             const key = canonicalFnName(node.id);
-            if (key) funcDecls.set(key, node);
+            if (key) {
+                const list = funcDecls.get(key) ?? [];
+                list.push(node);
+                funcDecls.set(key, list);
+            }
         },
     }, baseVisitor);
 
@@ -157,13 +166,18 @@ export function propagateAsyncAwait(ast: any): void {
             changed = true;
         }
 
-        // 2c: Find named functions containing await, mark them async
+        // 2c: Find named functions containing await, mark them async.
+        // Per-name ALL variants are marked: an overload is one Pine function
+        // name, and every variant must be `async` for the generated JS to
+        // stay syntactically valid whenever any variant awaits.
         const asyncFuncNames = new Set<string>();
-        for (const [name, decl] of funcDecls) {
-            if (bodyContainsAwait(decl.body)) {
-                if (!decl.async) {
-                    decl.async = true;
-                    changed = true;
+        for (const [name, decls] of funcDecls) {
+            if (decls.some((decl) => bodyContainsAwait(decl.body))) {
+                for (const decl of decls) {
+                    if (!decl.async) {
+                        decl.async = true;
+                        changed = true;
+                    }
                 }
                 asyncFuncNames.add(name);
             }

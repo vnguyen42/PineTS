@@ -147,6 +147,23 @@ export class ScopeManager {
      */
     private methodVariants: Map<string, Array<{ receiverType: string; jsName: string }>> = new Map();
 
+    /**
+     * Pine function name → arity variants. Populated by the
+     * `renameFunctionArityVariants` pre-pass: Pine overloads of a regular
+     * function (same name, different arities) are emitted by codegen as
+     * repeated `function <name>(…)` declarations in the same JS scope — JS
+     * last-wins collapses them all onto the last declared variant. Each
+     * duplicate declaration is renamed to a unique binding `<name>_$ov<i>`
+     * (`$` is illegal in Pine identifiers, so the suffix is collision-proof)
+     * and registered here with its arity range (`minArgs` = params without a
+     * default, `maxArgs` = total params). The dispatcher emitted at the end
+     * of the transpiled program routes calls by `arguments.length`: exact
+     * arity first (last declared wins for same-arity type-based overloads),
+     * then the last declared variant whose range contains the arity, then
+     * the last declared variant as fallback.
+     */
+    private functionVariants: Map<string, Array<{ minArgs: number; maxArgs: number; jsName: string }>> = new Map();
+
     public get nextParamIdArg(): any {
         return {
             type: 'Identifier',
@@ -369,6 +386,27 @@ export class ScopeManager {
      */
     getMethodVariants(): Array<[string, Array<{ receiverType: string; jsName: string }>]> {
         return [...this.methodVariants.entries()];
+    }
+
+    /**
+     * Register one arity variant of a Pine function overload. The arity range
+     * is `minArgs` (params without a default) .. `maxArgs` (total params);
+     * later registrations for the same name append in declaration order, and
+     * the dispatcher resolves ties toward the LAST declared variant (matching
+     * JS last-declaration-wins for same-arity / ambiguous calls).
+     */
+    registerFunctionVariant(pineName: string, minArgs: number, maxArgs: number, jsName: string): void {
+        const list = this.functionVariants.get(pineName) ?? [];
+        list.push({ minArgs, maxArgs, jsName });
+        this.functionVariants.set(pineName, list);
+    }
+
+    /**
+     * All registered function-arity variants, keyed by Pine function name, in
+     * declaration order. Used by the dispatcher emitter.
+     */
+    getFunctionVariants(): Array<[string, Array<{ minArgs: number; maxArgs: number; jsName: string }>]> {
+        return [...this.functionVariants.entries()];
     }
 
     /**

@@ -52,7 +52,7 @@ import ScopeManager from './analysis/ScopeManager';
 import { injectImplicitImports } from './transformers/InjectionTransformer';
 import { normalizeNativeImports } from './transformers/NormalizationTransformer';
 import { wrapInContextFunction } from './transformers/WrapperTransformer';
-import { transformNestedArrowFunctions, preProcessContextBoundVars, preProcessUdtRegistry, runAnalysisPass, renameMethodVariants } from './analysis/AnalysisPass';
+import { transformNestedArrowFunctions, preProcessContextBoundVars, preProcessUdtRegistry, runAnalysisPass, renameMethodVariants, renameFunctionArityVariants } from './analysis/AnalysisPass';
 import { runTypeInferencePass } from './analysis/TypeInferencePass';
 import { runTransformationPass, transformEqualityChecks, propagateAsyncAwait } from './transformers/MainTransformer';
 import { extractPineScriptVersion, pineToJS } from './pineToJS/pineToJS.index';
@@ -161,6 +161,16 @@ export function transpile(source: string | Function, options: { debug: boolean; 
     // after the analysis pass (which reads the original `$M_` names).
     renameMethodVariants(ast, scopeManager);
 
+    // Rename arity overloads of regular Pine functions to unique bindings
+    // (`<name>_$ov0`, `<name>_$ov1`, …) and register the variants, so the
+    // dispatcher emitted below routes by `arguments.length`. Must run after
+    // the analysis pass (which reads the original names) and after
+    // `renameMethodVariants` (which pairs `$M_` declarations with their
+    // param-type markers). The original Pine name is preserved on
+    // `id.__pineName`, so name-keyed consumers (async propagation, LTF
+    // slicing) keep collapsing the variants onto the Pine name.
+    renameFunctionArityVariants(ast, scopeManager);
+
     // Type inference (RC2b): replicate Pine `int / int → int`. Runs on the clean
     // pre-lowering AST (operands still bare identifiers / `input.int(...)` /
     // literals) and rewrites provably-int `/` to `$.pine.math.__idiv(...)`. The
@@ -187,6 +197,19 @@ export function transpile(source: string | Function, options: { debug: boolean; 
     // binding (last declared, preserving pre-overload behavior for methods
     // whose receiver type was not renamed).
     injectMethodDispatchers(ast, scopeManager);
+
+    // Emit per-name function-arity dispatchers. Every call site of an
+    // overloaded Pine function (`$.call(g, …)`) resolves through the
+    // dispatcher, which selects the variant by `arguments.length` — exact
+    // arity first, then the last declared variant whose range contains the
+    // arity, then the last declared variant as fallback (preserving
+    // last-wins for ambiguous / out-of-range calls). Same-arity (type-based)
+    // overloads stay last-wins: the dispatcher checks variants in reverse
+    // declaration order, so the last declared variant wins ties. The
+    // dispatcher is bound BEFORE the inert `__pineParamTypes__` markers run
+    // (they land on the dispatcher without a ReferenceError, mirroring the
+    // method dispatchers).
+    injectFunctionDispatchers(ast, scopeManager);
 
     // Post-process: inject __maxLoops local variable at the top of the function body.
     // This caches $.__maxLoops (from Context) in a local variable so loop guards
@@ -305,6 +328,76 @@ function injectMethodDispatchers(ast: any, scopeManager: ScopeManager): void {
     throw new Error("PineTS: no overload of method '${pineName}' for receiver type " + String(t));
   };
 })(${dispatchName});`);
+    }
+
+    const parsed = acorn.parse(lines.join('\n'), { ecmaVersion: 'latest' }) as any;
+    program.body.unshift(...parsed.body);
+}
+
+/**
+ * Emit a runtime dispatcher for every Pine function that has arity variants
+ * (registered by `renameFunctionArityVariants`). The dispatcher selects the
+ * variant by `arguments.length`:
+ *
+ *   var smooth = (function (_fallback) {
+ *     return function () {
+ *       var n = arguments.length;
+ *       if (n === 5) return smooth_$ov1.apply(null, arguments);  // exact (reverse decl order)
+ *       if (n === 6) return smooth_$ov0.apply(null, arguments);
+ *       if (n >= 0 && n <= 5) return smooth_$ov1.apply(null, arguments);  // range (reverse)
+ *       if (n >= 1 && n <= 6) return smooth_$ov0.apply(null, arguments);
+ *       if (_fallback) return _fallback.apply(null, arguments);
+ *       throw new Error("PineTS: no overload of function 'smooth' for " + n + " argument(s)");
+ *     };
+ *   })(smooth_$ov1);
+ *
+ * Resolution rule (TradingView's exact tie-break beyond "count or types" is
+ * undocumented — nothing is invented for ambiguous calls):
+ *   1. EXACT arity first: a call whose arg count equals a variant's total
+ *      param count goes to that variant. Checks run in REVERSE declaration
+ *      order, so same-arity (type-based) overloads keep JS last-wins.
+ *   2. Otherwise the LAST declared variant whose [minArgs..maxArgs] contains
+ *      the arg count (reverse declaration order again — the last compatible
+ *      variant wins).
+ *   3. Fallback: the last declared variant (captured by the IIFE), exactly
+ *      preserving pre-dispatcher last-wins behavior for out-of-range calls.
+ *
+ * Named args on OVERLOADED user functions are currently DROPPED at pineToJS
+ * codegen (functionParams is keyed by the renamed `<name>_$ov<i>` while call
+ * sites still use `<name>` — pre-existing limitation, identical to 0.9.31),
+ * so the dispatcher only ever sees positional
+ * arity. The dispatcher statement is PREPENDED to the wrapped context
+ * function so the inert `__pineParamTypes__` markers (which follow each
+ * declaration) bind to the dispatcher without a ReferenceError — mirroring
+ * the method dispatchers.
+ */
+function injectFunctionDispatchers(ast: any, scopeManager: ScopeManager): void {
+    const program = ast.body?.[0]?.expression?.body;
+    if (!program || program.type !== 'BlockStatement' || !Array.isArray(program.body)) return;
+
+    const variants = scopeManager.getFunctionVariants();
+    if (variants.length === 0) return;
+
+    const lines: string[] = [];
+    for (const [pineName, list] of variants) {
+        // Reverse declaration order — later declarations are checked first,
+        // so the last declared variant wins every tie (same-arity overloads,
+        // overlapping ranges).
+        const reversed = [...list].reverse();
+        const exact = reversed
+            .map((v) => `if (n === ${v.maxArgs}) return ${v.jsName}.apply(null, arguments);`);
+        const range = reversed
+            .map((v) => `if (n >= ${v.minArgs} && n <= ${v.maxArgs}) return ${v.jsName}.apply(null, arguments);`);
+        const fallback = list[list.length - 1].jsName;
+        lines.push(`var ${pineName} = (function (_fallback) {
+  return function () {
+    var n = arguments.length;
+    ${exact.join('\n    ')}
+    ${range.join('\n    ')}
+    if (_fallback) return _fallback.apply(null, arguments);
+    throw new Error("PineTS: no overload of function '${pineName}' for " + n + " argument(s)");
+  };
+})(${fallback});`);
     }
 
     const parsed = acorn.parse(lines.join('\n'), { ecmaVersion: 'latest' }) as any;

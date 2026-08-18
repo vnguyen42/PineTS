@@ -777,8 +777,9 @@ export class Context {
      */
     set(target: any, value: any) {
         if (target instanceof Series) {
-            target.set(0, typeof value === 'number' ? this.precision(value) : value);
-            return;
+            const stored = typeof value === 'number' ? this.precision(value) : value;
+            target.set(0, stored);
+            return stored;
         }
 
         if (Array.isArray(target)) {
@@ -787,7 +788,7 @@ export class Context {
             } else {
                 target.push(value);
             }
-            return;
+            return value;
         }
     }
 
