@@ -1635,14 +1635,49 @@ export function transformCallExpression(node: any, scopeManager: ScopeManager, n
             }
             for (const e of extra) newArgs.push(e);
         } else {
+            // array.from type hint (campaign cluster n=2, ids 1831/2388):
+            // Pine infers the array element type from the argument literal
+            // forms at compile time (`0` is int, `0.`/`0.0`/`1e5` is float —
+            // see TV Type system docs). JS collapses `0.` and `0` to the same
+            // number, so the runtime value-based inference (inferArrayType)
+            // mis-classifies `array.from(0., 0., …)` as array<int>, then
+            // array.set() rejects float values. When EVERY argument is a
+            // numeric literal, compute the Pine type from the raw literal text
+            // and append a sentinel the runtime pops (mirror of the
+            // __callsiteId mechanism below).
+            const isArrayFrom = namespace === 'array' && node.callee.property.name === 'from';
+            let arrayFromAllNumLit = true;
+            let arrayFromAnyFloat = false;
             node.arguments.forEach((arg) => {
                 // If argument is already a param call, don't wrap it again
                 if (arg._isParamCall) {
                     newArgs.push(arg);
                     return;
                 }
+                if (isArrayFrom) {
+                    const isNumLit = arg.type === 'Literal' && typeof arg.value === 'number' && typeof arg.raw === 'string';
+                    if (!isNumLit) {
+                        arrayFromAllNumLit = false;
+                    } else if (/[.eE]/.test(arg.raw)) {
+                        arrayFromAnyFloat = true;
+                    }
+                }
                 newArgs.push(transformFunctionArgument(arg, namespace, scopeManager));
             });
+            if (isArrayFrom && arrayFromAllNumLit && node.arguments.length > 0) {
+                newArgs.push({
+                    type: 'ObjectExpression',
+                    properties: [{
+                        type: 'Property',
+                        method: false,
+                        shorthand: false,
+                        computed: false,
+                        kind: 'init',
+                        key: { type: 'Identifier', name: '__pineTypeHint' },
+                        value: { type: 'Literal', value: arrayFromAnyFloat ? 'float' : 'int' },
+                    }],
+                });
+            }
         }
         node.arguments = newArgs;
 
