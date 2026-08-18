@@ -1,10 +1,19 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 import { Series } from '../../../Series';
+import { PineRuntimeError } from '../../../errors/PineRuntimeError';
 
 export function variance(context: any) {
     return (source: any, _length: any, _callId?: string) => {
         const length = Series.from(_length).get(0);
+
+        // TV semantics: length must be > 0; an invalid value (<= 0 or na)
+        // raises a runtime error instead of returning na — and would make the
+        // window-trim loop `while (window.length > length) window.pop()`
+        // spin forever on negative lengths.
+        if (!(length > 0)) {
+            throw new PineRuntimeError(`Invalid value of the 'length' argument (${length}) in the 'ta.variance' function. It must be > 0.`, 'ta.variance');
+        }
 
         // Variance calculation
         if (!context.taState) context.taState = {};
