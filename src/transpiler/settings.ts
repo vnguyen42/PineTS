@@ -143,12 +143,20 @@ export const NAMESPACE_COLLISION_NAMES = new Set([
     'chart',
     'alert',
     'barstate',
+    'session',
     'syminfo',
     'timeframe',
     'strategy',
     'log',
     'str',
     'runtime',
+    // Global drawing builtins (bar/bg coloring). A user variable named
+    // `barcolor`/`bgcolor` (e.g. `barcolor = close > open`) must be renamed
+    // so the builtin call sites keep resolving to the injected binding —
+    // without this, `barcolor(...)` after a same-named declaration crashes
+    // with 'barcolor is not defined' (same collision class as plot/hline).
+    'barcolor',
+    'bgcolor',
 ]);
 
 // JavaScript reserved keywords that ARE valid Pine identifiers but invalid as
@@ -242,6 +250,7 @@ export const CONTEXT_PINE_VARS = [
     'timeframe',
     'syminfo',
     'barstate',
+    'session',
 
     //builtin variables
     'bar_index',

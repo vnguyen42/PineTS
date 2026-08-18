@@ -6,6 +6,7 @@ import { PineArray } from './namespaces/array/array.index';
 import { PineMap } from './namespaces/map/map.index';
 import { PineMatrix } from './namespaces/matrix/matrix.index';
 import { Barstate } from './namespaces/Barstate';
+import { Session } from './namespaces/Session';
 import { Core, NAHelper, AlertHelper } from './namespaces/Core';
 import { PineColor } from './namespaces/color/PineColor';
 import { TimeHelper, TimeComponentHelper, EXTRACTORS, getDatePartsInTimezone } from './namespaces/Time';
@@ -103,6 +104,7 @@ export class Context {
         // bar_index: number;
         // syminfo: ISymbolInfo;
         // barstate: Barstate;
+        // session: Session;
         // log: Log;
         // str: Str;
         // runtime: Runtime;
@@ -225,6 +227,7 @@ export class Context {
             //FIXME : this is a temporary solution to get the barstate values,
             //we need to implement a better way to handle realtime states
             barstate: new Barstate(this),
+            session: new Session(this),
             get bar_index() {
                 return _this.data.bar_index;
             },
