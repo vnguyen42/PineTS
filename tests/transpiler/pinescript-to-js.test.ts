@@ -2005,6 +2005,64 @@ plot(f.x)
     });
 });
 
+describe('Pine Script Transpilation - Contextual keywords as typed local variable names', () => {
+    // Pine v5/v6 treats `type`/`method`/`enum` as contextual keywords — valid as
+    // variable names inside typed declarations (`int type = ...`). The typed-var
+    // lookahead (isTypedVarDeclaration) required a strict IDENTIFIER in the name
+    // slot, so the statement fell through and the name was re-dispatched as a
+    // declaration introducer — "Expected IDENTIFIER but got OPERATOR at
+    // <line:col>". Regression: script 1776 (`int type =
+    // int(str.tonumber(array.get(chars, 0)))`, TheDivergentLibrary), common to
+    // pinets@0.9.31.
+
+    it('parses a simple typed declaration whose name is `type`', () => {
+        // Regression: "Expected IDENTIFIER but got OPERATOR at <line:col>"
+        const code = `
+//@version=5
+indicator("local var named type", overlay=true)
+int type = 1
+plot(type)
+        `;
+        const result = transpile(code);
+        const jsCode = result.toString();
+        expect(jsCode).toBeDefined();
+        // The `type` name must be kept as the variable (not consumed as a UDT
+        // introducer), initialized with the literal value and fed to plot().
+        expect(jsCode).toMatch(/glb1_type = \$\.init\([^,]+,\s*1\)/);
+        expect(jsCode).toMatch(/plot\.param\([^)]*glb1_type/);
+    });
+
+    it('parses an array-shorthand typed declaration whose name is `method`', () => {
+        // Regression: name slot `method` (KEYWORD) after `float[]` was rejected.
+        const code = `
+//@version=5
+indicator("local var named method", overlay=true)
+float[] method = array.new<float>()
+plot(method)
+        `;
+        const result = transpile(code);
+        const jsCode = result.toString();
+        expect(jsCode).toBeDefined();
+        expect(jsCode).toMatch(/glb1_method = \$\.init\(/);
+        expect(jsCode).toMatch(/plot\.param\([^)]*glb1_method/);
+    });
+
+    it('parses a generic typed declaration whose name is `type`', () => {
+        // Regression: name slot `type` (KEYWORD) after `array<float>` was rejected.
+        const code = `
+//@version=5
+indicator("generic local var with contextual name", overlay=true)
+array<float> type = array.new<float>()
+plot(type)
+        `;
+        const result = transpile(code);
+        const jsCode = result.toString();
+        expect(jsCode).toBeDefined();
+        expect(jsCode).toMatch(/glb1_type = \$\.init\(/);
+        expect(jsCode).toMatch(/plot\.param\([^)]*glb1_type/);
+    });
+});
+
 describe('Pine Script Transpilation - Comma-separated typed declarations', () => {
     // Pine v6 allows multiple typed variable declarations on a single line
     // sharing the leading type qualifier:

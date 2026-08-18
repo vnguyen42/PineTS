@@ -816,8 +816,10 @@ export class Parser {
         // Check for array shorthand: type[] name =
         if (this.peek(offset).type === TokenType.LBRACKET && this.peek(offset + 1).type === TokenType.RBRACKET) {
             offset += 2; // skip []
-            // Now expect IDENTIFIER (name) then =
-            if (this.peek(offset).type !== TokenType.IDENTIFIER) return false;
+            // The name may be a contextual keyword (`type`/`method`/`enum`) —
+            // Pine treats them as identifiers outside their declaration position
+            // (mirrors expectIdentifierOrContextual in parseTypedVarDeclaration).
+            if (!this.isIdentifierLike(this.peek(offset))) return false;
             offset++;
             return this.peek(offset).type === TokenType.OPERATOR && this.peek(offset).value === '=';
         }
@@ -832,14 +834,15 @@ export class Parser {
                 else if (this.peek(offset).type === TokenType.OPERATOR && this.peek(offset).value === '>') depth--;
                 offset++;
             }
-            // Now expect IDENTIFIER (name) then =
-            if (this.peek(offset).type !== TokenType.IDENTIFIER) return false;
+            // Now expect IDENTIFIER (name) then = (name may be contextual)
+            if (!this.isIdentifierLike(this.peek(offset))) return false;
             offset++;
             return this.peek(offset).type === TokenType.OPERATOR && this.peek(offset).value === '=';
         }
 
         // Check for simple typed declaration: type name = or type qualifier name =
-        if (this.peek(offset).type !== TokenType.IDENTIFIER) return false;
+        // (name may be a contextual keyword: `int type = ...`)
+        if (!this.isIdentifierLike(this.peek(offset))) return false;
         offset++;
         // Skip additional type qualifiers (series float x, simple int y, etc.)
         while (this.peek(offset).type === TokenType.IDENTIFIER) {
