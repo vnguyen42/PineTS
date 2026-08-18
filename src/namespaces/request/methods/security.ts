@@ -3,7 +3,7 @@
 import { PineTS } from '../../../PineTS.class';
 import { Series } from '../../../Series';
 import { splitTickerModifier, withTickerModifier } from '../../../tickerModifier';
-import { TIMEFRAMES, normalizeTimeframe } from '../utils/TIMEFRAMES';
+import { timeframeToMinutes } from '../utils/TIMEFRAMES';
 import { findSecContextIdx } from '../utils/findSecContextIdx';
 import { findLTFContextIdx } from '../utils/findLTFContextIdx';
 import { parseArgsForPineParams } from '../../utils';
@@ -199,10 +199,10 @@ export function security(context: any) {
             return Array.isArray(resolved) ? [resolved] : resolved;
         }
 
-        const ctxTimeframeIdx = TIMEFRAMES.indexOf(normalizeTimeframe(context.timeframe));
-        const reqTimeframeIdx = TIMEFRAMES.indexOf(normalizeTimeframe(_timeframe));
+        const ctxTimeframeMinutes = timeframeToMinutes(context.timeframe);
+        const reqTimeframeMinutes = timeframeToMinutes(_timeframe);
 
-        if (ctxTimeframeIdx == -1 || reqTimeframeIdx == -1) {
+        if (ctxTimeframeMinutes === null || reqTimeframeMinutes === null) {
             throw new Error('Invalid timeframe');
         }
 
@@ -220,14 +220,14 @@ export function security(context: any) {
         const reqModifier = reqParts.modifier === 'standard' ? null : reqParts.modifier; // ";standard" ≡ no modifier
         const isSameSymbol = !_symbol || _symbol === '' || (reqParts.symbol === ctxParts.symbol && reqModifier === chartModifier);
 
-        if (ctxTimeframeIdx === reqTimeframeIdx && isSameSymbol) {
+        if (ctxTimeframeMinutes === reqTimeframeMinutes && isSameSymbol) {
             // Resolve any helper objects (TimeComponentHelper, NAHelper, Series, etc.)
             // in the expression that haven't been extracted to their primitive values yet.
             const resolved = resolveExprValue(_expression);
             return Array.isArray(resolved) ? [resolved] : resolved;
         }
 
-        const isLTF = ctxTimeframeIdx > reqTimeframeIdx;
+        const isLTF = ctxTimeframeMinutes > reqTimeframeMinutes;
 
         const myOpenTime = Series.from(context.data.openTime).get(0);
         const myCloseTime = Series.from(context.data.closeTime).get(0);

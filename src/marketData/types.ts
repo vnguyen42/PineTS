@@ -60,6 +60,10 @@ export const TIMEFRAME_SECONDS: Record<string, number> = {
     '1': 60, '3': 180, '5': 300, '15': 900, '30': 1800, '45': 2700,
     // Hours
     '60': 3600, '120': 7200, '180': 10800, '240': 14400,
+    // Legal TradingView minute timeframes beyond the whitelist (6h/8h/12h)
+    '360': 21600, '480': 28800, '720': 43200,
+    // '1440' is the 24h minute form, ≡ 'D'
+    '1440': 86400,
     // Calendar periods (approximate, for ratio math only)
     'D': 86400, 'W': 604800, 'M': 2592000,
 };
@@ -85,6 +89,10 @@ export const TIMEFRAME_PERIOD_INFO: Record<string, { periodType: PeriodType; mul
     '120': { periodType: 'hour',   multiplier: 2 },
     '180': { periodType: 'hour',   multiplier: 3 },
     '240': { periodType: 'hour',   multiplier: 4 },
+    '360': { periodType: 'hour',   multiplier: 6 },
+    '480': { periodType: 'hour',   multiplier: 8 },
+    '720': { periodType: 'hour',   multiplier: 12 },
+    '1440': { periodType: 'day',   multiplier: 1 },
     'D':   { periodType: 'day',    multiplier: 1 },
     'W':   { periodType: 'week',   multiplier: 1 },
     'M':   { periodType: 'month',  multiplier: 1 },
