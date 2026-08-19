@@ -1586,25 +1586,6 @@ export function processExitOrders(context: any, phase: 'open' | 'intrabar' | 'cl
             }
         }
 
-        // Stale-attachment drop: when the exit was queued at the same bar
-        // as the reversal entry it attaches to, the user's absolute
-        // limit/stop values were computed from the OUTGOING position's
-        // avg. TV's behavior depends on the user's variable scope: if the
-        // variable was scoped to an if-block (lazy series eval gives NA
-        // on non-trigger bars), TV doesn't fire; if the variable is in
-        // main scope (always-defined value), TV fires the captured value.
-        //
-        // Cadence detection runs at queue time (see exit.ts): the
-        // `_isPersistent` flag is set when the user called this same
-        // call site on the prior bar (i.e. the strategy.exit line is
-        // being re-executed every bar). Persistent capture → trust the
-        // value (mirrors TV's main-scope path). Ephemeral capture →
-        // drop the absolute legs (mirrors TV's NA-on-non-trigger-bar
-        // path for if-block-scoped vars).
-        if (order._attachedAtReversal && !order._isPersistent) {
-            if (order.limit !== undefined) absTp = undefined;
-            if (order.stop !== undefined) absSl = undefined;
-        }
 
         // Trailing-stop state.
         // Two arming modes:

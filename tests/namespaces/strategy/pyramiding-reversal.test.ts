@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import { Context } from '../../../src/Context.class';
-import { initializeStrategy, processStrategyOrders } from '../../../src/namespaces/strategy/utils';
+import { initializeStrategy, processStrategyOrders, processExitOrders } from '../../../src/namespaces/strategy/utils';
 import { entry } from '../../../src/namespaces/strategy/methods/entry';
+import { exit } from '../../../src/namespaces/strategy/methods/exit';
 import { Series } from '../../../src/Series';
 
 /**
@@ -119,5 +120,75 @@ describe('pyramiding reversal — regression guards (green before AND after)', (
         expect(o[0].qty).toBe(4);
         expect(o[0]._isReversalEntry).toBe(true);
         expect(o[0]._base_qty).toBe(1);
+    });
+});
+
+describe('strategy.exit bracket attachment around entries', () => {
+    it('keeps an ephemeral stop/limit bracket attached when its entry reverses the position', () => {
+        const context = makeContext();
+        openShorts(context, 1, 110);
+
+        entry(context)('L', 'long');
+        exit(context)('LX', 'L', { stop: 95, limit: 110 });
+
+        context.idx = 1;
+        context.data.open = new Series([100, 100]);
+        context.data.high = new Series([101, 102]);
+        context.data.low = new Series([99, 94]);
+        context.data.close = new Series([100, 96]);
+        context.data.openTime = new Series([0, 86_400_000]);
+
+        expect(processStrategyOrders(context)).toBe(1);
+        expect(context.strategy.position_size).toBe(1);
+        expect(processExitOrders(context, 'intrabar')).toBe(1);
+        expect(context.strategy.position_size).toBe(0);
+        expect(context.strategy.closedtrades).toHaveLength(2);
+        expect(context.strategy.closedtrades[1].exit_price).toBe(95);
+        expect(context.strategy.closedtrades[1].exit_id).toBe('LX');
+    });
+
+    it('lets a bracket placed before its entry wait without a phantom fill', () => {
+        const context = makeContext();
+
+        exit(context)('LX', 'L', { stop: 95, limit: 110 });
+        expect(processExitOrders(context, 'open')).toBe(0);
+        expect(context.strategy.closedtrades).toHaveLength(0);
+        expect(context.strategy.pending_orders[0].status).toBe('pending');
+        entry(context)('L', 'long');
+
+        context.idx = 1;
+        context.data.open = new Series([100, 100]);
+        context.data.high = new Series([101, 102]);
+        context.data.low = new Series([99, 94]);
+        context.data.close = new Series([100, 96]);
+        context.data.openTime = new Series([0, 86_400_000]);
+
+        expect(processStrategyOrders(context)).toBe(1);
+        expect(processExitOrders(context, 'intrabar')).toBe(1);
+        expect(context.strategy.closedtrades).toHaveLength(1);
+        expect(context.strategy.closedtrades[0].exit_price).toBe(95);
+    });
+
+    it('keeps one all-entry bracket effective for a pyramided position', () => {
+        const context = makeContext();
+
+        entry(context)('L1', 'long');
+        entry(context)('L2', 'long');
+        entry(context)('L3', 'long');
+        exit(context)('LX', '', { stop: 95, limit: 110 });
+
+        context.idx = 1;
+        context.data.open = new Series([100, 100]);
+        context.data.high = new Series([101, 102]);
+        context.data.low = new Series([99, 94]);
+        context.data.close = new Series([100, 96]);
+        context.data.openTime = new Series([0, 86_400_000]);
+
+        expect(processStrategyOrders(context)).toBe(3);
+        expect(context.strategy.position_size).toBe(3);
+        expect(processExitOrders(context, 'intrabar')).toBe(3);
+        expect(context.strategy.position_size).toBe(0);
+        expect(context.strategy.closedtrades).toHaveLength(3);
+        expect(context.strategy.closedtrades.every((trade: { exit_price: number }) => trade.exit_price === 95)).toBe(true);
     });
 });

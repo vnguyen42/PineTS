@@ -108,22 +108,7 @@ export function exit(context: any) {
         const limit       = limitRaw      !== undefined ? roundToMintick(limitRaw,      currentClose, mintick) : undefined;
         const stop        = stopRaw       !== undefined ? roundToMintick(stopRaw,       currentClose, mintick) : undefined;
         const trailPrice  = trailPriceRaw !== undefined ? roundToMintick(trailPriceRaw, currentClose, mintick) : undefined;
-
-        // Detect stale-attachment: when this exit is attached to a pending
-        // entry that REVERSES the current position, the user's absolute
-        // limit/stop values (computed from strategy.position_avg_price at
-        // call time) reflect the OUTGOING position's avg, not the incoming
-        // one. TV silently drops those legs; we mark the order here and
-        // processExitOrders skips the absolute legs when the flag is set.
         const fromEntryId = fromEntry ?? '';
-        const pendingEntry = fromEntryId
-            ? context.strategy.pending_orders.find(
-                  (o: Order) => o.category === 'entry' && o.id === fromEntryId && o.status === 'pending',
-              )
-            : context.strategy.pending_orders.find(
-                  (o: Order) => o.category === 'entry' && o.status === 'pending',
-              );
-        const attachedAtReversal = !!pendingEntry?._isReversalEntry;
 
         // Cadence detection: persistent vs ephemeral capture.
         // If the user called strategy.exit at THIS exact call site on the
@@ -131,9 +116,11 @@ export function exit(context: any) {
         // is in main scope, value always defined). If the prior bar had
         // no call, the pattern is "sparse" (ephemeral — variable likely
         // scoped to an if-block, NA on non-trigger bars in TV). Used
-        // below by processExitOrders to suppress the stale-reversal drop
-        // for persistent-pattern exits, matching TV's actual behavior of
-        // firing the captured value when the user keeps refreshing it.
+        // below by processExitOrders to keep persistent-pattern exits
+        // active, matching TV's actual behavior of firing the captured
+        // value when the user keeps refreshing it. (The reversal-drop
+        // suppression was removed in VIN-77: brackets now attach to the
+        // filled position, including reversal entries.)
         const history = context.strategy._exit_call_history as Map<string, number>;
         const lastBarForSite = history.get(callsiteId);
         const isPersistent = lastBarForSite !== undefined && lastBarForSite === context.idx - 1;
@@ -166,7 +153,6 @@ export function exit(context: any) {
             disable_alert: extractValue(parsed.disable_alert),
             trail_armed: false,
             trail_peak: NaN,
-            _attachedAtReversal: attachedAtReversal,
             _isPersistent: isPersistent,
             _callsiteId: callsiteId,
         };

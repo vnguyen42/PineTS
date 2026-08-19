@@ -147,16 +147,11 @@ export interface Order {
     trail_peak?: number;
     trail_armed?: boolean;
 
-    // Internal: set on `strategy.entry` orders that REVERSE the current
-    // position (opposite direction with existing size). Used by
-    // `strategy.exit` to detect when its absolute limit/stop values were
-    // computed from the OUTGOING position's avg (i.e. stale): the user
-    // typically writes `stop = strategy.position_avg_price + N` on the
-    // crossunder bar, but at that point position_avg_price still reflects
-    // the position being reversed away. TV silently ignores stale legs;
-    // PT drops them at trigger evaluation (see processExitOrders).
+    // Internal: set on `strategy.entry` orders that reverse the current
+    // position (opposite direction with existing size). The deferred
+    // close-margin-call gate uses it to preserve reversal entries while
+    // cancelling stale same-direction adds.
     _isReversalEntry?: boolean;
-    _attachedAtReversal?: boolean;
 
     // Internal: cadence-detection for strategy.exit. TV's broker
     // emulator uses Pine's lazy series-eval semantic for exit
@@ -166,12 +161,10 @@ export interface Order {
     // For a variable in MAIN scope (persistent pattern, called every
     // bar), TV reads the captured value → fires stale captures.
     //
-    // PT can't see the variable's scope from runtime, but the call
-    // CADENCE (how often the user calls strategy.exit per call site)
-    // correlates 1:1. Detected at queue time: if the user called this
-    // exit's callsite on the PRIOR bar, `_isPersistent = true`. Used
-    // by processExitOrders to suppress the stale-reversal drop on
-    // persistent-pattern exits.
+    // PT can't see the variable's scope from runtime, but call cadence
+    // correlates with it. If the user called this exact exit callsite on the
+    // prior bar, `_isPersistent = true`. processExitOrders uses the flag when
+    // validating absolute exit legs.
     _isPersistent?: boolean;
     _callsiteId?: string;
 
