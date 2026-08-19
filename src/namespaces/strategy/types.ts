@@ -174,6 +174,35 @@ export interface Order {
     // time — if none of the originally-intended trades are still open, the
     // close order is cancelled.
     _intended_trade_ids?: string[];
+
+    // Internal: set on `strategy.entry` orders whose qty was derived from the
+    // strategy() default (no explicit qty argument) under
+    // `default_qty_type = strategy.percent_of_equity`. With
+    // `calc_on_order_fills = true`, TV sizes percent_of_equity orders at
+    // FILL ("position sizes will be calculated as a percentage of the
+    // available equity when the trade opens" — Strategy properties help
+    // article); the engine re-derives the qty at fill for those orders (see
+    // processStrategyOrders). Explicit qty arguments are never re-scaled.
+    _qty_from_default_equity?: boolean;
+
+    // Internal: ordered base size (before the reversal close-qty addition).
+    // executeOrder uses it to split a reversal OVERSHOOT into its own lot
+    // when a deferred close-margin-call shrank the position between queue
+    // and fill (see entry.ts). Re-derived at fill for percent_of_equity
+    // defaults in calc_on_order_fills mode.
+    _base_qty?: number;
+}
+
+// Per-bar intrabar-sequencing state for `calc_on_order_fills = true`
+// (TV broker emulator). A historical bar is assumed to have 4 ticks in the
+// order the broker emulator infers from the bar's OHLC (open → high → low →
+// close when the open is closer to the high, open → low → high → close
+// otherwise). Each COF pass consumes one tick: orders placed during the
+// recalculation after a fill fill on the NEXT tick of the same bar, and a
+// same-bar market fill prices at the current tick's OHLC value.
+export interface CofBarState {
+    pass: number; // current tick index (0..3)
+    ticks: number[]; // [open, tick2, tick3, close]
 }
 
 /**
@@ -283,6 +312,11 @@ export interface StrategyState {
     // opened in the run — the anchor for the buy-and-hold benchmark. Latched
     // once in openTrade and never overwritten.
     _first_entry_price?: number;
+
+    // Internal: per-bar intrabar-sequencing state for
+    // `calc_on_order_fills = true` (see CofBarState). Set at the start of
+    // each bar by the execution loop, null outside the COF processing.
+    _cof?: CofBarState | null;
 
     // Internal: mark-to-market equity at each calendar month's last bar,
     // and the month key of the most recent bar (rollover detector). Feed

@@ -197,11 +197,21 @@ export function calculateOrderQty(context: any, specifiedQty: number | undefined
 /**
  * Process pending orders and execute them
  */
-export function processStrategyOrders(context: any): void {
-    if (!context.strategy) return;
+export function processStrategyOrders(context: any): number {
+    if (!context.strategy) return 0;
 
     const strategy: StrategyState = context.strategy;
     const { pending_orders } = strategy;
+
+    // calc_on_order_fills=true intrabar sequencing (TV broker emulator):
+    // orders placed during a same-bar recalculation fill on the NEXT tick
+    // of that bar; the fill prices for same-bar MARKET orders are the
+    // bar's assumed tick OHLC values (see CofBarState / the execution loop).
+    const cof = strategy.config.calc_on_order_fills === true;
+    const cofState = cof ? (strategy._cof ?? null) : null;
+    // Number of orders filled by this call — the execution loop uses it to
+    // decide whether to recalculate the strategy (TV: recalc after each fill).
+    let fills = 0;
 
     // Get current bar's OHLC data
     const openPrice = Series.from(context.data.open).get(0);
@@ -249,9 +259,12 @@ export function processStrategyOrders(context: any): void {
         // Skip exit-category orders — processExitOrders handles them.
         if ((order.category ?? 'entry') === 'exit') continue;
 
-        // Orders placed on bar N can only fill on bar N+1 or later
-        // Skip if this order was placed on the current bar (context.idx)
-        if (order.bar >= context.idx) {
+        // Orders placed on bar N can only fill on bar N+1 or later.
+        // Skip if this order was placed on the current bar (context.idx).
+        // EXCEPT in calc_on_order_fills mode: orders placed during a
+        // same-bar recalculation are processed in the SAME bar (they fill
+        // on the next assumed intrabar tick).
+        if (order.bar >= context.idx && !cof) {
             continue;
         }
 
@@ -261,10 +274,26 @@ export function processStrategyOrders(context: any): void {
         // Determine if order should be filled based on type
         switch (order.type) {
             case 'market':
-                // Market orders fill at current bar's open (which is "next bar's open" from order placement)
+                // Market orders fill at current bar's open (which is "next bar's open" from order placement).
+                // In calc_on_order_fills mode, a market order placed during a
+                // same-bar recalculation fills on the next assumed intrabar
+                // tick at that tick's OHLC value (TV: "the broker emulator
+                // fills the order on the next tick at one of the bar's OHLC
+                // values").
                 shouldFill = true;
-                fillPrice = openPrice;
+                fillPrice = cofState && order.bar === context.idx
+                    ? cofState.ticks[Math.min(cofState.pass, cofState.ticks.length - 1)]
+                    : openPrice;
                 break;
+            // LIMITATION (déclarée 2026-08-19, revue VIN-72) : les triggers
+            // limit/stop placés pendant un recalc calc_on_order_fills sont
+            // évalués contre le high/low COMPLET de la barre, pas contre le
+            // chemin de ticks restant après placement. TV (« fills the order
+            // on the next tick at one of the bar's OHLC values ») peut donc
+            // refuser un ordre dont le trigger a déjà été visité plus tôt
+            // dans la barre. Non exercé par aucun script du corpus (2205
+            // inclus) ; à revoir seulement si un script réel diverge dessus.
+
 
             case 'limit':
                 // Limit orders fill when price reaches the limit level
@@ -328,6 +357,32 @@ export function processStrategyOrders(context: any): void {
                 const oldSize = strategy.position_size;
                 const oldSign = Math.sign(oldSize);
                 const isReversal = oldSign !== 0 && oldSign !== direction;
+
+                // calc_on_order_fills mode: TV sizes percent_of_equity default
+                // orders at FILL ("position sizes will be calculated as a
+                // percentage of the available equity when the trade opens" —
+                // Strategy properties help article). The placement-time size
+                // (equity at the placement bar's close / that close) times a
+                // higher fill open spuriously trips the margin rejection below
+                // (notional = qty × fill > equity) for orders TV accepts —
+                // observed on 2205/FLOWUSDT 4h: 3 entries rejected by the
+                // fork, filled by TV. Re-derive the qty at fill using the
+                // fill-time equity and the fill price. Explicit qty arguments
+                // and other default_qty_type modes are never re-scaled.
+                if (cof && order._qty_from_default_equity) {
+                    let qtyType = strategy.config.default_qty_type ?? 'fixed';
+                    if (typeof qtyType === 'function') qtyType = (qtyType as Function)();
+                    if (qtyType === 'percent_of_equity') {
+                        let qtyValue = strategy.config.default_qty_value ?? 1;
+                        if (typeof qtyValue === 'function') qtyValue = (qtyValue as Function)();
+                        const QTY_PRECISION = 1e6;
+                        const positionValue = (strategy.equity * Number(qtyValue)) / 100;
+                        const baseQty = Math.floor((positionValue / fillPrice) * QTY_PRECISION) / QTY_PRECISION;
+                        order._base_qty = baseQty;
+                        order.qty = isReversal ? Math.abs(oldSize) + baseQty : baseQty;
+                    }
+                }
+
                 const newOpenQty = isReversal ? Math.max(0, order.qty - Math.abs(oldSize)) : order.qty;
 
                 if (newOpenQty > 0) {
@@ -365,6 +420,7 @@ export function processStrategyOrders(context: any): void {
                             order.fill_price = fillPrice;
                             order.fill_bar = context.idx;
                             order.fill_time = currentTime;
+                            fills += 1;
                         } else {
                             order.status = 'cancelled';
                         }
@@ -379,6 +435,7 @@ export function processStrategyOrders(context: any): void {
             order.fill_price = fillPrice;
             order.fill_bar = context.idx;
             order.fill_time = currentTime;
+            fills += 1;
         }
     }
 
@@ -389,6 +446,7 @@ export function processStrategyOrders(context: any): void {
     // Peaks are latched at the bar's end inside processExitOrders.
     markToMarket(context, closePrice);
     updateStrategyMetrics(context);
+    return fills;
 }
 
 /**
@@ -1220,10 +1278,18 @@ export function closeMatching(
  *     triggers evaluated against current bar's high/low. Trailing-stop
  *     peak (trade.trail_peak) is updated each bar even when not triggered.
  */
-export function processExitOrders(context: any, phase: 'open' | 'intrabar' = 'intrabar'): void {
-    if (!context.strategy) return;
+export function processExitOrders(context: any, phase: 'open' | 'intrabar' = 'intrabar'): number {
+    if (!context.strategy) return 0;
     const strategy: StrategyState = context.strategy;
-    if (strategy.pending_orders.length === 0) return;
+    if (strategy.pending_orders.length === 0) return 0;
+
+    // calc_on_order_fills=true intrabar sequencing (see CofBarState): market
+    // closes placed during a same-bar recalculation fill on the next assumed
+    // intrabar tick at that tick's OHLC value. The fill count drives the
+    // execution loop's recalc decision.
+    const cof = strategy.config.calc_on_order_fills === true;
+    const cofState = cof ? (strategy._cof ?? null) : null;
+    let fills = 0;
 
     const openPrice = Series.from(context.data.open).get(0);
     const highPrice = Series.from(context.data.high).get(0);
@@ -1297,12 +1363,21 @@ export function processExitOrders(context: any, phase: 'open' | 'intrabar' = 'in
             // their interplay with reversal entries is governed by the
             // _intended_trade_ids snapshot above.
             if (phase === 'open') continue;
-            // Skip orders placed on the current bar — they fill on the next bar's open.
-            if (order.bar >= context.idx) continue;
+            // Skip orders placed on the current bar — they fill on the next
+            // bar's open. EXCEPT in calc_on_order_fills mode: a close placed
+            // during a same-bar recalculation fills on the next assumed
+            // intrabar tick (round trip).
+            if (order.bar >= context.idx && !cof) continue;
 
             // Determine fill price; immediately=true (when supported) would fire
-            // at current close; default is current bar's open.
-            let fillPrice = order.immediately ? closePrice : openPrice;
+            // at current close; default is current bar's open. In
+            // calc_on_order_fills mode a same-bar close fills at the current
+            // assumed intrabar tick's OHLC value.
+            let fillPrice = cofState && order.bar === context.idx
+                ? cofState.ticks[Math.min(cofState.pass, cofState.ticks.length - 1)]
+                : order.immediately
+                  ? closePrice
+                  : openPrice;
             // Apply slippage against the close direction (opposite of position direction).
             fillPrice = applySlippage(context, -matchingDir, fillPrice);
 
@@ -1320,6 +1395,7 @@ export function processExitOrders(context: any, phase: 'open' | 'intrabar' = 'in
             order.fill_price = fillPrice;
             order.fill_bar = context.idx;
             order.fill_time = currentTime;
+            fills += 1;
             continue;
         }
 
@@ -1673,6 +1749,7 @@ export function processExitOrders(context: any, phase: 'open' | 'intrabar' = 'in
                 capRemaining -= qtyThis;
                 lastFill = fillPrice;
                 closedAny = true;
+                fills += 1;
             }
 
             // The order is consumed when nothing matching remains open or
@@ -1694,6 +1771,7 @@ export function processExitOrders(context: any, phase: 'open' | 'intrabar' = 'in
     // Refresh equity for any caller reading metrics between processExitOrders
     // and the bar-finalize step. Peaks are latched in finalizeBar().
     markToMarket(context, closePrice);
+    return fills;
 }
 
 /**

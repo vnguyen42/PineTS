@@ -98,6 +98,15 @@ export function entry(context: any) {
         const currentPrice = Series.from(context.data.close).get(0);
         const baseQty = calculateOrderQty(context, qtyValue, dir, currentPrice);
 
+        // Flag orders whose qty came from the strategy() default under
+        // percent_of_equity (no explicit qty argument). With
+        // calc_on_order_fills=true the engine re-sizes them at FILL time
+        // (TV sizes percent_of_equity as a percentage of the available
+        // equity "when the trade opens" — see processStrategyOrders).
+        let defaultQtyType = strategy.config.default_qty_type ?? 'fixed';
+        if (typeof defaultQtyType === 'function') defaultQtyType = (defaultQtyType as Function)();
+        const qtyFromDefaultEquity = qtyValue === undefined && defaultQtyType === 'percent_of_equity';
+
         const isReversal = currentSize !== 0 && Math.sign(currentSize) !== dir;
         const totalQty = isReversal ? Math.abs(currentSize) + baseQty : baseQty;
 
@@ -142,6 +151,7 @@ export function entry(context: any) {
             // overshoot as two separate lots (xlsx 2021-10-02: 5 +
             // 0.263108 longs at the same fill).
             _base_qty: baseQty,
+            _qty_from_default_equity: qtyFromDefaultEquity,
         } as any;
 
         strategy.pending_orders.push(orderObj);

@@ -1178,24 +1178,95 @@ export class PineTS {
                 // time) overshoots by exactly the deferred quantity, as TV
                 // does.
                 applyPendingCloseMarginCall(context);
-                processStrategyOrders(context);
-                // Margin checkpoints along the intra-bar path (TV broker
-                // emulator): first at the OPEN right after entries fill;
-                // then at the adverse extreme — BEFORE exit fills when the
-                // bar's first move is adverse for the position (the
-                // extreme precedes the favorable exits on the path), AFTER
-                // them otherwise (favorable exits free margin first). The
-                // 'extreme' checkpoint may schedule a deferred second
-                // margin call at this bar's close (phantom re-check).
-                processMarginCall(context, 'open');
-                const adverseFirst = isAdverseFirstBar(context);
-                if (adverseFirst) processMarginCall(context, 'extreme');
-                processExitOrders(context, 'intrabar');
-                if (!adverseFirst) processMarginCall(context, 'extreme');
-                // Latch max_drawdown / max_runup ONCE at the end of the bar so
-                // trades closed mid-bar by TP / SL contribute their realized
-                // P&L (not phantom intra-bar excursions against the raw H/L).
-                finalizeStrategyBar(context);
+                if (context.strategy.config.calc_on_order_fills === true) {
+                    // calc_on_order_fills=true — TV broker emulator intrabar
+                    // sequencing. Each historical bar is assumed to have 4
+                    // ticks (open, then high & low in the order inferred from
+                    // the bar's OHLC, then close). The strategy executes once
+                    // at the bar's close as usual, PLUS after every order
+                    // fill: the recalculation happens at the fill price, and
+                    // orders placed during it are processed in the SAME bar
+                    // (they fill on the next assumed tick). A same-bar fill
+                    // can therefore chain entries and exits (round trips).
+                    // The loop below processes pending orders and re-runs the
+                    // script after any pass that produced a fill, until a
+                    // full pass has no fill or the 4 ticks are consumed.
+                    // Orders placed by the final bar-close execution below
+                    // fill on the next bar, as in default mode.
+                    const strategy = context.strategy;
+                    const openPrice = Series.from(context.data.open).get(0);
+                    const highPrice = Series.from(context.data.high).get(0);
+                    const lowPrice = Series.from(context.data.low).get(0);
+                    const closePrice = Series.from(context.data.close).get(0);
+                    const openCloserToHigh = Math.abs(highPrice - openPrice) <= Math.abs(openPrice - lowPrice);
+                    strategy._cof = {
+                        pass: 0,
+                        ticks: openCloserToHigh
+                            ? [openPrice, highPrice, lowPrice, closePrice]
+                            : [openPrice, lowPrice, highPrice, closePrice],
+                    };
+                    for (;;) {
+                        let fills = processStrategyOrders(context);
+                        // Margin checkpoints along the intra-bar path (TV
+                        // broker emulator): first at the OPEN right after
+                        // entries fill; then at the adverse extreme — BEFORE
+                        // exit fills when the bar's first move is adverse for
+                        // the position (the extreme precedes the favorable
+                        // exits on the path), AFTER them otherwise (favorable
+                        // exits free margin first). The 'extreme' checkpoint
+                        // may schedule a deferred second margin call at this
+                        // bar's close (phantom re-check).
+                        processMarginCall(context, 'open');
+                        const adverseFirst = isAdverseFirstBar(context);
+                        if (adverseFirst) processMarginCall(context, 'extreme');
+                        fills += processExitOrders(context, 'intrabar');
+                        if (!adverseFirst) processMarginCall(context, 'extreme');
+                        if (fills <= 0) break;
+                        strategy._cof.pass += 1;
+                        if (strategy._cof.pass >= strategy._cof.ticks.length) break;
+                        // Recalculation at the fill price (TV: "the strategy
+                        // performs an additional execution on each tick where
+                        // the broker emulator fills an order"). The recalc
+                        // re-executes the script, which re-runs the plot()
+                        // calls — TV's plots still carry ONE point per bar
+                        // (the bar's final values), so the channels are
+                        // rolled back to their pre-recalc length afterwards.
+                        const plotLengths = new Map<string, number>();
+                        for (const key of Object.keys(context.plots ?? {})) {
+                            plotLengths.set(key, (context.plots[key] as any).data?.length ?? 0);
+                        }
+                        await transpiledFn(context);
+                        for (const [key, len] of plotLengths) {
+                            const channel = (context.plots as any)?.[key];
+                            if (channel && channel.data && channel.data.length > len) channel.data.length = len;
+                        }
+                    }
+                    strategy._cof = null;
+                    // Latch max_drawdown / max_runup ONCE at the end of the
+                    // bar so trades closed mid-bar by TP / SL contribute their
+                    // realized P&L (not phantom intra-bar excursions against
+                    // the raw H/L).
+                    finalizeStrategyBar(context);
+                } else {
+                    processStrategyOrders(context);
+                    // Margin checkpoints along the intra-bar path (TV broker
+                    // emulator): first at the OPEN right after entries fill;
+                    // then at the adverse extreme — BEFORE exit fills when the
+                    // bar's first move is adverse for the position (the
+                    // extreme precedes the favorable exits on the path), AFTER
+                    // them otherwise (favorable exits free margin first). The
+                    // 'extreme' checkpoint may schedule a deferred second
+                    // margin call at this bar's close (phantom re-check).
+                    processMarginCall(context, 'open');
+                    const adverseFirst = isAdverseFirstBar(context);
+                    if (adverseFirst) processMarginCall(context, 'extreme');
+                    processExitOrders(context, 'intrabar');
+                    if (!adverseFirst) processMarginCall(context, 'extreme');
+                    // Latch max_drawdown / max_runup ONCE at the end of the bar so
+                    // trades closed mid-bar by TP / SL contribute their realized
+                    // P&L (not phantom intra-bar excursions against the raw H/L).
+                    finalizeStrategyBar(context);
+                }
             }
 
             const result = await transpiledFn(context);

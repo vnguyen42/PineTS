@@ -1,0 +1,252 @@
+import { describe, expect, it } from 'vitest';
+import { Context } from '../../../src/Context.class';
+import { initializeStrategy, processStrategyOrders, processExitOrders } from '../../../src/namespaces/strategy/utils';
+import { entry } from '../../../src/namespaces/strategy/methods/entry';
+import { exit } from '../../../src/namespaces/strategy/methods/exit';
+import { PineTS } from '../../../src/PineTS.class';
+import { Series } from '../../../src/Series';
+
+/**
+ * calc_on_order_fills=true — TV broker-emulator intrabar sequencing.
+ *
+ * TV semantics (official docs, Concepts / Strategies → "Altering
+ * calculation behavior" → calc_on_order_fills): when the parameter is true,
+ * the strategy performs an additional execution on each tick where the
+ * broker emulator fills an order. On historical bars the emulator assumes 4
+ * ticks per bar (open, then high & low in the inferred order, then close),
+ * and orders placed during a recalculation fill on the NEXT tick of the
+ * SAME bar — enabling same-bar round trips. Without the parameter (default
+ * false), orders placed on bar N fill from bar N+1 and a strategy can never
+ * enter and exit within one bar.
+ *
+ * The engine mirrors this with the per-bar COF loop in PineTS.class.ts
+ * (process orders → re-run the script after any fill → repeat, max 4 ticks)
+ * plus the same-bar guards lifted in processStrategyOrders /
+ * processExitOrders and the fill-time sizing of percent_of_equity default
+ * quantities (TV: "position sizes will be calculated as a percentage of the
+ * available equity when the trade opens" — Strategy properties help
+ * article).
+ */
+
+function makeContext(config: Record<string, unknown> = {}) {
+    const context: any = new Context({
+        marketData: [],
+        source: [],
+        tickerId: 'BTCUSDT',
+        timeframe: 'D',
+    } as any);
+    context.idx = 0;
+    context.data.open = new Series([100]);
+    context.data.high = new Series([101]);
+    context.data.low = new Series([99]);
+    context.data.close = new Series([100]);
+    context.data.openTime = new Series([0]);
+    context.pine = { syminfo: { mintick: 0.01, pointvalue: 1 } } as any;
+    initializeStrategy(context, { default_qty_type: 'fixed', default_qty_value: 1, ...config });
+    return context;
+}
+
+describe('strategy calc_on_order_fills — same-bar sequencing', () => {
+    it('round trip: a market entry filling at the open and a TP bracket placed by the same-bar recalculation exit in the SAME bar', () => {
+        const context = makeContext({ calc_on_order_fills: true });
+        // Entry queued on bar 0 (fills at bar 1's open).
+        entry(context)('L', 'long');
+        expect(context.strategy.pending_orders.length).toBe(1);
+        expect(context.strategy.pending_orders[0]._qty_from_default_equity).toBe(false);
+
+        // Bar 1: open 100, high 110, low 95, close 105 (open closer to low
+        // → assumed ticks open → low → high → close).
+        context.idx = 1;
+        context.data.open = new Series([100, 100]);
+        context.data.high = new Series([101, 110]);
+        context.data.low = new Series([99, 95]);
+        context.data.close = new Series([100, 105]);
+        context.data.openTime = new Series([0, 86_400_000]);
+        context.strategy._cof = { pass: 0, ticks: [100, 95, 110, 105] };
+
+        // Pass 0: the market entry fills at the open.
+        const fills0 = processStrategyOrders(context);
+        expect(fills0).toBe(1);
+        expect(context.strategy.position_size).toBe(1);
+        expect(context.strategy.opentrades.length).toBe(1);
+
+        // Recalculation at the fill price — the script places the TP bracket.
+        exit(context)('X', 'L', { limit: 102 });
+        expect(context.strategy.pending_orders.length).toBe(1);
+
+        // Pass 1: the bracket evaluates intrabar against the SAME bar and fills.
+        context.strategy._cof.pass = 1;
+        const fills1 = processExitOrders(context, 'intrabar');
+        expect(fills1).toBe(1);
+        expect(context.strategy.position_size).toBe(0);
+        expect(context.strategy.opentrades.length).toBe(0);
+        expect(context.strategy.closedtrades.length).toBe(1);
+
+        // TV books the ledger timestamps at the bar's open time — the round
+        // trip carries entry_time === exit_time === the same bar's timestamp.
+        const trade = context.strategy.closedtrades[0];
+        expect(trade.entry_time).toBe(86_400_000);
+        expect(trade.exit_time).toBe(86_400_000);
+        expect(trade.entry_price).toBe(100);
+        expect(trade.exit_price).toBe(102);
+    });
+
+    it('intrabar limit entry placed during a same-bar recalculation fills in the same bar (COF) and is deferred (no-COF)', () => {
+        // COF: the limit order queued on the current bar is eligible same-bar.
+        const cof = makeContext({ calc_on_order_fills: true });
+        cof.idx = 1;
+        cof.data.open = new Series([100, 100]);
+        cof.data.high = new Series([101, 101]);
+        cof.data.low = new Series([99, 95]);
+        cof.data.close = new Series([100, 100]);
+        cof.data.openTime = new Series([0, 86_400_000]);
+        cof.strategy._cof = { pass: 1, ticks: [100, 95, 101, 100] };
+
+        const order: any = {
+            id: 'L', direction: 1, qty: 1, type: 'limit', limit: 98,
+            bar: 1, time: 86_400_000, status: 'pending', category: 'entry',
+        };
+        cof.strategy.pending_orders.push(order);
+        const fills = processStrategyOrders(cof);
+        expect(fills).toBe(1);
+        expect(cof.strategy.position_size).toBe(1);
+        expect(order.fill_price).toBe(98); // intrabar at the limit level
+
+        // no-COF: the same same-bar order is deferred to the next bar.
+        const plain = makeContext();
+        plain.idx = 1;
+        plain.data.open = new Series([100, 100]);
+        plain.data.high = new Series([101, 101]);
+        plain.data.low = new Series([99, 95]);
+        plain.data.close = new Series([100, 100]);
+        plain.data.openTime = new Series([0, 86_400_000]);
+        const order2: any = {
+            id: 'L', direction: 1, qty: 1, type: 'limit', limit: 98,
+            bar: 1, time: 86_400_000, status: 'pending', category: 'entry',
+        };
+        plain.strategy.pending_orders.push(order2);
+        const fillsPlain = processStrategyOrders(plain);
+        expect(fillsPlain).toBe(0);
+        expect(plain.strategy.position_size).toBe(0);
+        expect(order2.status).toBe('pending');
+    });
+
+    it('percent_of_equity default quantity is re-sized at FILL in COF mode (TV: "when the trade opens") — the spurious 100%-margin rejection disappears', () => {
+        const make = () => {
+            const context = makeContext({
+                calc_on_order_fills: true,
+                initial_capital: 1000,
+                default_qty_type: 'percent_of_equity',
+                default_qty_value: 100,
+            });
+            // Placed at close 10 → placement-time qty = 1000 / 10 = 100.
+            context.data.close = new Series([10]);
+            entry(context)('L', 'long');
+            const order = context.strategy.pending_orders[0];
+            expect(order.qty).toBe(100);
+            expect(order._qty_from_default_equity).toBe(true);
+            // Fill bar opens at 11: placement qty × 11 = 1100 > equity 1000
+            // → the placement-time size would be margin-rejected. TV sizes at
+            // fill: qty = 1000 / 11 → required = 1000 → equality → fills.
+            context.idx = 1;
+            context.data.open = new Series([10, 11]);
+            context.data.high = new Series([10, 11.5]);
+            context.data.low = new Series([10, 10.5]);
+            context.data.close = new Series([10, 11]);
+            context.data.openTime = new Series([0, 86_400_000]);
+            return context;
+        };
+
+        const cof = make();
+        cof.strategy._cof = { pass: 0, ticks: [11, 11.5, 10.5, 11] };
+        const fills = processStrategyOrders(cof);
+        expect(fills).toBe(1);
+        // floor(1000/11 × 1e6)/1e6
+        expect(cof.strategy.position_size).toBe(Math.floor((1000 / 11) * 1e6) / 1e6);
+
+        // no-COF: the placement-time qty (100) × fill open (11) > equity →
+        // margin-rejected, exactly the divergence TV does not have.
+        const plain = makeContext({
+            initial_capital: 1000,
+            default_qty_type: 'percent_of_equity',
+            default_qty_value: 100,
+        });
+        plain.data.close = new Series([10]);
+        entry(plain)('L', 'long');
+        plain.idx = 1;
+        plain.data.open = new Series([10, 11]);
+        plain.data.high = new Series([10, 11.5]);
+        plain.data.low = new Series([10, 10.5]);
+        plain.data.close = new Series([10, 11]);
+        plain.data.openTime = new Series([0, 86_400_000]);
+        const fillsPlain = processStrategyOrders(plain);
+        expect(fillsPlain).toBe(0);
+        expect(plain.strategy.position_size).toBe(0);
+    });
+});
+
+describe('strategy calc_on_order_fills — end-to-end loop', () => {
+    // Deterministic 5-bar feed: entry fires on bar 0 (ep = close = 99),
+    // fills at bar 1's open (100); the TP (ep × 1.02 = 100.98) is above the
+    // fill and within bar 1's range (high 110). With calc_on_order_fills=true
+    // the recalculation after the entry fill places the bracket intrabar →
+    // same-bar round trip. Without it the bracket is placed at bar 1's close
+    // and fills on bar 2 (high 101.5 ≥ 100.98).
+    const candles = [
+        { openTime: 0, open: 98, high: 99, low: 97, close: 99, volume: 1000, closeTime: 86_399_999 },
+        { openTime: 86_400_000, open: 100, high: 110, low: 95, close: 105, volume: 1000, closeTime: 172_799_999 },
+        { openTime: 172_800_000, open: 100.5, high: 101.5, low: 100, close: 101, volume: 1000, closeTime: 259_199_999 },
+        { openTime: 259_200_000, open: 101, high: 101.5, low: 100.5, close: 101, volume: 1000, closeTime: 345_599_999 },
+        { openTime: 345_600_000, open: 101, high: 101.5, low: 100.5, close: 101, volume: 1000, closeTime: 431_999_999 },
+    ];
+
+    class FixedProvider {
+        configure() {}
+        async getMarketData() {
+            return candles;
+        }
+        async getSymbolInfo() {
+            return {
+                ticker: 'BTCUSDT', tickerid: 'TEST:BTCUSDT', main_tickerid: 'TEST:BTCUSDT',
+                prefix: 'TEST', root: 'BTC', description: 'BTC / USDT', type: 'crypto',
+                basecurrency: 'BTC', currency: 'USDT', timezone: 'Etc/UTC',
+                mintick: 0.01, pricescale: 100, minmove: 1, pointvalue: 1, mincontract: 0.00001,
+                session: '24x7', volumetype: 'base',
+            };
+        }
+    }
+
+    const SOURCE = `
+//@version=5
+strategy('COF roundtrip', calc_on_order_fills=true, default_qty_type=strategy.fixed, default_qty_value=1)
+var float ep = na
+if bar_index == 0
+    ep := close
+    strategy.entry('L', strategy.long)
+if strategy.position_size > 0
+    strategy.exit('X', 'L', limit = ep * 1.02)`;
+
+    it('same-bar round trip appears with calc_on_order_fills=true and not with false', async () => {
+        const run = async (cof: boolean) => {
+            const source = cof ? SOURCE : SOURCE.replace('calc_on_order_fills=true, ', '');
+            const engine = new PineTS(new FixedProvider() as any, 'BTCUSDT', 'D');
+            const ctx = await engine.run(source);
+            return ctx.strategy as any;
+        };
+
+        const cof = await run(true);
+        expect(cof.closedtrades.length).toBe(1);
+        const cofTrade = cof.closedtrades[0];
+        expect(cofTrade.entry_time).toBe(86_400_000);
+        expect(cofTrade.exit_time).toBe(86_400_000); // same-bar round trip
+        expect(cofTrade.entry_price).toBe(100);
+        expect(cofTrade.exit_price).toBe(100.98);
+
+        const plain = await run(false);
+        expect(plain.closedtrades.length).toBe(1);
+        const plainTrade = plain.closedtrades[0];
+        expect(plainTrade.entry_time).toBe(86_400_000);
+        expect(plainTrade.exit_time).toBe(172_800_000); // exit on the NEXT bar
+        expect(plainTrade.exit_price).toBe(100.98);
+    });
+});
