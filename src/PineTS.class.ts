@@ -1191,8 +1191,9 @@ export class PineTS {
                     // The loop below processes pending orders and re-runs the
                     // script after any pass that produced a fill, until a
                     // full pass has no fill or the 4 ticks are consumed.
-                    // Orders placed by the final bar-close execution below
-                    // fill on the next bar, as in default mode.
+                    // Orders placed by the final bar-close execution fill on
+                    // the next bar's open by default, or in the explicit
+                    // process_orders_on_close close phase below.
                     const strategy = context.strategy;
                     const openPrice = Series.from(context.data.open).get(0);
                     const highPrice = Series.from(context.data.high).get(0);
@@ -1270,6 +1271,56 @@ export class PineTS {
             }
 
             const result = await transpiledFn(context);
+            // process_orders_on_close is a fill phase after the normal
+            // bar-close evaluation, not a second evaluation. Current-bar
+            // market orders fill at the signal bar's close. When COF is also
+            // enabled, the close is the final assumed intrabar tick: one
+            // post-fill recalculation is allowed, but the intrabar loop is
+            // never reopened and orders from that recalc remain deferred.
+            if (context.strategy?.config.process_orders_on_close === true) {
+                const strategy = context.strategy;
+                const cof = strategy.config.calc_on_order_fills === true;
+
+                if (cof) {
+                    const openPrice = Series.from(context.data.open).get(0);
+                    const highPrice = Series.from(context.data.high).get(0);
+                    const lowPrice = Series.from(context.data.low).get(0);
+                    const closePrice = Series.from(context.data.close).get(0);
+                    const openCloserToHigh = Math.abs(highPrice - openPrice) <= Math.abs(openPrice - lowPrice);
+                    strategy._cof = {
+                        pass: 3,
+                        ticks: openCloserToHigh
+                            ? [openPrice, highPrice, lowPrice, closePrice]
+                            : [openPrice, lowPrice, highPrice, closePrice],
+                    };
+                }
+
+                let closeFills = processStrategyOrders(context, 'close');
+                closeFills += processExitOrders(context, 'close');
+
+                if (cof && closeFills > 0) {
+                    // A COF recalc is allowed after the close fill, but no
+                    // second fill pass is started at the same final tick.
+                    // Roll back plot channels so one bar still contributes
+                    // one plotted point, matching the existing COF loop.
+                    const plotLengths = new Map<string, number>();
+                    for (const key of Object.keys(context.plots ?? {})) {
+                        const plot = context.plots[key];
+                        plotLengths.set(key, plot?.data?.length ?? 0);
+                    }
+                    await transpiledFn(context);
+                    for (const [key, len] of plotLengths) {
+                        const plot = context.plots?.[key];
+                        if (plot?.data && plot.data.length > len) plot.data.length = len;
+                    }
+                }
+
+                if (cof) strategy._cof = null;
+                // Close fills happen after the normal pre-script finalize;
+                // refresh equity peaks and the monthly close sample with the
+                // final position/equity state before the next bar.
+                finalizeStrategyBar(context);
+            }
 
             //collect results
             if (typeof result === 'object') {

@@ -137,7 +137,7 @@ After the call, `context.strategy.config` holds the merged options (defaults + y
 | `slippage` | `number` | `0` | Ticks against trade direction |
 | `margin_long` / `margin_short` | `number` | `100` | Margin % (used by `margin_liquidation_price`) |
 | `risk_free_rate` | `number` | `2` | Annual %, denominator input for [Sharpe / Sortino](#risk-adjusted-performance-sharpe--sortino) |
-| `process_orders_on_close` | `boolean` | `false` | Affects `strategy.close({immediately: true})` |
+| `process_orders_on_close` | `boolean` | `false` | Market orders placed during the bar's normal evaluation fill at that bar's close instead of the next bar's open; also enables `immediately: true` closes |
 | `max_lines_count` / `max_labels_count` / `max_boxes_count` / `max_polylines_count` | `number` | `50` | Pass-through to drawing engine |
 
 ---
@@ -147,10 +147,12 @@ After the call, `context.strategy.config` holds the merged options (defaults + y
 PineTS implements the same order lifecycle as TradingView:
 
 1. **You place an order on bar N** — it goes onto `state.pending_orders`.
-2. **On bar N+1's open, the engine processes it** — fills it if market, or checks limit/stop conditions. Slippage and commissions are applied at fill time.
+2. **On bar N+1's open, the engine processes deferred orders** — fills market orders and checks limit/stop conditions. With `process_orders_on_close: true`, market orders placed by bar N's normal evaluation are processed once at bar N's close instead.
 3. **Position-mutating events** (open / close / reverse) are mirrored on the flat scalars (`position_size`, `position_avg_price`, `position_entry_name`).
 
-Internal lifecycle is handled by `processStrategyOrders()` and `processExitOrders()` in [`strategy/utils.ts`](https://github.com/LuxAlgo/PineTS/blob/main/src/namespaces/strategy/utils.ts), invoked at the start of every bar.
+When `calc_on_order_fills: true` and `process_orders_on_close: true` are both enabled, the close fill is the final assumed OHLC tick. The engine permits one post-fill recalculation at that close and does not reopen the intrabar fill loop; orders created by that recalculation remain pending for a later fill.
+
+Internal lifecycle is handled by `processStrategyOrders()` and `processExitOrders()` in [`strategy/utils.ts`](https://github.com/LuxAlgo/PineTS/blob/main/src/namespaces/strategy/utils.ts), invoked at the start of every bar and in the close fill phase when enabled.
 
 ### `strategy.order()`
 
@@ -230,9 +232,8 @@ if ($.idx === 5) { strategy.close_all(); }
 // after: closedtrades=[A, B], opentrades=[]
 ```
 
-Both accept an `immediately: true` option that requires `process_orders_on_close: true` in the declaration and fills at the **current** bar's close instead of the next bar's open.
 
-### `strategy.cancel()` / `cancel_all()`
+With `process_orders_on_close: true`, a market close from `strategy.close()` / `close_all()` targeting a position already open when the close order was queued fills at the current bar's close. A close queued in the same evaluation as its entry does not fill: it is bound to the position state at queue time (the intended-trade snapshot is empty before the entry exists) and is cancelled in the close phase — the pre-existing `close.ts` binding semantics, not a POC-specific behavior. The `immediately: true` option is also supported and requires the same declaration flag; without it, deferred market closes fill at the next bar's open.
 
 Removes pending orders. `cancel(id)` drops orders whose `id` matches; `cancel_all()` empties `pending_orders`. Already-filled trades are unaffected.
 
