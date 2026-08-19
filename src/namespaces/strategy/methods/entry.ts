@@ -65,6 +65,36 @@ export function entry(context: any) {
 
         const dir = parseDirection(directionVal);
         const strategy = context.strategy;
+        // [HYPOTHÈSE] Same-direction, same-ID orders coexist only while flat,
+        // pyramiding has a free slot, and the price definition changes.
+        // Otherwise this implementation modifies one pending order. TV's
+        // strategy.cancel() example proves coexistence is possible, but does
+        // not fully specify this boundary; if TV modifies the whole same-ID
+        // group in another case, pending-order counts and later fills diverge.
+        const pendingIndex = strategy.pending_orders.findIndex(
+            (order: Order) => order.status === 'pending' && (order.category ?? 'entry') === 'entry' && order.id === idValue,
+        );
+        const replacesPendingGroup = pendingIndex >= 0
+            && parseDirection(strategy.pending_orders[pendingIndex].direction) !== dir;
+        let hasFreePyramidingSlot = false;
+        if (pendingIndex >= 0 && parseDirection(strategy.pending_orders[pendingIndex].direction) === dir) {
+            let openSameSide = 0;
+            for (const trade of strategy.opentrades) {
+                if (Math.sign(trade.size) === dir) openSameSide++;
+            }
+            let occupiedSlots = openSameSide;
+            for (const order of strategy.pending_orders) {
+                if (
+                    order.status === 'pending'
+                    && (order.category ?? 'entry') === 'entry'
+                    && parseDirection(order.direction) === dir
+                ) {
+                    occupiedSlots++;
+                }
+            }
+            const cap = strategy.config.pyramiding ?? 1;
+            hasFreePyramidingSlot = openSameSide === 0 && occupiedSlots < cap;
+        }
 
         // Project the position forward over MARKET entry orders already queued
         // on THIS bar: they fill (in queue order) before this one, so the
@@ -78,7 +108,9 @@ export function entry(context: any) {
         // position change per queued order is `direction × qty`, which is exact
         // even for a reversal order since its qty already bakes in the close-qty.
         let currentSize = strategy.position_size;
-        for (const o of strategy.pending_orders) {
+        for (let i = 0; i < strategy.pending_orders.length; i++) {
+            if (i === pendingIndex) continue;
+            const o = strategy.pending_orders[i];
             if (o.bar === context.idx && o.category === 'entry' && o.type === 'market') {
                 currentSize += parseDirection(o.direction) * o.qty;
             }
@@ -87,7 +119,7 @@ export function entry(context: any) {
         // Pyramiding cap: only enforced when ADDING to a same-direction position
         // (not when opening from flat or reversing). Pine's semantic.
         const isAddingSameSide = Math.sign(currentSize) === dir && currentSize !== 0;
-        if (isAddingSameSide && wouldExceedPyramiding(strategy, dir)) {
+        if (isAddingSameSide && pendingIndex < 0 && wouldExceedPyramiding(strategy, dir)) {
             return; // no-op
         }
 
@@ -154,6 +186,51 @@ export function entry(context: any) {
             _qty_from_default_equity: qtyFromDefaultEquity,
         } as any;
 
-        strategy.pending_orders.push(orderObj);
+        if (replacesPendingGroup) {
+            // A buy↔sell change cannot modify the old order: TV cancels it and
+            // places a new one. Since one ID can name several unfilled orders,
+            // replace the complete same-ID entry group, as strategy.cancel(id)
+            // does: https://www.tradingview.com/pine-script-docs/concepts/strategies/
+            strategy.pending_orders = strategy.pending_orders.filter(
+                (order: Order) =>
+                    order.status !== 'pending'
+                    || (order.category ?? 'entry') !== 'entry'
+                    || order.id !== idValue,
+            );
+            strategy.pending_orders.push(orderObj);
+        } else if (pendingIndex < 0) {
+            strategy.pending_orders.push(orderObj);
+        } else {
+            const pending = strategy.pending_orders[pendingIndex];
+            const unchangedActivatedStopLimit =
+                pending.type === 'limit'
+                && pending.stop !== undefined
+                && pending._stop_limit_activated !== undefined
+                && orderObj.type === 'stop-limit'
+                && pending.limit === orderObj.limit
+                && pending.stop === orderObj.stop;
+            if (unchangedActivatedStopLimit) {
+                // Activating a stop-limit creates a limit order. Repeating the
+                // unchanged command modifies its user fields, but must not turn
+                // that activated limit back into a fresh stop-limit. A changed
+                // stop/limit definition follows the normal replacement path
+                // below and therefore starts unactivated.
+                // https://www.tradingview.com/pine-script-docs/concepts/strategies/#stop-and-stop-limit-orders
+                // https://www.tradingview.com/pine-script-docs/concepts/strategies/#order-placement-commands
+                const activatedBar = pending.bar;
+                const activatedTime = pending.time;
+                Object.assign(pending, orderObj);
+                pending.type = 'limit';
+                pending.bar = activatedBar;
+                pending.time = activatedTime;
+            } else {
+                const priceDefinitionChanged =
+                    pending.type !== orderObj.type
+                    || pending.limit !== orderObj.limit
+                    || pending.stop !== orderObj.stop;
+                if (hasFreePyramidingSlot && priceDefinitionChanged) strategy.pending_orders.push(orderObj);
+                else strategy.pending_orders[pendingIndex] = orderObj;
+            }
+        }
     };
 }

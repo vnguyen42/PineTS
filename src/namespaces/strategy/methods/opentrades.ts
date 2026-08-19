@@ -114,14 +114,14 @@ export function opentrades(context: any) {
         // margin%. Pine exposes this as a PROPERTY (not method).
         //
         // TV-observed semantic: returns `na` when no margin is configured
-        // (both margin_long and margin_short default to 100). In that case
-        // the broker isn't "holding" any capital aside from the position
-        // itself — there's no margin reserve to report. Only when margin is
-        // explicitly set do we sum notional × margin%.
+        // (both margin_long and margin_short at their v5 default of 0). In
+        // that case the broker isn't "holding" any capital aside from the
+        // position itself — there's no margin reserve to report. Only when
+        // margin is explicitly set (> 0) do we sum notional × margin%.
         const s = context.strategy;
-        const marginLong  = s?.config?.margin_long  ?? 100;
-        const marginShort = s?.config?.margin_short ?? 100;
-        const marginConfigured = marginLong !== 100 || marginShort !== 100;
+        const marginLong  = s?.config?.margin_long  ?? 0;
+        const marginShort = s?.config?.margin_short ?? 0;
+        const marginConfigured = marginLong !== 0 || marginShort !== 0;
         if (!s || s.opentrades.length === 0 || !marginConfigured) {
             result.capital_held = NaN;
         } else {

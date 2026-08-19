@@ -111,6 +111,16 @@ export interface Order {
     // unset for backward-compat.
     category?: 'entry' | 'exit';
 
+    // Internal transition marker: the stop leg activated on the preceding
+    // broker-emulator tick, so the next tick evaluates the new limit order
+    // from its current price rather than requiring another level crossing.
+    _stop_limit_activated?: boolean;
+
+    // Internal COF marker: a same-bar stop-limit gets one level-based
+    // eligibility check on its first broker-emulator tick after placement or
+    // refresh. Later ticks require a fresh crossing and cannot re-trigger it.
+    _cof_stop_limit_evaluated?: boolean;
+
     // Exit-specific fields (only set when category === 'exit').
     // strategy.exit() parameters: profit (TP in ticks), loss (SL in ticks),
     // limit/stop (price-based TP/SL), trail_price/trail_offset/trail_points

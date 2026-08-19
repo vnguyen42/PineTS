@@ -70,6 +70,32 @@ plot(close)
             expect(view['slippage']).toBe(0);                          // spec default (source didn't set it)
         });
 
+        it('uses the Pine-version margin defaults while preserving explicit source values', () => {
+            const v5 = new Indicator(`//@version=5\nstrategy("v5")\nplot(close)`).prop;
+            const v6 = new Indicator(`//@version=6\nstrategy("v6")\nplot(close)`).prop;
+            const explicit = new Indicator(
+                `//@version=6\nstrategy("explicit", margin_long=25, margin_short=40)\nplot(close)`,
+            ).prop;
+
+            expect([v5.margin_long, v5.margin_short]).toEqual([0, 0]);
+            expect([v6.margin_long, v6.margin_short]).toEqual([100, 100]);
+            expect([explicit.margin_long, explicit.margin_short]).toEqual([25, 40]);
+        });
+
+        it('uses the runtime Pine v5 fallback when scanning a version-less strategy declaration', () => {
+            const props = new Indicator(`strategy("version-less")\nplot(close)`).prop;
+
+            expect([props.margin_long, props.margin_short]).toEqual([0, 0]);
+        });
+
+        it('scans a version-less PineTS strategy through the runtime classification path', () => {
+            const ind = new Indicator(`strategy("PineTS", { margin_long: 25, margin_short: 40 })`);
+            const props = ind.prop;
+
+            expect(ind.getDeclarationType()).toBe('strategy');
+            expect([props.margin_long, props.margin_short]).toEqual([25, 40]);
+        });
+
         it('resolves nested namespace constants (strategy.commission.percent)', () => {
             const code = `
 //@version=6

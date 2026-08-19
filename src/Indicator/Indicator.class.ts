@@ -10,6 +10,7 @@ import { scanDeclaration } from './scanDeclaration';
 import { propsForDeclaration } from './propsSchema';
 import { buildPropProxy } from './propProxy';
 import type { IPineInput, IPineProp, PreparedScript } from './types';
+import { extractPineScriptVersion } from '../transpiler/pineToJS/pineToJS.index';
 
 /**
  * The single owner of every per-script artifact. Holds the source, lazily
@@ -224,7 +225,8 @@ export class Indicator {
         const scanned = scanDeclaration(this.source);
         this._declarationType = scanned.type;
         this._sourcePropArgs = scanned.args;
-        this._propMeta = propsForDeclaration(scanned.type);
+        const pineVersion = typeof this.source === 'string' ? extractPineScriptVersion(this.source) : null;
+        this._propMeta = propsForDeclaration(scanned.type, pineVersion);
         const built = buildPropProxy(
             this._propMeta,
             this._sourcePropArgs,

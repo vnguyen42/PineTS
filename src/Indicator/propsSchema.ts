@@ -2,6 +2,7 @@
 // Copyright (C) 2026 LuxAlgo
 
 import type { IPineProp } from './types';
+import { defaultStrategyMargin } from '../namespaces/strategy/defaults';
 
 /**
  * Schema for `indicator()` / `strategy()` declaration arguments.
@@ -129,11 +130,13 @@ export const STRATEGY_PROPS: IPineProp[] = [
       options: ['FIFO', 'ANY'],
       mutable: true, appliesTo: 'strategy' },
 
-    // 0..100 — % of long position covered by collateral (0 = unlimited, 100 = no leverage)
-    { name: 'margin_long', type: 'float', defval: 100, minval: 0, maxval: 100, mutable: true, appliesTo: 'strategy' },
+    // 0..100 — % of long position covered by collateral (0 = unlimited, 100 = no leverage).
+    // Pine v5 default is 0 (the v6 migration guide changed the default to 100).
+    { name: 'margin_long', type: 'float', defval: 0, minval: 0, maxval: 100, mutable: true, appliesTo: 'strategy' },
 
-    // 0..100 — % of short position covered by collateral (0 = unlimited, 100 = no leverage)
-    { name: 'margin_short', type: 'float', defval: 100, minval: 0, maxval: 100, mutable: true, appliesTo: 'strategy' },
+    // 0..100 — % of short position covered by collateral (0 = unlimited, 100 = no leverage).
+    // Pine v5 default is 0 (the v6 migration guide changed the default to 100).
+    { name: 'margin_short', type: 'float', defval: 0, minval: 0, maxval: 100, mutable: true, appliesTo: 'strategy' },
 
     // any number — annual % return of zero-risk investment (Sharpe / Sortino denominator)
     { name: 'risk_free_rate', type: 'float', defval: 2, mutable: true, appliesTo: 'strategy' },
@@ -149,6 +152,15 @@ export const STRATEGY_PROPS: IPineProp[] = [
  * Pick the right schema for a detected declaration type. Returns the
  * indicator schema when type is unknown (sensible fallback per spec).
  */
-export function propsForDeclaration(type: 'indicator' | 'strategy' | null): IPineProp[] {
-    return type === 'strategy' ? STRATEGY_PROPS : INDICATOR_PROPS;
+export function propsForDeclaration(
+    type: 'indicator' | 'strategy' | null,
+    pineVersion: number | null = null,
+): IPineProp[] {
+    if (type !== 'strategy') return INDICATOR_PROPS;
+    const marginDefault = defaultStrategyMargin(pineVersion);
+    return STRATEGY_PROPS.map((prop) =>
+        prop.name === 'margin_long' || prop.name === 'margin_short'
+            ? { ...prop, defval: marginDefault }
+            : prop,
+    );
 }

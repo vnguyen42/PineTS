@@ -1,7 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import { Context } from '../../../src/Context.class';
 import { processMarginCall, processStrategyOrders, initializeStrategy } from '../../../src/namespaces/strategy/utils';
+import { margin_liquidation_price } from '../../../src/namespaces/strategy/methods/margin_liquidation_price';
 import { Order } from '../../../src/namespaces/strategy/types';
+import { PineTS } from '../../../src/PineTS.class';
+import { Indicator } from '../../../src/Indicator/Indicator.class';
 import { Series } from '../../../src/Series';
 
 /**
@@ -63,7 +66,7 @@ describe('processMarginCall — partial liquidation (TV 4× rule)', () => {
     //   cover        = 60,000 / 110,000 = 0.54545454… (full precision)
     //   liquidate    = 4 × cover = 2.181818…  (remainder 2.818181… stays open)
     it('liquidates 4× the cover qty at the adverse extreme, remainder stays open', () => {
-        const context = makeContext({ open: 101000, high: 110000, low: 99000, close: 105000 }, { initial_capital: 540000 });
+        const context = makeContext({ open: 101000, high: 110000, low: 99000, close: 105000 }, { initial_capital: 540000, margin_long: 100, margin_short: 100 });
         openShort(context, 5, 100000);
 
         processMarginCall(context);
@@ -85,7 +88,7 @@ describe('processMarginCall — partial liquidation (TV 4× rule)', () => {
 
     it('caps the liquidation at the full position for catastrophic deficits', () => {
         // capital 100,000: deficit = 550,000 − 50,000 = 500,000 → 4×cover ≫ 5.
-        const context = makeContext({ open: 101000, high: 110000, low: 99000, close: 105000 }, { initial_capital: 100000 });
+        const context = makeContext({ open: 101000, high: 110000, low: 99000, close: 105000 }, { initial_capital: 100000, margin_long: 100, margin_short: 100 });
         openShort(context, 5, 100000);
 
         processMarginCall(context);
@@ -99,7 +102,7 @@ describe('processMarginCall — partial liquidation (TV 4× rule)', () => {
     });
 
     it('does nothing when equity at the adverse extreme covers required margin', () => {
-        const context = makeContext({ open: 101000, high: 110000, low: 99000, close: 105000 }, { initial_capital: 2000000 });
+        const context = makeContext({ open: 101000, high: 110000, low: 99000, close: 105000 }, { initial_capital: 2000000, margin_long: 100, margin_short: 100 });
         openShort(context, 5, 100000);
 
         processMarginCall(context);
@@ -129,8 +132,9 @@ describe('processStrategyOrders — reversal close leg survives margin rejection
     function makeReversalSetup(initialCapital: number) {
         // Long 5 @ 50,000. Reversal short order qty 10 (close 5 + open 5).
         // Bar open 60,000 → equity = capital + 5×10,000 unrealized.
-        // Open leg requires 5 × 60,000 = 300,000.
-        const context = makeContext({ open: 60000, high: 61000, low: 59000, close: 60500 }, { initial_capital: initialCapital });
+        // Open leg requires 5 × 60,000 = 300,000 (explicit 100% margin —
+        // the v5 default of 0 would impose no requirement at all).
+        const context = makeContext({ open: 60000, high: 61000, low: 59000, close: 60500 }, { initial_capital: initialCapital, margin_long: 100, margin_short: 100 });
         context.strategy.opentrades.push({
             id: 'trade_0',
             entry_id: 'MacdLE',
@@ -195,7 +199,7 @@ describe('processStrategyOrders — reversal close leg survives margin rejection
 
     it('non-reversal entry with insufficient margin is dropped entirely', () => {
         // Fresh entry from flat: no close leg exists, the order is cancelled.
-        const context = makeContext({ open: 60000, high: 61000, low: 59000, close: 60500 }, { initial_capital: 200000 });
+        const context = makeContext({ open: 60000, high: 61000, low: 59000, close: 60500 }, { initial_capital: 200000, margin_long: 100, margin_short: 100 });
         const order: Order = {
             id: 'MacdSE',
             direction: -1,
@@ -214,5 +218,93 @@ describe('processStrategyOrders — reversal close leg survives margin rejection
         expect(s.closedtrades.length).toBe(0);
         expect(s.opentrades.length).toBe(0);
         expect(s.pending_orders.length).toBe(0); // cancelled
+    });
+});
+
+describe('margin 0 (Pine v5 default) — no margin requirement (TV: "does not check available funds")', () => {
+    it('initializeStrategy defaults margin_long/margin_short to 0 (v5), not 100 (v6)', () => {
+        const context = makeContext({ open: 100, high: 101, low: 99, close: 100 }, { initial_capital: 100000 });
+        expect(context.strategy.config.margin_long).toBe(0);
+        expect(context.strategy.config.margin_short).toBe(0);
+        // Explicit declarations still win (merge on top of the defaults).
+        const explicit = makeContext({ open: 100, high: 101, low: 99, close: 100 }, { margin_long: 50, margin_short: 25 });
+        expect(explicit.strategy.config.margin_long).toBe(50);
+        expect(explicit.strategy.config.margin_short).toBe(25);
+    });
+
+    it('entry with notional > equity is accepted (no rejection) at default margin 0', () => {
+        // 3 contracts @ 60,000 = 180,000 notional on 100,000 equity:
+        // at 100% margin this would be rejected; TV with v5 default 0 fills.
+        const context = makeContext({ open: 60000, high: 61000, low: 59000, close: 60500 }, { initial_capital: 100000 });
+        const order: Order = {
+            id: 'MacdLE',
+            direction: 1,
+            qty: 3,
+            type: 'market',
+            bar: 0,
+            time: 0,
+            status: 'pending',
+            category: 'entry',
+        } as any;
+        context.strategy.pending_orders.push(order);
+
+        processStrategyOrders(context);
+
+        const s = context.strategy;
+        expect(s.closedtrades.length).toBe(0);
+        expect(s.opentrades.length).toBe(1);
+        expect(s.opentrades[0].size).toBe(3);
+        expect(s.position_size).toBe(3);
+        expect(s.pending_orders.length).toBe(0);
+    });
+
+    it('no margin call at default margin 0 even when equity is far below position notional', () => {
+        // Short 5 @ 100,000 on 100,000 capital; adverse bar to 110,000 →
+        // equity 50,000 vs notional 550,000. With margin 0 there is no
+        // margin requirement: TV never margin-calls, whatever the equity.
+        const context = makeContext({ open: 101000, high: 110000, low: 99000, close: 105000 }, { initial_capital: 100000 });
+        openShort(context, 5, 100000);
+
+        processMarginCall(context);
+
+        const s = context.strategy;
+        expect(s.closedtrades.length).toBe(0);
+        expect(s.opentrades.length).toBe(1);
+        expect(s.position_size).toBe(-5);
+    });
+
+    it('margin_liquidation_price returns na at default margin 0 (no liquidation price)', () => {
+        const context = makeContext({ open: 101000, high: 110000, low: 99000, close: 105000 }, { initial_capital: 100000 });
+        openShort(context, 5, 100000);
+        expect(Number.isNaN(margin_liquidation_price(context)())).toBe(true);
+    });
+});
+
+describe('version-specific default margin', () => {
+    it('uses 0% in Pine v5 and 100% in Pine v6, including the pretranspiled execution path', async () => {
+        const candles = [
+            {
+                openTime: 0, open: 100, high: 101, low: 99, close: 100, volume: 1000, closeTime: 86_399_999,
+                quoteAssetVolume: 0, numberOfTrades: 0, takerBuyBaseAssetVolume: 0, takerBuyQuoteAssetVolume: 0, ignore: 0,
+            },
+            {
+                openTime: 86_400_000, open: 100, high: 101, low: 99, close: 100, volume: 1000, closeTime: 172_799_999,
+                quoteAssetVolume: 0, numberOfTrades: 0, takerBuyBaseAssetVolume: 0, takerBuyQuoteAssetVolume: 0, ignore: 0,
+            },
+        ];
+        const openTradesByVersion: Record<number, number> = {};
+
+        for (const version of [5, 6]) {
+            const source = `
+//@version=${version}
+strategy('versioned margin', initial_capital=100, process_orders_on_close=true)
+if bar_index == 0
+    strategy.entry('L', strategy.long, qty=2)`;
+            const prepared = Indicator.from(source).prepare();
+            const result = await new PineTS(candles).runPretranspiled(prepared.fn, prepared.inputs);
+            openTradesByVersion[version] = result.strategy?.opentrades.length ?? 0;
+        }
+
+        expect(openTradesByVersion).toEqual({ 5: 1, 6: 0 });
     });
 });

@@ -5,6 +5,7 @@ import { entry } from '../../../src/namespaces/strategy/methods/entry';
 import { exit } from '../../../src/namespaces/strategy/methods/exit';
 import { PineTS } from '../../../src/PineTS.class';
 import { Series } from '../../../src/Series';
+import { Order } from '../../../src/namespaces/strategy/types';
 
 /**
  * calc_on_order_fills=true — TV broker-emulator intrabar sequencing.
@@ -74,8 +75,13 @@ describe('strategy calc_on_order_fills — same-bar sequencing', () => {
         exit(context)('X', 'L', { limit: 102 });
         expect(context.strategy.pending_orders.length).toBe(1);
 
-        // Pass 1: the bracket evaluates intrabar against the SAME bar and fills.
+        // Pass 1 is the low tick: the long TP has not been crossed yet.
         context.strategy._cof.pass = 1;
+        expect(processExitOrders(context, 'intrabar')).toBe(0);
+        expect(context.strategy.position_size).toBe(1);
+
+        // Pass 2 is the high tick: the path crosses the TP and fills it.
+        context.strategy._cof.pass = 2;
         const fills1 = processExitOrders(context, 'intrabar');
         expect(fills1).toBe(1);
         expect(context.strategy.position_size).toBe(0);
@@ -102,7 +108,7 @@ describe('strategy calc_on_order_fills — same-bar sequencing', () => {
         cof.data.openTime = new Series([0, 86_400_000]);
         cof.strategy._cof = { pass: 1, ticks: [100, 95, 101, 100] };
 
-        const order: any = {
+        const order: Order = {
             id: 'L', direction: 1, qty: 1, type: 'limit', limit: 98,
             bar: 1, time: 86_400_000, status: 'pending', category: 'entry',
         };
@@ -120,7 +126,7 @@ describe('strategy calc_on_order_fills — same-bar sequencing', () => {
         plain.data.low = new Series([99, 95]);
         plain.data.close = new Series([100, 100]);
         plain.data.openTime = new Series([0, 86_400_000]);
-        const order2: any = {
+        const order2: Order = {
             id: 'L', direction: 1, qty: 1, type: 'limit', limit: 98,
             bar: 1, time: 86_400_000, status: 'pending', category: 'entry',
         };
@@ -131,7 +137,287 @@ describe('strategy calc_on_order_fills — same-bar sequencing', () => {
         expect(order2.status).toBe('pending');
     });
 
-    it('percent_of_equity default quantity is re-sized at FILL in COF mode (TV: "when the trade opens") — the spurious 100%-margin rejection disappears', () => {
+    it('gap-fills a marketable limit at the open instead of outside the bar range', () => {
+        const context = makeContext({ calc_on_order_fills: true });
+        context.strategy._cof = { pass: 0, ticks: [100, 101, 99, 100] };
+        const order: Order = {
+            id: 'L',
+            direction: 1,
+            qty: 1,
+            type: 'limit',
+            limit: 105,
+            bar: -1,
+            time: -1,
+            status: 'pending',
+            category: 'entry',
+        };
+        context.strategy.pending_orders.push(order);
+
+        expect(processStrategyOrders(context)).toBe(1);
+        expect(order.status).toBe('filled');
+        expect(order.fill_price).toBe(100);
+        expect(context.strategy.position_size).toBe(1);
+    });
+
+    it.each([
+        { type: 'limit', direction: 1, field: 'limit', nextTick: 99 },
+        { type: 'limit', direction: -1, field: 'limit', nextTick: 101 },
+        { type: 'stop', direction: 1, field: 'stop', nextTick: 101 },
+        { type: 'stop', direction: -1, field: 'stop', nextTick: 99 },
+    ] as const)(
+        'fills a $direction $type order when price moves from equality to its executable side',
+        ({ type, direction, field, nextTick }) => {
+            const context = makeContext({ calc_on_order_fills: true });
+            context.strategy._cof = { pass: 1, ticks: [100, nextTick, 102, 98] };
+            const order: Order = {
+                id: `${type}-${direction}`,
+                direction,
+                qty: 1,
+                type,
+                [field]: 100,
+                bar: -1,
+                time: -1,
+                status: 'pending',
+                category: 'entry',
+            };
+            context.strategy.pending_orders.push(order);
+
+            expect(processStrategyOrders(context)).toBe(1);
+            expect(order.status).toBe('filled');
+            expect(order.fill_price).toBe(100);
+        },
+    );
+
+    it('activates a stop-limit before filling the resulting limit order on a later executable tick', () => {
+        const context = makeContext({ calc_on_order_fills: true });
+        context.strategy._cof = { pass: 1, ticks: [99, 100, 99, 100] };
+        const order: Order = {
+            id: 'stop-limit-equal',
+            direction: 1,
+            qty: 1,
+            type: 'stop-limit',
+            stop: 100,
+            limit: 100,
+            bar: -1,
+            time: -1,
+            status: 'pending',
+            category: 'entry',
+        };
+        context.strategy.pending_orders.push(order);
+
+        expect(processStrategyOrders(context)).toBe(0);
+        expect(order.status).toBe('pending');
+
+        context.strategy._cof.pass = 2;
+        expect(processStrategyOrders(context)).toBe(1);
+        expect(order.status).toBe('filled');
+        expect(order.fill_price).toBe(99);
+    });
+
+    it.each([
+        { direction: 1, ticks: [99, 100, 99, 100], stop: 100, limit: 101, fillPrice: 99 },
+        { direction: -1, ticks: [100, 99, 100, 99], stop: 99, limit: 100, fillPrice: 100 },
+    ] as const)(
+        'activates then fills a $direction stop-limit whose stop is below its limit',
+        ({ direction, ticks, stop, limit, fillPrice }) => {
+            const context = makeContext({ calc_on_order_fills: true });
+            context.strategy._cof = { pass: 1, ticks };
+            const order: Order = {
+                id: `stop-limit-${direction}`,
+                direction,
+                qty: 1,
+                type: 'stop-limit',
+                stop,
+                limit,
+                bar: -1,
+                time: -1,
+                status: 'pending',
+                category: 'entry',
+            };
+            context.strategy.pending_orders.push(order);
+
+            expect(processStrategyOrders(context)).toBe(0);
+            context.strategy._cof.pass = 2;
+            expect(processStrategyOrders(context)).toBe(1);
+            expect(order.fill_price).toBe(fillPrice);
+        },
+    );
+
+    it.each([
+        { direction: 1, ticks: [101, 102, 103, 104], stop: 100, limit: 99 },
+        { direction: -1, ticks: [99, 98, 97, 96], stop: 100, limit: 101 },
+    ] as const)(
+        'activates a newly placed $direction stop-limit when the next tick is already beyond its stop',
+        ({ direction, ticks, stop, limit }) => {
+            const context = makeContext({ calc_on_order_fills: true });
+            context.strategy._cof = { pass: 1, ticks };
+            const order: Order = {
+                id: `new-stop-limit-${direction}`,
+                direction,
+                qty: 1,
+                type: 'stop-limit',
+                stop,
+                limit,
+                bar: 0,
+                time: 0,
+                status: 'pending',
+                category: 'entry',
+            };
+            context.strategy.pending_orders.push(order);
+
+            expect(processStrategyOrders(context)).toBe(0);
+            expect(order.type).toBe('limit');
+            expect(order.status).toBe('pending');
+        },
+    );
+
+    it('fills an activated same-ID stop-limit on the next executable COF tick after an unchanged refresh', () => {
+        const context = makeContext({ calc_on_order_fills: true });
+        context.strategy._cof = { pass: 1, ticks: [101, 102, 103, 104] };
+        context.data.open = new Series([101]);
+        context.data.high = new Series([104]);
+        context.data.low = new Series([101]);
+        context.data.close = new Series([104]);
+
+        entry(context)('L', 'long', { stop: 100, limit: 105 });
+        expect(processStrategyOrders(context)).toBe(0);
+        expect(context.strategy.pending_orders[0]).toMatchObject({
+            type: 'limit',
+            _stop_limit_activated: true,
+        });
+        const activatedOrder = context.strategy.pending_orders[0];
+
+        context.strategy._cof.pass = 2;
+        entry(context)('L', 'long', { stop: 100, limit: 105 });
+        expect(context.strategy.pending_orders[0]).toBe(activatedOrder);
+
+        expect(processStrategyOrders(context)).toBe(1);
+        expect(context.strategy.position_size).toBe(1);
+        expect(activatedOrder.status).toBe('filled');
+        expect(activatedOrder.fill_price).toBe(103);
+    });
+
+    it('re-arms an activated same-ID stop-limit when its stop definition changes', () => {
+        const context = makeContext({ calc_on_order_fills: true });
+        context.strategy._cof = { pass: 1, ticks: [101, 102, 103, 104] };
+
+        entry(context)('L', 'long', { stop: 100, limit: 105 });
+        expect(processStrategyOrders(context)).toBe(0);
+        expect(context.strategy.pending_orders[0].type).toBe('limit');
+
+        context.strategy._cof.pass = 2;
+        entry(context)('L', 'long', { stop: 110, limit: 105 });
+
+        expect(processStrategyOrders(context)).toBe(0);
+        expect(context.strategy.position_size).toBe(0);
+        expect(context.strategy.pending_orders[0]).toMatchObject({
+            type: 'stop-limit',
+            stop: 110,
+            limit: 105,
+            status: 'pending',
+        });
+    });
+
+    it('does not re-fire a refreshed qty_percent limit exit after the path has left its trigger', () => {
+        const context = makeContext({ calc_on_order_fills: true });
+        context.strategy.position_size = 100;
+        context.strategy.position_avg_price = 100;
+        context.strategy.opentrades = [{
+            id: 'trade-L',
+            entry_id: 'L',
+            entry_price: 100,
+            entry_time: 0,
+            entry_bar_index: 0,
+            size: 100,
+            commission: 0,
+            max_drawdown: 0,
+            max_runup: 0,
+        }];
+        context.data.low = new Series([90]);
+        context.data.close = new Series([108]);
+        context.strategy._cof = { pass: 2, ticks: [100, 90, 110, 108] };
+
+        exit(context)('Tg1', 'L', { qty_percent: 50, limit: 105 });
+        expect(processExitOrders(context, 'intrabar')).toBe(1);
+        expect(context.strategy.position_size).toBe(50);
+
+        // The COF recalculation refreshes the same exit. The next path tick
+        // remains above 105, but does not CROSS 105 again. The bar high must
+        // not make the refreshed order fire a second time.
+        context.strategy._cof.pass = 3;
+        exit(context)('Tg1', 'L', { qty_percent: 50, limit: 105 });
+        expect(processExitOrders(context, 'intrabar')).toBe(0);
+        expect(context.strategy.position_size).toBe(50);
+    });
+
+    it('refreshes a pending stop entry with the same ID instead of accumulating stale orders', () => {
+        const context = makeContext({ calc_on_order_fills: true });
+
+        entry(context)('L', 'long', { stop: 105 });
+        entry(context)('L', 'long', { stop: 106 });
+
+        expect(context.strategy.pending_orders).toHaveLength(1);
+        expect(context.strategy.pending_orders[0].id).toBe('L');
+        expect(context.strategy.pending_orders[0].stop).toBe(106);
+    });
+
+    it('keeps same-ID pending entries in separate pyramiding slots across bars', () => {
+        const context = makeContext({ calc_on_order_fills: true, pyramiding: 3 });
+
+        for (let bar = 0; bar < 3; bar++) {
+            context.idx = bar;
+            context.data.openTime = new Series([bar * 86_400_000]);
+            entry(context)('L', 'long', { limit: 90 - bar });
+        }
+
+        expect(context.strategy.pending_orders).toHaveLength(3);
+        expect(context.strategy.pending_orders.map((order: Order) => order.limit)).toEqual([90, 89, 88]);
+    });
+
+    it('cancels every same-ID pending order before placing an opposite-direction entry', () => {
+        const context = makeContext({ calc_on_order_fills: true, pyramiding: 3 });
+
+        entry(context)('E', 'long', { limit: 90 });
+        entry(context)('E', 'long', { limit: 89 });
+        entry(context)('E', 'long', { limit: 88 });
+        entry(context)('E', 'short', { limit: 110 });
+
+        expect(context.strategy.pending_orders).toHaveLength(1);
+        expect(context.strategy.pending_orders[0]).toMatchObject({
+            id: 'E',
+            direction: -1,
+            limit: 110,
+            status: 'pending',
+        });
+    });
+
+    it('modifies an unchanged same-ID pending definition instead of duplicating it', () => {
+        const context = makeContext({ calc_on_order_fills: true, pyramiding: 3 });
+
+        for (let bar = 0; bar < 3; bar++) {
+            context.idx = bar;
+            context.data.openTime = new Series([bar * 86_400_000]);
+            entry(context)('L', 'long', { limit: 90 });
+        }
+
+        expect(context.strategy.pending_orders).toHaveLength(1);
+        expect(context.strategy.pending_orders[0].bar).toBe(2);
+    });
+
+    it('modifies a same-ID pending entry after that direction already has an open trade', () => {
+        const context = makeContext({ calc_on_order_fills: true, pyramiding: 3 });
+        context.strategy.position_size = 1;
+        context.strategy.opentrades.push({ size: 1 });
+
+        entry(context)('L2', 'long', { limit: 90 });
+        context.idx = 1;
+        entry(context)('L2', 'long', { limit: 89 });
+
+        expect(context.strategy.pending_orders).toHaveLength(1);
+        expect(context.strategy.pending_orders[0].limit).toBe(89);
+    });
+
+    it('percent_of_equity default quantity is re-sized at FILL in COF mode (TV: "when the trade opens") — and no-COF fills at placement size (v5 margin 0: no rejection)', () => {
         const make = () => {
             const context = makeContext({
                 calc_on_order_fills: true,
@@ -164,8 +450,12 @@ describe('strategy calc_on_order_fills — same-bar sequencing', () => {
         // floor(1000/11 × 1e6)/1e6
         expect(cof.strategy.position_size).toBe(Math.floor((1000 / 11) * 1e6) / 1e6);
 
-        // no-COF: the placement-time qty (100) × fill open (11) > equity →
-        // margin-rejected, exactly the divergence TV does not have.
+        // no-COF: the placement-time qty (100) fills at the open (11) →
+        // notional 1100 > equity 1000. The fork's old 100%-margin default
+        // rejected this entry ("notional exceeds equity"); TV's v5 default
+        // margin is 0 (no margin requirement) so the entry fills at the
+        // placement-time size — the fork divergence is gone. The COF-vs-noCOF
+        // contrast (fill-time re-size vs placement-time size) still holds.
         const plain = makeContext({
             initial_capital: 1000,
             default_qty_type: 'percent_of_equity',
@@ -180,8 +470,8 @@ describe('strategy calc_on_order_fills — same-bar sequencing', () => {
         plain.data.close = new Series([10, 11]);
         plain.data.openTime = new Series([0, 86_400_000]);
         const fillsPlain = processStrategyOrders(plain);
-        expect(fillsPlain).toBe(0);
-        expect(plain.strategy.position_size).toBe(0);
+        expect(fillsPlain).toBe(1);
+        expect(plain.strategy.position_size).toBe(100);
     });
 });
 

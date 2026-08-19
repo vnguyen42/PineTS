@@ -54,6 +54,7 @@ export class Context {
     public chartTimezone: string | null = null; // Chart display timezone (affects log timestamps only, not computation)
     public chartStyle: string = 'standard'; // Chart type DERIVED from the ticker's chart-type modifier ("SYM;heikinashi") at context init; read by chart.is_*
     public dataVersion: number = 0; // Incremented when market data changes (streaming mode)
+    public pineVersion: number | null = null; // Pine source version; drives version-specific runtime defaults.
 
     public __maxLoops: number = 500000;
     public NA: any = NaN;

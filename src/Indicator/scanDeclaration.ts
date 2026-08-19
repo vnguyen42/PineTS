@@ -2,7 +2,7 @@
 // Copyright (C) 2026 LuxAlgo
 
 import * as acorn from 'acorn';
-import { pineToJS } from '../transpiler/pineToJS/pineToJS.index';
+import { parseSourceForTranspilation } from '../transpiler';
 import { INDICATOR_PROPS, STRATEGY_PROPS } from './propsSchema';
 import type { IPineProp } from './types';
 
@@ -48,11 +48,14 @@ export function scanDeclaration(source: unknown): ScannedDeclaration {
 // ── Pine source path ──────────────────────────────────────────────────
 
 function scanPineDeclaration(source: string): ScannedDeclaration {
-    const parsed = pineToJS(source);
-    if (!parsed.success || !parsed.ast) return { type: null, args: {} };
-
+    let ast: acorn.Program;
+    try {
+        ast = parseSourceForTranspilation(source).ast;
+    } catch {
+        return { type: null, args: {} };
+    }
     let found: ScannedDeclaration | null = null;
-    walk(parsed.ast, (node) => {
+    walk(ast, (node) => {
         if (found) return;
         if (node.type !== 'ExpressionStatement' && node.type !== 'VariableDeclaration') return;
         const callExpr = node.type === 'ExpressionStatement'

@@ -1141,6 +1141,7 @@ export class PineTS {
      */
     private async _executeIterations(context: Context, transpiledFn: Function, startIdx: number, endIdx: number): Promise<void> {
         const contextVarNames = ['const', 'var', 'let', 'params'];
+        context.pineVersion = (transpiledFn as Function & { _pineVersion?: number | null })._pineVersion ?? context.pineVersion;
 
         for (let i = startIdx; i < endIdx; i++) {
             context.idx = i;
@@ -1188,12 +1189,9 @@ export class PineTS {
                     // orders placed during it are processed in the SAME bar
                     // (they fill on the next assumed tick). A same-bar fill
                     // can therefore chain entries and exits (round trips).
-                    // The loop below processes pending orders and re-runs the
-                    // script after any pass that produced a fill, until a
-                    // full pass has no fill or the 4 ticks are consumed.
-                    // Orders placed by the final bar-close execution fill on
-                    // the next bar's open by default, or in the explicit
-                    // process_orders_on_close close phase below.
+                    // The loop visits all four path points. A fill triggers a
+                    // recalculation; a point with no fill simply advances the
+                    // path without executing user code.
                     const strategy = context.strategy;
                     const openPrice = Series.from(context.data.open).get(0);
                     const highPrice = Series.from(context.data.high).get(0);
@@ -1222,24 +1220,20 @@ export class PineTS {
                         if (adverseFirst) processMarginCall(context, 'extreme');
                         fills += processExitOrders(context, 'intrabar');
                         if (!adverseFirst) processMarginCall(context, 'extreme');
-                        if (fills <= 0) break;
+                        const recalculate = fills > 0;
                         strategy._cof.pass += 1;
                         if (strategy._cof.pass >= strategy._cof.ticks.length) break;
-                        // Recalculation at the fill price (TV: "the strategy
-                        // performs an additional execution on each tick where
-                        // the broker emulator fills an order"). The recalc
-                        // re-executes the script, which re-runs the plot()
-                        // calls — TV's plots still carry ONE point per bar
-                        // (the bar's final values), so the channels are
-                        // rolled back to their pre-recalc length afterwards.
-                        const plotLengths = new Map<string, number>();
+                        if (!recalculate) continue;
+                        // Re-execute after a fill, then evaluate any refreshed
+                        // orders at the NEXT assumed path point.
+                        const plotLengths: Array<[unknown[], number]> = [];
                         for (const key of Object.keys(context.plots ?? {})) {
-                            plotLengths.set(key, (context.plots[key] as any).data?.length ?? 0);
+                            const data = Object.getOwnPropertyDescriptor(context.plots[key], 'data')?.value;
+                            if (Array.isArray(data)) plotLengths.push([data, data.length]);
                         }
                         await transpiledFn(context);
-                        for (const [key, len] of plotLengths) {
-                            const channel = (context.plots as any)?.[key];
-                            if (channel && channel.data && channel.data.length > len) channel.data.length = len;
+                        for (const [data, len] of plotLengths) {
+                            if (data.length > len) data.length = len;
                         }
                     }
                     strategy._cof = null;
@@ -1303,15 +1297,14 @@ export class PineTS {
                     // second fill pass is started at the same final tick.
                     // Roll back plot channels so one bar still contributes
                     // one plotted point, matching the existing COF loop.
-                    const plotLengths = new Map<string, number>();
+                    const plotLengths: Array<[unknown[], number]> = [];
                     for (const key of Object.keys(context.plots ?? {})) {
-                        const plot = context.plots[key];
-                        plotLengths.set(key, plot?.data?.length ?? 0);
+                        const data = Object.getOwnPropertyDescriptor(context.plots[key], 'data')?.value;
+                        if (Array.isArray(data)) plotLengths.push([data, data.length]);
                     }
                     await transpiledFn(context);
-                    for (const [key, len] of plotLengths) {
-                        const plot = context.plots?.[key];
-                        if (plot?.data && plot.data.length > len) plot.data.length = len;
+                    for (const [data, len] of plotLengths) {
+                        if (data.length > len) data.length = len;
                     }
                 }
 

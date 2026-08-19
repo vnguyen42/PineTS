@@ -3,6 +3,7 @@
 
 import { Order, StrategyState, Trade } from './types';
 import { Series } from '../../Series';
+import { defaultStrategyMargin } from './defaults';
 
 /**
  * Parse strategy() function arguments
@@ -122,7 +123,8 @@ export function computeEquityAtPrice(context: any, atPrice: number): number {
 /**
  * Total margin currently held by all open positions, valued at `atPrice`.
  * Per-position margin uses `margin_long` for longs and `margin_short` for
- * shorts (Pine semantic — see strategy() declaration).
+ * shorts (Pine semantic — see strategy() declaration). With the v5 default
+ * of 0 (no margin requirement) the held margin is 0.
  */
 export function computeHeldMargin(context: any, atPrice: number): number {
     const strategy: StrategyState = context.strategy;
@@ -130,7 +132,7 @@ export function computeHeldMargin(context: any, atPrice: number): number {
     let total = 0;
     for (const trade of strategy.opentrades) {
         const dir = Math.sign(trade.size);
-        const marginPct = dir === 1 ? (strategy.config.margin_long ?? 100) : (strategy.config.margin_short ?? 100);
+        const marginPct = dir === 1 ? (strategy.config.margin_long ?? 0) : (strategy.config.margin_short ?? 0);
         total += computeRequiredMargin(trade.size, atPrice, marginPct, pointValue);
     }
     return total;
@@ -292,26 +294,45 @@ export function processStrategyOrders(context: any, phase: 'open' | 'close' = 'o
                       ? cofState.ticks[Math.min(cofState.pass, cofState.ticks.length - 1)]
                       : openPrice;
                 break;
-            // LIMITATION (déclarée 2026-08-19, revue VIN-72) : les triggers
-            // limit/stop placés pendant un recalc calc_on_order_fills sont
-            // évalués contre le high/low COMPLET de la barre, pas contre le
-            // chemin de ticks restant après placement. TV (« fills the order
-            // on the next tick at one of the bar's OHLC values ») peut donc
-            // refuser un ordre dont le trigger a déjà été visité plus tôt
-            // dans la barre. Non exercé par aucun script du corpus (2205
-            // inclus) ; à revoir seulement si un script réel diverge dessus.
-
+            // In COF mode, price-based orders are evaluated only against the
+            // current point on the assumed intrabar path. Recalculations can
+            // refresh an order after an earlier extreme; using the full bar's
+            // high/low here would incorrectly re-fire it against a price the
+            // path has already left.
 
             case 'limit':
-                // Limit orders fill when price reaches the limit level
                 if (order.limit !== undefined) {
                     const direction = parseDirection(order.direction);
-                    if (direction === 1 && lowPrice <= order.limit) {
-                        // Long limit order - buy when price drops to limit
-                        shouldFill = true;
-                        fillPrice = order.limit;
-                    } else if (direction === -1 && highPrice >= order.limit) {
-                        // Short limit order - sell when price rises to limit
+                    const tickPrice = cofState
+                        ? cofState.ticks[Math.min(cofState.pass, cofState.ticks.length - 1)]
+                        : undefined;
+                    const limitPreviousTick = cofState && cofState.pass > 0
+                        ? cofState.ticks[cofState.pass - 1]
+                        : undefined;
+                    const newlyActivated = order._stop_limit_activated === true;
+                    if (newlyActivated) order._stop_limit_activated = false;
+                    if (direction === 1) {
+                        if (tickPrice !== undefined) {
+                            const executable = cofState.pass === 0 || newlyActivated
+                                ? tickPrice <= order.limit
+                                : limitPreviousTick! >= order.limit && tickPrice <= order.limit;
+                            if (executable) {
+                                shouldFill = true;
+                                fillPrice = cofState.pass === 0 || newlyActivated ? tickPrice : order.limit;
+                            }
+                        } else if (lowPrice <= order.limit) {
+                            shouldFill = true;
+                            fillPrice = order.limit;
+                        }
+                    } else if (tickPrice !== undefined) {
+                        const executable = cofState.pass === 0 || newlyActivated
+                            ? tickPrice >= order.limit
+                            : limitPreviousTick! <= order.limit && tickPrice >= order.limit;
+                        if (executable) {
+                            shouldFill = true;
+                            fillPrice = cofState.pass === 0 || newlyActivated ? tickPrice : order.limit;
+                        }
+                    } else if (highPrice >= order.limit) {
                         shouldFill = true;
                         fillPrice = order.limit;
                     }
@@ -319,17 +340,76 @@ export function processStrategyOrders(context: any, phase: 'open' | 'close' = 'o
                 break;
 
             case 'stop':
-                // Stop orders fill when price crosses the stop level
                 if (order.stop !== undefined) {
                     const direction = parseDirection(order.direction);
-                    if (direction === 1 && highPrice >= order.stop) {
-                        // Long stop order - buy when price rises to stop
+                    const tickPrice = cofState
+                        ? cofState.ticks[Math.min(cofState.pass, cofState.ticks.length - 1)]
+                        : undefined;
+                    const stopPreviousTick = cofState && cofState.pass > 0
+                        ? cofState.ticks[cofState.pass - 1]
+                        : undefined;
+                    if (direction === 1) {
+                        if (tickPrice !== undefined) {
+                            const crossed = cofState.pass === 0
+                                ? tickPrice >= order.stop
+                                : stopPreviousTick! <= order.stop && tickPrice >= order.stop;
+                            if (crossed) {
+                                shouldFill = true;
+                                fillPrice = cofState.pass === 0 ? tickPrice : order.stop;
+                            }
+                        } else if (highPrice >= order.stop) {
+                            shouldFill = true;
+                            fillPrice = order.stop;
+                        }
+                    } else if (tickPrice !== undefined) {
+                        const crossed = cofState.pass === 0
+                            ? tickPrice <= order.stop
+                            : stopPreviousTick! >= order.stop && tickPrice <= order.stop;
+                        if (crossed) {
+                            shouldFill = true;
+                            fillPrice = cofState.pass === 0 ? tickPrice : order.stop;
+                        }
+                    } else if (lowPrice <= order.stop) {
                         shouldFill = true;
                         fillPrice = order.stop;
-                    } else if (direction === -1 && lowPrice <= order.stop) {
-                        // Short stop order - sell when price falls to stop
-                        shouldFill = true;
-                        fillPrice = order.stop;
+                    }
+                }
+                break;
+
+            case 'stop-limit':
+                if (order.stop !== undefined && order.limit !== undefined) {
+                    const direction = parseDirection(order.direction);
+                    const tickPrice = cofState
+                        ? cofState.ticks[Math.min(cofState.pass, cofState.ticks.length - 1)]
+                        : undefined;
+                    const previousTick = cofState && cofState.pass > 0
+                        ? cofState.ticks[cofState.pass - 1]
+                        : undefined;
+                    const firstSameBarEvaluation = tickPrice !== undefined
+                        && order.bar === context.idx
+                        && order._cof_stop_limit_evaluated !== true;
+                    if (tickPrice !== undefined && order.bar === context.idx) {
+                        order._cof_stop_limit_evaluated = true;
+                    }
+                    const useCurrentLevel = tickPrice !== undefined
+                        && (cofState!.pass === 0 || firstSameBarEvaluation);
+                    const activated = direction === 1
+                        ? tickPrice !== undefined
+                            ? useCurrentLevel
+                                ? tickPrice >= order.stop
+                                : previousTick! <= order.stop && tickPrice >= order.stop
+                            : highPrice >= order.stop
+                        : tickPrice !== undefined
+                          ? useCurrentLevel
+                              ? tickPrice <= order.stop
+                              : previousTick! >= order.stop && tickPrice <= order.stop
+                          : lowPrice <= order.stop;
+                    if (activated) {
+                        // The stop activates a limit order; it does not itself
+                        // fill. A later tick fills at the limit or better.
+                        // https://www.tradingview.com/pine-script-docs/concepts/strategies/#stop-and-stop-limit-orders
+                        order.type = 'limit';
+                        order._stop_limit_activated = true;
                     }
                 }
                 break;
@@ -346,6 +426,12 @@ export function processStrategyOrders(context: any, phase: 'open' | 'close' = 'o
             // shorts fill lower). slippage is in ticks of syminfo.mintick.
             const direction = parseDirection(order.direction);
             fillPrice = applySlippage(context, direction, fillPrice);
+            // A price-based fill, including slippage, cannot exist outside
+            // the bar that filled it. Gap fills use the open above; ordinary
+            // crossings use the trigger level.
+            if (order.type === 'limit' || order.type === 'stop') {
+                fillPrice = Math.min(highPrice, Math.max(lowPrice, fillPrice));
+            }
 
             // Pre-trade margin check (Pine broker emulator). When the
             // required margin for the new position would exceed available
@@ -355,11 +441,18 @@ export function processStrategyOrders(context: any, phase: 'open' | 'close' = 'o
             // is checked. For pyramiding (same-direction adds), held
             // margin from existing positions stays locked.
             //
-            // Runs for ALL margin percentages. At 100% margin the required
-            // margin equals the full notional (qty * price * pointValue * 1),
-            // matching TV's broker-emulator behavior of rejecting entries
-            // whose notional exceeds available equity even with no leverage.
-            const marginPct = direction === 1 ? (strategy.config.margin_long ?? 100) : (strategy.config.margin_short ?? 100);
+            // Only applies when margin_long/margin_short are EXPLICITLY set
+            // (> 0). The Pine v5 default is 0 — the broker emulator then
+            // imposes no margin requirement at all ("the strategy does not
+            // check available funds"; Migration guide to Pine v6: the v6
+            // change is "the default long and short margin percentage for
+            // strategies is now 100", implying 0 for v5). With margin 0,
+            // TV accepts entries whose notional exceeds equity (observed:
+            // 1502, BUYVALUE=100000 on 100k capital, 448 entries with
+            // notional > equity, marginCalls=0). At 100% margin the
+            // required margin equals the full notional and the rejection
+            // applies — the fork's previous behavior.
+            const marginPct = direction === 1 ? (strategy.config.margin_long ?? 0) : (strategy.config.margin_short ?? 0);
             {
                 const oldSize = strategy.position_size;
                 const oldSign = Math.sign(oldSize);
@@ -408,7 +501,12 @@ export function processStrategyOrders(context: any, phase: 'open' | 'close' = 'o
                     const availableEquity = strategy.equity - heldMarginRemaining;
                     const requiredMargin = computeRequiredMargin(newOpenQty, fillPrice, marginPct, pointValue);
 
-                    if (requiredMargin > availableEquity) {
+                    // marginPct === 0 (the v5 default): no margin requirement,
+                    // TV never rejects — requiredMargin is 0 and even a
+                    // negative-equity account can still open (infinite-leverage
+                    // mode). Guard explicitly so an equity < 0 edge cannot
+                    // resurrect a rejection under margin 0.
+                    if (marginPct > 0 && requiredMargin > availableEquity) {
                         // TV broker emulator: the margin check only guards the
                         // OPEN leg. On a reversal, the close leg always
                         // executes (it frees margin / realizes the position) —
@@ -1307,6 +1405,13 @@ export function processExitOrders(context: any, phase: 'open' | 'intrabar' | 'cl
     const closePrice = Series.from(context.data.close).get(0);
     const currentTime = Series.from(context.data.openTime).get(0);
     const mintick = context.pine?.syminfo?.mintick ?? 0.01;
+    const cofTickPrice = cofState
+        ? cofState.ticks[Math.min(cofState.pass, cofState.ticks.length - 1)]
+        : undefined;
+    const atOpenTick = phase === 'open' || cofState === null || cofState.pass === 0;
+    const cofPreviousPrice = cofState && cofState.pass > 0
+        ? cofState.ticks[cofState.pass - 1]
+        : undefined;
 
     // Two-phase evaluation (TV broker-emulator order precedence at the
     // bar's open):
@@ -1544,20 +1649,8 @@ export function processExitOrders(context: any, phase: 'open' | 'intrabar' | 'cl
         // segment 3 on adverse-first; new peak unconditionally on
         // favorable-first). See checkTrail below.
 
-        // Evaluate triggers against this bar.
-        //
-        // TV's intra-bar order assumption — when both TP and SL could've fired,
-        // which fires first is determined by the bar's open's PROXIMITY to high
-        // vs low (TV docs, "Concepts / Strategies / Broker emulator"):
-        //   open closer to HIGH → assumed order: open → high → low → close
-        //                         (first move is up — favorable for longs, adverse for shorts)
-        //   open closer to LOW  → assumed order: open → low → high → close
-        //                         (first move is down — adverse for longs, favorable for shorts)
-        //
-        // For a long: open-near-high fires TP first, open-near-low fires SL first.
-        // For a short: open-near-high fires SL first, open-near-low fires TP first.
-        // Trail is treated as an adverse-side trigger (it kicks in on a retrace
-        // against the favorable peak), so it fires together with SL.
+        // Evaluate TP/SL against the current COF path point. Outside COF the
+        // existing full-bar path model remains in force.
         const openCloserToHigh = Math.abs(highPrice - openPrice) <= Math.abs(openPrice - lowPrice);
         const favorableFirst = isLong ? openCloserToHigh : !openCloserToHigh;
 
@@ -1596,24 +1689,44 @@ export function processExitOrders(context: any, phase: 'open' | 'intrabar' | 'cl
                 sl = isLong ? entry - order.loss * mintick : entry + order.loss * mintick;
             }
 
-            // In the pre-entry 'open' phase only GAP conditions count (the
-            // bar opened already past the trigger); intra-bar crossings
-            // belong to the 'intrabar' phase.
-            const tpHit =
-                tp !== undefined && (phase === 'open' ? (isLong ? openPrice >= tp : openPrice <= tp) : isLong ? highPrice >= tp : lowPrice <= tp);
-            const slHit =
-                sl !== undefined && (phase === 'open' ? (isLong ? openPrice <= sl : openPrice >= sl) : isLong ? lowPrice <= sl : highPrice >= sl);
+            // During COF, price-based orders require a fresh crossing of
+            // their level. A recalculation can refresh an order while price
+            // is already beyond it; that order stays inert until the path
+            // crosses again.
+            let tpHit = false;
+            let slHit = false;
+            if (tp !== undefined) {
+                if (phase === 'open' || (cofState !== null && cofState.pass === 0)) {
+                    tpHit = isLong ? openPrice >= tp : openPrice <= tp;
+                } else if (cofState !== null) {
+                    tpHit = isLong
+                        ? cofPreviousPrice! < tp && cofTickPrice! >= tp
+                        : cofPreviousPrice! > tp && cofTickPrice! <= tp;
+                } else {
+                    tpHit = isLong ? highPrice >= tp : lowPrice <= tp;
+                }
+            }
+            if (sl !== undefined) {
+                if (phase === 'open' || (cofState !== null && cofState.pass === 0)) {
+                    slHit = isLong ? openPrice <= sl : openPrice >= sl;
+                } else if (cofState !== null) {
+                    slHit = isLong
+                        ? cofPreviousPrice! > sl && cofTickPrice! <= sl
+                        : cofPreviousPrice! < sl && cofTickPrice! >= sl;
+                } else {
+                    slHit = isLong ? lowPrice <= sl : highPrice >= sl;
+                }
+            }
 
-            // OCO per trade: when both legs are reachable within the bar,
-            // the leg crossed FIRST along the assumed intra-bar path wins
-            // (favorable-first → TP, adverse-first → SL).
+            // OCO per trade: when both legs are reachable within the current
+            // path segment, the first leg along the assumed path wins.
             let kind: 'profit' | 'loss' | null = null;
             if (tpHit && slHit) kind = favorableFirst ? 'profit' : 'loss';
             else if (tpHit) kind = 'profit';
             else if (slHit) kind = 'loss';
 
             if (kind === 'loss') {
-                const openPastSl = isLong ? openPrice <= (sl as number) : openPrice >= (sl as number);
+                const openPastSl = atOpenTick && (isLong ? openPrice <= (sl as number) : openPrice >= (sl as number));
                 // TV asymmetry (637-event census from the gap_precedence
                 // probe, BTCUSDT 1D): a BUY-stop — the SL leg of a SHORT
                 // position — that is already in-the-money at the open does
@@ -1630,7 +1743,7 @@ export function processExitOrders(context: any, phase: 'open' | 'intrabar' | 'cl
                 }
             }
             if (kind === 'profit') {
-                const openPastTp = isLong ? openPrice >= (tp as number) : openPrice <= (tp as number);
+                const openPastTp = atOpenTick && (isLong ? openPrice >= (tp as number) : openPrice <= (tp as number));
                 tpEvents.push({ qty: tQty, price: openPastTp ? openPrice : (tp as number), kind: 'profit', tradeId: t.id });
             }
         }
@@ -1890,6 +2003,10 @@ export function isAdverseFirstBar(context: any): boolean {
  * triggers a margin call. This matches TV's broker-emulator behavior
  * (the "Margin calls" stat in the Strategy Tester is non-zero on 100%
  * margin runs whenever a position's mark-to-market loss exceeds equity).
+ *
+ * margin 0 (the Pine v5 default) imposes NO margin requirement — TV
+ * never margin-calls such positions, whatever the equity (the broker
+ * emulator "does not check available funds"). The check is skipped.
  */
 export function processMarginCall(context: any, checkpoint: 'open' | 'extreme' | 'close' = 'extreme'): void {
     const strategy: StrategyState = context.strategy;
@@ -1898,7 +2015,8 @@ export function processMarginCall(context: any, checkpoint: 'open' | 'extreme' |
     const positionDir = Math.sign(strategy.position_size);
     if (positionDir === 0) return;
 
-    const marginPct = positionDir === 1 ? (strategy.config.margin_long ?? 100) : (strategy.config.margin_short ?? 100);
+    const marginPct = positionDir === 1 ? (strategy.config.margin_long ?? 0) : (strategy.config.margin_short ?? 0);
+    if (marginPct <= 0) return; // v5 default: no margin requirement → no margin calls.
 
     const openPrice = Series.from(context.data.open).get(0);
     const highPrice = Series.from(context.data.high).get(0);
@@ -2214,6 +2332,7 @@ function updateStrategyMetrics(context: any): void {
  * Initialize strategy state
  */
 export function initializeStrategy(context: any, config: any): void {
+    const defaultMargin = defaultStrategyMargin(context.pineVersion);
     const defaults = {
         title: '',
         shorttitle: '',
@@ -2234,8 +2353,13 @@ export function initializeStrategy(context: any, config: any): void {
         slippage: 0,
         commission_type: 'percent',
         commission_value: 0,
-        margin_long: 100,
-        margin_short: 100,
+        // Pine v5 defaults margin_long/margin_short to 0 (no funds check);
+        // Pine v6 defaults both to 100 (1:1 leverage). The transpiler carries
+        // the source version onto the execution context so omitted arguments
+        // keep their version-specific TradingView meaning. Explicit arguments
+        // still win when config is merged below.
+        margin_long: defaultMargin,
+        margin_short: defaultMargin,
         explicit_plot_zorder: false,
         max_lines_count: 50,
         max_labels_count: 50,

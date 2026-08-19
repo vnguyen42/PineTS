@@ -61,23 +61,58 @@ import { buildLtfSlices } from './slicing/buildLtfSlices';
 function getPineTSFromSource(source: string | Function): string {
     if (typeof source === 'function') {
         return source.toString();
-    } else {
-        const pineScriptVersion = extractPineScriptVersion(source);
-        if (pineScriptVersion === null) {
-            //assume it's PineTS syntax ==> use it as is
-            return source;
+    }
+
+    const pineScriptVersion = extractPineScriptVersion(source);
+    if (pineScriptVersion === null) {
+        // Assume version-less source is PineTS syntax and parse it as-is first.
+        return source;
+    }
+    if (pineScriptVersion >= 5) {
+        const pineToJSResult = pineToJS(source);
+        if (pineToJSResult.success) return pineToJSResult.code;
+        throw new Error(`Failed to transpile Pine Script version ${pineScriptVersion}: ${pineToJSResult.error}`);
+    }
+    throw new Error(`Unsupported Pine Script version ${pineScriptVersion}. Only version 5 and above are supported.`);
+}
+
+export interface ParsedTranspilerSource {
+    code: string;
+    ast: acorn.Program;
+    pineVersion: number | null;
+}
+
+/**
+ * Classify and parse source exactly once for every consumer of the
+ * transpiler. Version-less strings are tried as PineTS/JS first and only
+ * fall back to Pine v5 when that wrapped JavaScript parse fails.
+ */
+export function parseSourceForTranspilation(source: string | Function, debug = false): ParsedTranspilerSource {
+    let pineVersion = typeof source === 'string' ? extractPineScriptVersion(source) : null;
+    let code = wrapInContextFunction(getPineTSFromSource(source));
+
+    try {
+        const ast = acorn.parse(code, {
+            ecmaVersion: 'latest',
+            sourceType: 'module',
+            locations: debug,
+        });
+        return { code, ast, pineVersion };
+    } catch (jsParseError) {
+        if (typeof source !== 'string' || extractPineScriptVersion(source) !== null) throw jsParseError;
+
+        const pineResult = pineToJS(source, { forceVersion: 5 });
+        if (!pineResult.success) {
+            throw new Error(`Failed to transpile Pine Script (assumed version 5): ${pineResult.error}`);
         }
-        if (pineScriptVersion >= 5) {
-            //assume it's Pine Script syntax ==> use pineToJS to transpile it
-            const pineToJSResult = pineToJS(source);
-            if (pineToJSResult.success) {
-                return pineToJSResult.code;
-            } else {
-                throw new Error(`Failed to transpile Pine Script version ${pineScriptVersion}: ${pineToJSResult.error}`);
-            }
-        } else {
-            throw new Error(`Unsupported Pine Script version ${pineScriptVersion}. Only version 5 and above are supported.`);
-        }
+        pineVersion = 5;
+        code = wrapInContextFunction(pineResult.code);
+        const ast = acorn.parse(code, {
+            ecmaVersion: 'latest',
+            sourceType: 'module',
+            locations: debug,
+        });
+        return { code, ast, pineVersion };
     }
 }
 
@@ -88,47 +123,7 @@ export function transpile(source: string | Function, options: { debug: boolean; 
     }
 
     const { debug } = options;
-
-    let code = getPineTSFromSource(source);
-
-    // Pre-process: Wrap in context function if not already wrapped
-    code = wrapInContextFunction(code);
-
-    // Parse the code into an AST.
-    //
-    // Version-less Pine sources (no //@version header) reach here verbatim:
-    // getPineTSFromSource assumes version-less strings are PineTS/JS syntax.
-    // Real TradingView sources can lose their header in storage, and their
-    // Pine-only syntax (function declarations `f(x) => …`, `and`/`or`
-    // operators) then fails this parse with `SyntaxError: Unexpected token`.
-    // Retry such sources as Pine v5 — the closest version this engine
-    // supports (TV itself compiles version-less scripts as v1, which is
-    // refused here). Valid-JS PineTS sources are untouched: the retry only
-    // fires where the as-is path threw.
-    let ast;
-    try {
-        ast = acorn.parse(code, {
-            ecmaVersion: 'latest',
-            sourceType: 'module',
-            locations: debug,
-        });
-    } catch (jsParseError) {
-        if (typeof source === 'string' && extractPineScriptVersion(source) === null) {
-            const pineResult = pineToJS(source, { forceVersion: 5 });
-            if (!pineResult.success) {
-                throw new Error(`Failed to transpile Pine Script (assumed version 5): ${pineResult.error}`);
-            }
-            code = wrapInContextFunction(pineResult.code);
-            ast = acorn.parse(code, {
-                ecmaVersion: 'latest',
-                sourceType: 'module',
-                locations: debug,
-            });
-        } else {
-            throw jsParseError;
-        }
-    }
-
+    const { code, ast, pineVersion } = parseSourceForTranspilation(source, debug);
     const sourceLines = debug ? code.split('\n') : [];
 
     // Pre-process: Transform all nested arrow functions
@@ -273,6 +268,7 @@ export function transpile(source: string | Function, options: { debug: boolean; 
     if (slices && Object.keys(slices).length > 0) {
         (mainFn as any)._ltfSlices = slices;
     }
+    (mainFn as Function & { _pineVersion: number | null })._pineVersion = pineVersion;
     return mainFn;
 }
 
