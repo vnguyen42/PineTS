@@ -82,6 +82,34 @@ plot(result, "Result")
             expect(lastValue).toBeTypeOf('number');
             expect(isNaN(lastValue)).toBe(false);
         });
+
+        it('transforms globals in a switch nested in an if-expression reassignment', async () => {
+            const indicatorCode = `
+//@version=6
+indicator("Nested reassignment switch")
+
+modeA = "A"
+modeB = "B"
+selected = input.string(modeA, "Mode", options=[modeA, modeB])
+var float result = na
+result := if bar_index > 0
+    switch selected
+        modeA => close
+        modeB => open
+        => na
+else
+    result[1]
+
+plot(result, "Result")
+`;
+            const code = transpile(indicatorCode).toString();
+            expect(code).toContain('switch ($.get($.let.glb1_selected, 0))');
+            expect(code).toContain('case $.get($.let.glb1_modeA, 0):');
+
+            const pineTS = new PineTS(Provider.Mock, 'BTCUSDC', '60', null, new Date('2024-01-01').getTime(), new Date('2024-01-10').getTime());
+            const { plots } = await pineTS.run(indicatorCode);
+            expect(plots['Result'].data.some(({ value }: { value: number }) => Number.isFinite(value))).toBe(true);
+        });
     });
 
     describe('Bug Fix: Hoisted statements stay inside case blocks', () => {

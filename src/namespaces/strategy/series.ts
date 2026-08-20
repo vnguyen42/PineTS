@@ -1,0 +1,38 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright (C) 2026 LuxAlgo
+
+/** TradingView `strategy.*` variables whose reference type is `series`. */
+export const STRATEGY_SERIES_NAMES: Record<string, true> = {
+    opentrades: true,
+    closedtrades: true,
+    netprofit: true,
+    position_size: true,
+    position_avg_price: true,
+    equity: true,
+    openprofit: true,
+    openprofit_percent: true,
+    netprofit_percent: true,
+    grossprofit: true,
+    grossprofit_percent: true,
+    grossloss: true,
+    grossloss_percent: true,
+    wintrades: true,
+    losstrades: true,
+    eventrades: true,
+    avg_trade: true,
+    avg_trade_percent: true,
+    avg_winning_trade: true,
+    avg_winning_trade_percent: true,
+    avg_losing_trade: true,
+    avg_losing_trade_percent: true,
+    max_drawdown: true,
+    max_drawdown_percent: true,
+    max_runup: true,
+    max_runup_percent: true,
+    max_contracts_held_all: true,
+    max_contracts_held_long: true,
+    max_contracts_held_short: true,
+    position_entry_name: true,
+    initial_capital: true,
+    margin_liquidation_price: true,
+};

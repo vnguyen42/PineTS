@@ -1142,6 +1142,7 @@ export class PineTS {
     private async _executeIterations(context: Context, transpiledFn: Function, startIdx: number, endIdx: number): Promise<void> {
         const contextVarNames = ['const', 'var', 'let', 'params'];
         context.pineVersion = (transpiledFn as Function & { _pineVersion?: number | null })._pineVersion ?? context.pineVersion;
+        context._strategyHistorySeries = (transpiledFn as Function & { _strategyHistorySeries?: string[] })._strategyHistorySeries;
 
         for (let i = startIdx; i < endIdx; i++) {
             context.idx = i;
@@ -1314,6 +1315,10 @@ export class PineTS {
                 // final position/equity state before the next bar.
                 finalizeStrategyBar(context);
             }
+
+            // History references on strategy variables observe the finalized
+            // bar, after every fill phase and the last COF recalculation.
+            context.pine?.strategy?.snapshotSeries();
 
             //collect results
             if (typeof result === 'object') {

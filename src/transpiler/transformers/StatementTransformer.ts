@@ -193,6 +193,13 @@ export function transformAssignmentExpression(node: any, scopeManager: ScopeMana
                 }
             },
             CallExpression(node: any, state: any, c: any) {
+                if (node.callee.type === 'ArrowFunctionExpression' || node.callee.type === 'FunctionExpression') {
+                    walk.simple(node.callee.body, {
+                        SwitchStatement(switchNode: any) {
+                            transformExpression(switchNode, scopeManager);
+                        },
+                    });
+                }
                 const isNamespaceCall =
                     node.callee &&
                     node.callee.type === 'MemberExpression' &&

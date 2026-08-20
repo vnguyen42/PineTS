@@ -113,6 +113,85 @@ if strategy.position_size > 0
         expect(strategy.closedtrades[0].exit_price).toBe(110);
     });
 
+    it('reads strategy state from the previous finalized bar', async () => {
+        const source = `
+//@version=5
+strategy('History', default_qty_type=strategy.fixed, default_qty_value=1)
+if bar_index == 0
+    strategy.entry('L', strategy.long)
+plot(strategy.position_size, 'current_position')
+plot(strategy.position_size[1], 'previous_position')
+plot(strategy.position_avg_price[1], 'previous_average')
+plot(strategy.opentrades[1], 'previous_open_trades')`;
+        const engine = new PineTS(candles);
+        const context = await engine.run(source);
+        const values = (name: string) => context.plots[name].data.map((point: { value: number }) => point.value);
+
+        expect(values('current_position')).toEqual([0, 1]);
+        expect(values('previous_position')).toEqual([NaN, 0]);
+        expect(values('previous_average')).toEqual([NaN, NaN]);
+        expect(values('previous_open_trades')).toEqual([NaN, 0]);
+        expect(Object.keys(context.strategy?._series_history ?? {}).sort()).toEqual([
+            'opentrades',
+            'position_avg_price',
+            'position_size',
+        ]);
+        expect(context.strategy?._series_history?.position_size).toHaveLength(candles.length);
+    });
+
+    it('does not capture strategy history when the source has no strategy history reference', async () => {
+        const source = `
+//@version=5
+strategy('No history', default_qty_type=strategy.fixed, default_qty_value=1)
+if bar_index == 0
+    strategy.entry('L', strategy.long)
+plot(strategy.position_size, 'current_position')`;
+        const context = await new PineTS(candles).run(source);
+
+        expect(context.strategy?._series_history).toBeUndefined();
+    });
+
+    it('snapshots strategy history after the process-on-close fill phase', async () => {
+        const source = `
+//@version=5
+strategy('POC history', process_orders_on_close=true, default_qty_type=strategy.fixed, default_qty_value=1)
+if bar_index == 0
+    strategy.entry('L', strategy.long)
+plot(strategy.position_size[1], 'previous_position')
+plot(strategy.position_avg_price[1], 'previous_average')
+plot(strategy.opentrades[1], 'previous_open_trades')`;
+        const engine = new PineTS(candles);
+        const context = await engine.run(source);
+        const values = (name: string) => context.plots[name].data.map((point: { value: number }) => point.value);
+
+        expect(values('previous_position')).toEqual([NaN, 1]);
+        expect(values('previous_average')).toEqual([NaN, 100]);
+        expect(values('previous_open_trades')).toEqual([NaN, 1]);
+    });
+
+    it('snapshots strategy history after the final calc-on-order-fills pass', async () => {
+        const cofCandles = [
+            ...candles,
+            {
+                openTime: 172_800_000, open: 112, high: 118, low: 108, close: 116, volume: 1000, closeTime: 259_199_999,
+                quoteAssetVolume: 0, numberOfTrades: 0, takerBuyBaseAssetVolume: 0, takerBuyQuoteAssetVolume: 0, ignore: 0,
+            },
+        ];
+        const source = `
+//@version=5
+strategy('COF history', calc_on_order_fills=true, default_qty_type=strategy.fixed, default_qty_value=1)
+if bar_index == 0
+    strategy.entry('L', strategy.long)
+if strategy.position_size > 0
+    strategy.close('L')
+plot(strategy.position_size[1], 'previous_position')`;
+        const engine = new PineTS(cofCandles);
+        const context = await engine.run(source);
+
+        expect(context.strategy?.closedtrades).toHaveLength(1);
+        expect(context.plots.previous_position.data.map((point: { value: number }) => point.value)).toEqual([NaN, 0, 0]);
+    });
+
     it('keeps COF-only market fills on the existing intrabar tick path', () => {
         const context = makeContext({ calc_on_order_fills: true });
         const order = queueMarketEntry(context, 1);

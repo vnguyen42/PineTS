@@ -4,6 +4,7 @@
 
 export type { StrategyConfig, StrategyState, Trade, Order } from './types';
 
+import { STRATEGY_SERIES_NAMES } from './series';
 import { any } from './methods/any';
 import { order } from './methods/order';
 import { param } from './methods/param';
@@ -142,11 +143,28 @@ const STRATEGY_COMMISSION = {
 
 export class Strategy {
     [key: string]: any;
+    private readonly seriesGetters: Record<string, (...args: never[]) => unknown> = {};
 
     constructor(private context: any) {
-        // Install methods (factory pattern; bulk bind via the index signature).
         Object.entries(methods).forEach(([name, factory]) => {
-            this[name] = factory(context);
+            const method = factory(context);
+            if (!STRATEGY_SERIES_NAMES[name]) {
+                this[name] = method;
+                return;
+            }
+
+            this.seriesGetters[name] = method;
+            this[name] = (lookback?: unknown) => {
+                if (lookback === undefined) return method();
+
+                const offset = Number(context.get(lookback, 0));
+                if (offset === 0) return method();
+                if (!Number.isInteger(offset) || offset < 0) return NaN;
+
+                const history = context.strategy?._series_history?.[name];
+                const index = history?.length - offset;
+                return index >= 0 ? history[index] : NaN;
+            };
         });
 
         // Constant namespaces bound as callable factories.
@@ -157,6 +175,25 @@ export class Strategy {
         // Risk sub-namespace — callable factory returning the 6 setters.
         const riskNs = risk(context);
         this.risk = () => riskNs;
+    }
+
+    /**
+     * Capture the finalized strategy variables once per bar. The execution
+     * loop calls this after all broker-emulator phases, including the
+     * process-on-close fill and the final calc-on-order-fills recalculation.
+     */
+    snapshotSeries(): void {
+        const strategy = this.context.strategy;
+        const requested: string[] | undefined = this.context._strategyHistorySeries;
+        if (!strategy || !requested?.length) return;
+        strategy._series_history ??= {};
+
+        for (const name of requested) {
+            const current = this.seriesGetters[name]?.();
+            const value = current !== null && typeof current === 'object' ? current.valueOf() : current;
+            strategy._series_history[name] ??= [];
+            strategy._series_history[name].push(value);
+        }
     }
 }
 

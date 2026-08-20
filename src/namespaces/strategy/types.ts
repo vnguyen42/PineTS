@@ -328,6 +328,9 @@ export interface StrategyState {
     // `calc_on_order_fills = true` (see CofBarState). Set at the start of
     // each bar by the execution loop, null outside the COF processing.
     _cof?: CofBarState | null;
+    // Finalized values of Pine's `series`-qualified strategy variables,
+    // appended once after all broker-emulator phases for each bar.
+    _series_history?: Record<string, unknown[]>;
 
     // Internal: mark-to-market equity at each calendar month's last bar,
     // and the month key of the most recent bar (rollover detector). Feed

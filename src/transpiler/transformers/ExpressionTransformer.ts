@@ -6,6 +6,7 @@ import ScopeManager from '../analysis/ScopeManager';
 import { inferDirectUdtFactoryType } from '../analysis/AnalysisPass';
 import { ASTFactory, CONTEXT_NAME } from '../utils/ASTFactory';
 import { KNOWN_NAMESPACES, NAMESPACES_LIKE, ASYNC_METHODS, CALLSITE_ID_NAMESPACES } from '../settings';
+import { STRATEGY_SERIES_NAMES } from '../../namespaces/strategy/series';
 
 const UNDEFINED_ARG = {
     type: 'Identifier',
@@ -439,6 +440,62 @@ export function transformIdentifier(node: any, scopeManager: ScopeManager): void
 export function transformMemberExpression(memberNode: any, originalParamName: string, scopeManager: ScopeManager): void {
     // Skip transformation for Math object properties
     if (memberNode.object && memberNode.object.type === 'Identifier' && memberNode.object.name === 'Math') {
+        return;
+    }
+
+    // A direct `strategy.*[N]` reference must read the broker emulator's
+    // finalized per-bar snapshot. Treating the getter as an ordinary call
+    // result would sample it during script evaluation, before a
+    // process_orders_on_close fill, and make the following bar's `[1]` stale.
+    if (
+        memberNode.computed &&
+        memberNode.object?.type === 'MemberExpression' &&
+        !memberNode.object.computed &&
+        memberNode.object.object?.type === 'Identifier' &&
+        memberNode.object.object.name === 'strategy' &&
+        memberNode.object.property?.type === 'Identifier' &&
+        STRATEGY_SERIES_NAMES[memberNode.object.property.name]
+    ) {
+        scopeManager.markStrategyHistorySeries(memberNode.object.property.name);
+        const callee = memberNode.object;
+        const lookback = memberNode.property;
+        Object.assign(memberNode, {
+            type: 'CallExpression',
+            callee,
+            arguments: [lookback],
+            _transformed: false,
+        });
+        delete memberNode.object;
+        delete memberNode.property;
+        delete memberNode.computed;
+        transformCallExpression(memberNode, scopeManager);
+        return;
+    }
+
+    // The main walker normally visits the inner namespace member first, so
+    // the same source arrives here as `strategy.position_size()[N]`.
+    if (
+        memberNode.computed &&
+        memberNode.object?.type === 'CallExpression' &&
+        memberNode.object.callee?.type === 'MemberExpression' &&
+        memberNode.object.callee.object?.type === 'Identifier' &&
+        memberNode.object.callee.object.name === 'strategy' &&
+        memberNode.object.callee.property?.type === 'Identifier' &&
+        STRATEGY_SERIES_NAMES[memberNode.object.callee.property.name]
+    ) {
+        scopeManager.markStrategyHistorySeries(memberNode.object.callee.property.name);
+        const callee = memberNode.object.callee;
+        const lookback = memberNode.property;
+        Object.assign(memberNode, {
+            type: 'CallExpression',
+            callee,
+            arguments: [lookback],
+            _transformed: false,
+        });
+        delete memberNode.object;
+        delete memberNode.property;
+        delete memberNode.computed;
+        transformCallExpression(memberNode, scopeManager);
         return;
     }
 
@@ -1117,6 +1174,39 @@ export function transformFunctionArgument(arg: any, namespace: string, scopeMana
     const isPropertyAccess = arg.type === 'MemberExpression' && !arg.computed;
 
     if (isArrayAccess) {
+        // Namespace-call arguments have their own computed-member path and do
+        // not pass through transformMemberExpression for the outer `[N]`.
+        // Preserve strategy history as a direct snapshot-aware getter call.
+        const directStrategyMember =
+            arg.object?.type === 'MemberExpression' &&
+            !arg.object.computed &&
+            arg.object.object?.type === 'Identifier' &&
+            arg.object.object.name === 'strategy' &&
+            arg.object.property?.type === 'Identifier' &&
+            STRATEGY_SERIES_NAMES[arg.object.property.name]
+                ? arg.object
+                : null;
+        const calledStrategyMember =
+            arg.object?.type === 'CallExpression' &&
+            arg.object.callee?.type === 'MemberExpression' &&
+            arg.object.callee.object?.type === 'Identifier' &&
+            arg.object.callee.object.name === 'strategy' &&
+            arg.object.callee.property?.type === 'Identifier' &&
+            STRATEGY_SERIES_NAMES[arg.object.callee.property.name]
+                ? arg.object.callee
+                : null;
+        const strategyCallee = directStrategyMember ?? calledStrategyMember;
+        if (strategyCallee) {
+            const historyCall = {
+                type: 'CallExpression',
+                callee: strategyCallee,
+                arguments: [arg.property],
+                _transformed: false,
+            };
+            transformCallExpression(historyCall, scopeManager);
+            return historyCall;
+        }
+
         // UDT field subscript: `bar.field[N]` (and chained `bar.outer.inner[N]`)
         // where the leaf base is a registered UDT instance. Pine semantics:
         // `bar = BAR.new()` runs every bar, so `$.let.glb1_bar` is a Series of
@@ -1485,6 +1575,16 @@ function resolveCalleeObject(node: any, parentNode: any, scopeManager: ScopeMana
 }
 
 export function transformCallExpression(node: any, scopeManager: ScopeManager, namespace?: string): void {
+    if (
+        node.callee?.type === 'MemberExpression' &&
+        node.callee.object?.type === 'Identifier' &&
+        node.callee.object.name === 'strategy' &&
+        node.callee.property?.type === 'Identifier' &&
+        STRATEGY_SERIES_NAMES[node.callee.property.name] &&
+        node.arguments?.length > 0
+    ) {
+        scopeManager.markStrategyHistorySeries(node.callee.property.name);
+    }
     // Skip if this node has already been transformed
     if (node._transformed) {
         return;
