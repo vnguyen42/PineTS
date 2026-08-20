@@ -3,6 +3,8 @@ import { Context } from '../../../src/Context.class';
 import { initializeStrategy, processStrategyOrders, processExitOrders } from '../../../src/namespaces/strategy/utils';
 import { entry } from '../../../src/namespaces/strategy/methods/entry';
 import { exit } from '../../../src/namespaces/strategy/methods/exit';
+import { close_all } from '../../../src/namespaces/strategy/methods/close_all';
+import { cancel } from '../../../src/namespaces/strategy/methods/cancel';
 import { PineTS } from '../../../src/PineTS.class';
 import { Series } from '../../../src/Series';
 import { Order } from '../../../src/namespaces/strategy/types';
@@ -348,6 +350,307 @@ describe('strategy calc_on_order_fills — same-bar sequencing', () => {
         exit(context)('Tg1', 'L', { qty_percent: 50, limit: 105 });
         expect(processExitOrders(context, 'intrabar')).toBe(0);
         expect(context.strategy.position_size).toBe(50);
+    });
+
+    it('does not re-arm a filled qty_percent exit for the same entry lot on the next bar', () => {
+        const context = makeContext({ calc_on_order_fills: true });
+        context.strategy.position_size = 100;
+        context.strategy.position_avg_price = 100;
+        context.strategy.opentrades = [{
+            id: 'trade-L',
+            entry_id: 'L',
+            entry_price: 100,
+            entry_time: 0,
+            entry_bar_index: 0,
+            size: 100,
+            commission: 0,
+            max_drawdown: 0,
+            max_runup: 0,
+        }];
+        context.data.low = new Series([90]);
+        context.data.close = new Series([108]);
+        context.strategy._cof = { pass: 2, ticks: [100, 90, 110, 108] };
+
+        exit(context)('Tg1', 'L', { qty_percent: 50, limit: 105 });
+        expect(processExitOrders(context, 'intrabar')).toBe(1);
+        expect(context.strategy.position_size).toBe(50);
+
+        context.strategy._cof.pass = 3;
+        exit(context)('Tg1', 'L', { qty_percent: 50, limit: 105 });
+        expect(context.strategy.pending_orders).toHaveLength(0);
+
+        context.idx = 1;
+        context.data.open = new Series([106]);
+        context.data.high = new Series([110]);
+        context.data.low = new Series([104]);
+        context.data.close = new Series([108]);
+        context.data.openTime = new Series([86_400_000]);
+        context.strategy._cof = { pass: 0, ticks: [106, 104, 110, 108] };
+        exit(context)('Tg1', 'L', { qty_percent: 50, limit: 105 });
+        expect(context.strategy.pending_orders).toHaveLength(0);
+        expect(processExitOrders(context, 'intrabar')).toBe(0);
+        expect(context.strategy.position_size).toBe(50);
+    });
+
+    it('re-arms only for a new pyramid lot and preserves persistent exit cadence', () => {
+        const context = makeContext({ calc_on_order_fills: true, pyramiding: 2 });
+        context.strategy.position_size = 100;
+        context.strategy.position_avg_price = 100;
+        context.strategy.opentrades = [{
+            id: 'trade-old',
+            entry_id: 'L',
+            entry_price: 100,
+            entry_time: 0,
+            entry_bar_index: 0,
+            size: 100,
+            commission: 0,
+            max_drawdown: 0,
+            max_runup: 0,
+        }];
+        context.data.low = new Series([90]);
+        context.data.close = new Series([108]);
+        context.strategy._cof = { pass: 2, ticks: [100, 90, 110, 108] };
+
+        exit(context)('Tg1', 'L', { qty_percent: 50, limit: 105 }, { __callsiteId: 'site-Tg1' });
+        expect(processExitOrders(context, 'intrabar')).toBe(1);
+        expect(context.strategy.opentrades[0].size).toBe(50);
+
+        for (const idx of [1, 2]) {
+            context.idx = idx;
+            context.data.open = new Series([100]);
+            context.data.high = new Series([101]);
+            context.data.low = new Series([99]);
+            context.data.close = new Series([100]);
+            context.data.openTime = new Series([idx * 86_400_000]);
+            context.strategy._cof = { pass: 0, ticks: [100, 99, 101, 100] };
+            exit(context)('Tg1', 'L', { qty_percent: 50, limit: 105 }, { __callsiteId: 'site-Tg1' });
+            expect(context.strategy.pending_orders).toHaveLength(0);
+        }
+
+        context.idx = 3;
+        context.data.open = new Series([96]);
+        context.data.high = new Series([101]);
+        context.data.low = new Series([94]);
+        context.data.close = new Series([99]);
+        context.data.openTime = new Series([259_200_000]);
+        context.strategy.position_size = 150;
+        context.strategy.opentrades.push({
+            id: 'trade-new',
+            entry_id: 'L',
+            entry_price: 100,
+            entry_time: 259_200_000,
+            entry_bar_index: 3,
+            size: 100,
+            commission: 0,
+            max_drawdown: 0,
+            max_runup: 0,
+        });
+        context.strategy._cof = { pass: 0, ticks: [96, 94, 101, 99] };
+        // The wrong-sided absolute limit is kept only for persistent exit
+        // cadence; losing history on a suppressed bar would drop this leg.
+        exit(context)('Tg1', 'L', { qty_percent: 50, limit: 95 }, { __callsiteId: 'site-Tg1' });
+
+        expect(context.strategy.pending_orders[0]._isPersistent).toBe(true);
+        expect(processExitOrders(context, 'intrabar')).toBe(1);
+        expect(context.strategy.opentrades.find((trade: { id: string }) => trade.id === 'trade-old')?.size).toBe(50);
+        expect(context.strategy.opentrades.find((trade: { id: string }) => trade.id === 'trade-new')?.size).toBe(50);
+    });
+
+    it('keeps a consumed exit waiting across COF passes for a delayed pyramid entry', () => {
+        const context = makeContext({ calc_on_order_fills: true, process_orders_on_close: true, pyramiding: 2 });
+        context.strategy.position_size = 100;
+        context.strategy.position_avg_price = 100;
+        context.strategy.opentrades = [{
+            id: 'trade-old',
+            entry_id: 'L',
+            entry_price: 100,
+            entry_time: 0,
+            entry_bar_index: 0,
+            size: 100,
+            commission: 0,
+            max_drawdown: 0,
+            max_runup: 0,
+        }];
+        context.data.low = new Series([90]);
+        context.data.close = new Series([108]);
+        context.strategy._cof = { pass: 2, ticks: [100, 90, 110, 108] };
+
+        exit(context)('Tg1', 'L', { qty_percent: 50, limit: 105 });
+        expect(processExitOrders(context, 'intrabar')).toBe(1);
+        expect(context.strategy.opentrades[0].size).toBe(50);
+
+        entry(context)('L', 'long', { qty: 100, limit: 90 });
+        context.strategy._cof.pass = 3;
+        exit(context)('Tg1', 'L', { qty_percent: 50, limit: 105 });
+        expect(context.strategy.pending_orders.filter((order: Order) => order.category === 'exit')).toHaveLength(1);
+
+        expect(processExitOrders(context, 'intrabar')).toBe(0);
+        expect(context.strategy.pending_orders.filter((order: Order) => order.category === 'exit')).toHaveLength(1);
+        context.strategy._cof.pass = 4;
+        exit(context)('Tg1', 'L', { qty_percent: 50, limit: 105 });
+        expect(context.strategy.pending_orders.filter((order: Order) => order.category === 'exit')).toHaveLength(1);
+        expect(processExitOrders(context, 'close')).toBe(0);
+        expect(context.strategy.pending_orders.filter((order: Order) => order.category === 'exit')).toHaveLength(1);
+
+        context.idx = 1;
+        context.data.open = new Series([100]);
+        context.data.high = new Series([104]);
+        context.data.low = new Series([95]);
+        context.data.close = new Series([102]);
+        context.data.openTime = new Series([86_400_000]);
+        context.strategy._cof = { pass: 0, ticks: [100, 95, 104, 102] };
+        processExitOrders(context, 'open');
+        expect(processStrategyOrders(context)).toBe(0);
+        context.strategy._cof.pass = 2;
+        expect(processExitOrders(context, 'intrabar')).toBe(0);
+        expect(processExitOrders(context, 'close')).toBe(0);
+        expect(context.strategy.pending_orders.filter((order: Order) => order.category === 'exit')).toHaveLength(1);
+
+        context.idx = 2;
+        context.data.open = new Series([89]);
+        context.data.high = new Series([106]);
+        context.data.low = new Series([88]);
+        context.data.close = new Series([104]);
+        context.data.openTime = new Series([172_800_000]);
+        context.strategy._cof = { pass: 0, ticks: [89, 88, 106, 104] };
+        processExitOrders(context, 'open');
+        expect(processStrategyOrders(context)).toBe(1);
+
+        context.strategy._cof.pass = 2;
+        expect(processExitOrders(context, 'intrabar')).toBe(1);
+        expect(context.strategy.opentrades.find((trade: { id: string }) => trade.id === 'trade-old')?.size).toBe(50);
+        expect(context.strategy.opentrades.find((trade: { id: string }) => trade.id !== 'trade-old')?.size).toBe(50);
+    });
+
+    it('clears a waiting exit after its matching entry is explicitly cancelled', () => {
+        const context = makeContext({ calc_on_order_fills: true });
+
+        entry(context)('L', 'long', { qty: 100, limit: 90 });
+        exit(context)('Tg1', 'L', { qty_percent: 50, limit: 105 });
+        expect(context.strategy.pending_orders).toHaveLength(2);
+
+        cancel(context)('L');
+        expect(context.strategy.pending_orders).toHaveLength(1);
+        expect(processExitOrders(context, 'intrabar')).toBe(0);
+        expect(context.strategy.pending_orders).toHaveLength(0);
+    });
+
+    it('keeps a waiting exit bound to an entry ID when the pending entry reverses direction', () => {
+        const context = makeContext({ calc_on_order_fills: true });
+
+        entry(context)('L', 'long', { qty: 100, limit: 90 });
+        exit(context)('Tg1', 'L', { qty_percent: 50, limit: 105 });
+        entry(context)('L', 'short', { qty: 100, limit: 110 });
+
+        expect(context.strategy.pending_orders.filter((order: Order) => order.category === 'entry')).toHaveLength(1);
+        expect(context.strategy.pending_orders.find((order: Order) => order.category === 'entry')?.direction).toBe(-1);
+        expect(processExitOrders(context, 'intrabar')).toBe(0);
+        expect(context.strategy.pending_orders.filter((order: Order) => order.category === 'exit')).toHaveLength(1);
+    });
+
+    it('lets close_all supersede a waiting conditional exit', () => {
+        const context = makeContext({ calc_on_order_fills: true });
+        context.strategy.position_size = 100;
+        context.strategy.position_avg_price = 100;
+        context.strategy.opentrades = [{
+            id: 'trade-L',
+            entry_id: 'L',
+            entry_price: 100,
+            entry_time: 0,
+            entry_bar_index: 0,
+            size: 100,
+            commission: 0,
+            max_drawdown: 0,
+            max_runup: 0,
+        }];
+
+        entry(context)('L', 'long', { qty: 100, limit: 90 });
+        exit(context)('Tg1', 'L', { qty_percent: 50, limit: 105 });
+        close_all(context)();
+
+        expect(context.strategy.pending_orders.some((order: Order) => order.id === 'Tg1')).toBe(false);
+        expect(context.strategy.pending_orders.some((order: Order) => order.id === 'close_all')).toBe(true);
+    });
+
+    it('does not re-arm a filled qty_percent trailing exit for its partially open lot', () => {
+        const context = makeContext({ calc_on_order_fills: true });
+        context.strategy.position_size = 100;
+        context.strategy.position_avg_price = 100;
+        context.strategy.opentrades = [{
+            id: 'trade-L',
+            entry_id: 'L',
+            entry_price: 100,
+            entry_time: 0,
+            entry_bar_index: 0,
+            size: 100,
+            commission: 0,
+            max_drawdown: 0,
+            max_runup: 0,
+        }];
+        context.data.open = new Series([100]);
+        context.data.high = new Series([110]);
+        context.data.low = new Series([90]);
+        context.data.close = new Series([100]);
+        context.strategy._cof = { pass: 2, ticks: [100, 90, 110, 100] };
+
+        exit(context)('Trail', 'L', { qty_percent: 50, trail_price: 101, trail_offset: 500 });
+        expect(processExitOrders(context, 'intrabar')).toBe(1);
+        expect(context.strategy.position_size).toBe(50);
+
+        context.strategy._cof.pass = 3;
+        exit(context)('Trail', 'L', { qty_percent: 50, trail_price: 101, trail_offset: 500 });
+        expect(context.strategy.pending_orders).toHaveLength(0);
+    });
+
+    it('re-arms a consumed exit after close_all for a new physical lot with the same entry ID', () => {
+        const context = makeContext({ calc_on_order_fills: true });
+        context.strategy.position_size = 100;
+        context.strategy.position_avg_price = 100;
+        context.strategy.opentrades = [{
+            id: 'trade-first',
+            entry_id: 'L',
+            entry_price: 100,
+            entry_time: 0,
+            entry_bar_index: 0,
+            size: 100,
+            commission: 0,
+            max_drawdown: 0,
+            max_runup: 0,
+        }];
+        context.data.low = new Series([90]);
+        context.data.close = new Series([108]);
+        context.strategy._cof = { pass: 2, ticks: [100, 90, 110, 108] };
+
+        exit(context)('Tg1', 'L', { qty_percent: 50, limit: 105 });
+        expect(processExitOrders(context, 'intrabar')).toBe(1);
+        expect(context.strategy.position_size).toBe(50);
+
+        close_all(context)();
+        context.strategy._cof.pass = 3;
+        expect(processExitOrders(context, 'intrabar')).toBe(1);
+        expect(context.strategy.position_size).toBe(0);
+
+        context.idx = 1;
+        context.strategy.position_size = 100;
+        context.strategy.position_avg_price = 100;
+        context.strategy.opentrades.push({
+            id: 'trade-second',
+            entry_id: 'L',
+            entry_price: 100,
+            entry_time: 86_400_000,
+            entry_bar_index: 1,
+            size: 100,
+            commission: 0,
+            max_drawdown: 0,
+            max_runup: 0,
+        });
+        context.strategy._cof = { pass: 2, ticks: [100, 90, 110, 108] };
+
+        exit(context)('Tg1', 'L', { qty_percent: 50, limit: 105 });
+        expect(context.strategy.pending_orders).toHaveLength(1);
+        expect(processExitOrders(context, 'intrabar')).toBe(1);
+        expect(context.strategy.opentrades).toHaveLength(1);
+        expect(context.strategy.opentrades[0]).toMatchObject({ id: 'trade-second', size: 50 });
     });
 
     it('refreshes a pending stop entry with the same ID instead of accumulating stale orders', () => {

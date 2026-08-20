@@ -4,7 +4,7 @@
 import { Order } from '../types';
 import { Series } from '../../../Series';
 import { parseArgsForPineParams, extractCallsiteId } from '../../utils';
-import { roundToMintick } from '../utils';
+import { hasPendingMatchingEntry, roundToMintick } from '../utils';
 
 /**
  * Pine signature (21 named args):
@@ -109,6 +109,8 @@ export function exit(context: any) {
         const stop        = stopRaw       !== undefined ? roundToMintick(stopRaw,       currentClose, mintick) : undefined;
         const trailPrice  = trailPriceRaw !== undefined ? roundToMintick(trailPriceRaw, currentClose, mintick) : undefined;
         const fromEntryId = fromEntry ?? '';
+        const exitId = idValue ?? 'exit';
+        const lifecycleKey = `${exitId}\u0000${fromEntryId}`;
 
         // Cadence detection: persistent vs ephemeral capture.
         // If the user called strategy.exit at THIS exact call site on the
@@ -125,9 +127,26 @@ export function exit(context: any) {
         const lastBarForSite = history.get(callsiteId);
         const isPersistent = lastBarForSite !== undefined && lastBarForSite === context.idx - 1;
         history.set(callsiteId, context.idx);
+        let excludedTradeIds: string[] | undefined;
+        if (context.strategy.config.calc_on_order_fills === true) {
+            const matchingTradeIds = context.strategy.opentrades
+                .filter((trade: { id: string; entry_id: string }) => !fromEntryId || trade.entry_id === fromEntryId)
+                .map((trade: { id: string }) => trade.id);
+            const alreadyFilled = context.strategy._filled_exit_trade_ids?.get(lifecycleKey) ?? [];
+            const excluded = alreadyFilled.filter((tradeId: string) => matchingTradeIds.includes(tradeId));
+            excludedTradeIds = excluded;
+            const waitingForEntry = hasPendingMatchingEntry(context.strategy, fromEntryId);
+            if (
+                matchingTradeIds.length > 0
+                && matchingTradeIds.every((tradeId: string) => excluded.includes(tradeId))
+                && !waitingForEntry
+            ) {
+                return;
+            }
+        }
 
         const order: Order = {
-            id: idValue ?? 'exit',
+            id: exitId,
             direction: 0,           // resolved at trigger based on matching trades
             qty: qty !== undefined ? Math.abs(Number(qty)) : 0,
             qty_percent: qtyPercent,
@@ -155,6 +174,8 @@ export function exit(context: any) {
             trail_peak: NaN,
             _isPersistent: isPersistent,
             _callsiteId: callsiteId,
+            _exit_lifecycle_key: lifecycleKey,
+            _excluded_trade_ids: excludedTradeIds,
         };
 
         // Pine semantic: calling strategy.exit with the same `id` REPLACES the
@@ -176,11 +197,11 @@ export function exit(context: any) {
         // parameters (trail_points, trail_offset, limit, stop, etc.) are
         // refreshed. Mirror that by copying the trail state forward whenever
         // the prior order had armed.
-        const exitId = order.id;
+        const replacementExitId = order.id;
         const list = context.strategy.pending_orders as Order[];
         for (let i = list.length - 1; i >= 0; i--) {
             const o = list[i];
-            if (o.category === 'exit' && o.id === exitId &&
+            if (o.category === 'exit' && o.id === replacementExitId &&
                 (o.from_entry ?? '') === (order.from_entry ?? '') &&
                 o.status === 'pending') {
                 if (o.trail_armed) {

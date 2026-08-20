@@ -125,8 +125,8 @@ if strategy.position_size > 0
         expect(order.fill_price).toBe(110);
     });
 
-    it('does not fill a bracket queued in the same evaluation as a deferred limit entry (declared limitation)', () => {
-        const context = makeContext({ process_orders_on_close: true });
+    it('keeps a bracket waiting when its deferred limit entry misses the close phase', () => {
+        const context = makeContext({ calc_on_order_fills: true, process_orders_on_close: true });
         const strategy = context.strategy!;
         const entry: Order = {
             id: 'LL', direction: 1, qty: 1, type: 'limit', limit: 95,
@@ -143,16 +143,33 @@ if strategy.position_size > 0
         const exitFills = processExitOrders(context, 'close');
 
         // No close-phase fill: the limit entry is not a market order and the
-        // bracket has no matching trades yet (its entry has not filled). TV
-        // would keep the bracket waiting ("exit orders placed before their
-        // entry wait for it"); the close phase cancels it — declared VIN-73
-        // limitation, not exercised by the 2841/2748 witnesses.
+        // bracket has no matching trades yet. It remains pending across the
+        // bar because exit orders placed before their entry wait for it.
         expect(entryFills).toBe(0);
         expect(exitFills).toBe(0);
         expect(entry.status).toBe('pending');
-        expect(bracket.status).toBe('cancelled');
+        expect(bracket.status).toBe('pending');
         expect(strategy.position_size).toBe(0);
         expect(strategy.opentrades.length).toBe(0);
+    });
+
+    it('does not attach a snapshot-bound close to a later pending entry', () => {
+        const context = makeContext({ calc_on_order_fills: true });
+        const strategy = context.strategy!;
+        const entry: Order = {
+            id: 'L', direction: 1, qty: 1, type: 'limit', limit: 95,
+            bar: 1, time: 86_400_000, status: 'pending', category: 'entry',
+        };
+        const snapshottedClose: Order = {
+            id: 'L', direction: 0, qty: 0, type: 'market', category: 'exit',
+            from_entry: 'L', bar: 1, time: 86_400_000, status: 'pending',
+            _intended_trade_ids: ['trade-already-gone'],
+        };
+        strategy.pending_orders.push(entry, snapshottedClose);
+
+        expect(processExitOrders(context, 'intrabar')).toBe(0);
+        expect(entry.status).toBe('pending');
+        expect(snapshottedClose.status).toBe('cancelled');
     });
 
     it('does not double-fill when the close phase runs again', () => {

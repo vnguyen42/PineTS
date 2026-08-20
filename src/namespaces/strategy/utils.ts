@@ -1330,6 +1330,7 @@ export function closeMatching(
     exitTime: number,
     closeInfo?: CloseInfo,
     specificTradeId?: string,
+    excludedTradeIds?: readonly string[],
 ): void {
     const strategy: StrategyState = context.strategy;
 
@@ -1341,7 +1342,7 @@ export function closeMatching(
         const target: Trade[] = [];
         const others: Trade[] = [];
         for (const t of strategy.opentrades) {
-            if (t.id === specificTradeId) target.push(t);
+            if (t.id === specificTradeId && !excludedTradeIds?.includes(t.id)) target.push(t);
             else others.push(t);
         }
         if (target.length === 0) return;
@@ -1351,19 +1352,14 @@ export function closeMatching(
         return;
     }
 
-    if (!fromEntry || fromEntry === '') {
-        // No filter — close FIFO across all open trades.
-        closePartialPosition(context, qtyToClose, exitPrice, exitTime, closeInfo);
-        return;
-    }
-
-    // Reorder: matching trades first (preserving their relative order),
-    // non-matching second. closePartialPosition closes FIFO from the front
-    // so this gives us a filtered FIFO.
+    // Reorder eligible trades first (preserving their relative order).
+    // closePartialPosition closes FIFO from the front, so this provides a
+    // filtered FIFO for both from_entry and COF lifecycle exclusions.
     const matching: Trade[] = [];
     const others: Trade[] = [];
     for (const t of strategy.opentrades) {
-        if (t.entry_id === fromEntry) matching.push(t);
+        const inScope = !fromEntry || fromEntry === '' || t.entry_id === fromEntry;
+        if (inScope && !excludedTradeIds?.includes(t.id)) matching.push(t);
         else others.push(t);
     }
     const matchingQty = matching.reduce((sum, t) => sum + Math.abs(t.size), 0);
@@ -1372,6 +1368,15 @@ export function closeMatching(
 
     strategy.opentrades = [...matching, ...others];
     closePartialPosition(context, effectiveClose, exitPrice, exitTime, closeInfo);
+}
+
+export function hasPendingMatchingEntry(strategy: StrategyState, fromEntry: string | undefined): boolean {
+    return strategy.pending_orders.some(
+        (order) =>
+            order.status === 'pending'
+            && (order.category ?? 'entry') === 'entry'
+            && (!fromEntry || order.id === fromEntry),
+    );
 }
 
 /**
@@ -1446,29 +1451,26 @@ export function processExitOrders(context: any, phase: 'open' | 'intrabar' | 'cl
         // cancelled, mirroring TV's behavior of treating
         // strategy.close_all() as a no-op when its intended position is
         // already gone.
-        let matching = strategy.opentrades.filter((t) => !order.from_entry || t.entry_id === order.from_entry);
+        const excludedTradeIds = order._excluded_trade_ids;
+        let matching = strategy.opentrades.filter(
+            (t) => (!order.from_entry || t.entry_id === order.from_entry) && !excludedTradeIds?.includes(t.id),
+        );
         if (order._intended_trade_ids) {
             const snapshot = new Set(order._intended_trade_ids);
             matching = matching.filter((t) => snapshot.has(t.id));
         }
         if (matching.length === 0) {
-            // Nothing to exit. In the pre-entry phase the order may be
-            // WAITING on an entry that fills at this bar's open (TV: exit
-            // orders placed before their entry wait for it) — leave it
-            // pending. After entries have filled (intrabar phase), and after
-            // the explicit close phase, an exit with no matching trades is
-            // dead — clear it.
-            //
-            // LIMITATION (process_orders_on_close, declared 2026-08-19,
-            // review VIN-73): a strategy.exit bracket queued in the SAME
-            // evaluation as a deferred entry (e.g. a limit order) has no
-            // matching trades yet and is cancelled here at the close phase.
-            // Without POC the bracket survives the bar and keeps waiting for
-            // its entry (TV: "exit orders placed before their entry wait for
-            // it"). Not exercised by the 2841/2748 witnesses — their brackets
-            // are queued >= 1 bar after the entry — so this is documented,
-            // not changed.
-            if (phase === 'intrabar' || closePhase) order.status = 'cancelled';
+            // Exit orders placed before their matching entry wait for it,
+            // including deferred entries that remain pending across COF
+            // passes or a process_orders_on_close phase. Once the entry is
+            // explicitly cancelled and no eligible trade exists, the exit is
+            // dead and is cleared on the next post-entry phase.
+            const waitingForEntry = cof
+                && !order._intended_trade_ids
+                && hasPendingMatchingEntry(strategy, order.from_entry);
+            if ((phase === 'intrabar' || closePhase) && !waitingForEntry) {
+                order.status = 'cancelled';
+            }
             continue;
         }
 
@@ -1828,7 +1830,9 @@ export function processExitOrders(context: any, phase: 'open' | 'intrabar' | 'cl
             }
 
             const remainingMatchingQty = () =>
-                strategy.opentrades.filter((t) => !order.from_entry || t.entry_id === order.from_entry).reduce((sum, t) => sum + Math.abs(t.size), 0);
+                strategy.opentrades
+                    .filter((t) => (!order.from_entry || t.entry_id === order.from_entry) && !excludedTradeIds?.includes(t.id))
+                    .reduce((sum, t) => sum + Math.abs(t.size), 0);
 
             let lastFill = NaN;
             let closedAny = false;
@@ -1850,6 +1854,16 @@ export function processExitOrders(context: any, phase: 'open' | 'intrabar' | 'cl
                         : ev.kind === 'loss'
                           ? (order.comment_loss ?? order.comment)
                           : (order.comment_trailing ?? order.comment);
+                const eligibleSizesBefore = cof && order._exit_lifecycle_key !== undefined
+                    ? new Map(
+                        strategy.opentrades
+                            .filter((trade) =>
+                                (!order.from_entry || trade.entry_id === order.from_entry)
+                                && !excludedTradeIds?.includes(trade.id),
+                            )
+                            .map((trade) => [trade.id, Math.abs(trade.size)]),
+                    )
+                    : null;
 
                 // Bracket fills close their SOURCE lot (per-lot binding);
                 // the trail event has no source lot and closes FIFO.
@@ -1865,7 +1879,21 @@ export function processExitOrders(context: any, phase: 'open' | 'intrabar' | 'cl
                         exitComment: legComment,
                     },
                     ev.tradeId,
+                    excludedTradeIds,
                 );
+                if (eligibleSizesBefore !== null && order._exit_lifecycle_key !== undefined) {
+                    const stillOpenById = new Map(strategy.opentrades.map((trade) => [trade.id, trade]));
+                    const lifecycle = strategy._filled_exit_trade_ids ??= new Map<string, string[]>();
+                    const filledIds = (lifecycle.get(order._exit_lifecycle_key) ?? [])
+                        .filter((tradeId) => stillOpenById.has(tradeId));
+                    for (const [tradeId, sizeBefore] of eligibleSizesBefore) {
+                        const trade = stillOpenById.get(tradeId);
+                        if (trade !== undefined && Math.abs(trade.size) < sizeBefore - 1e-9 && !filledIds.includes(tradeId)) {
+                            filledIds.push(tradeId);
+                        }
+                    }
+                    lifecycle.set(order._exit_lifecycle_key, filledIds);
+                }
                 capRemaining -= qtyThis;
                 lastFill = fillPrice;
                 closedAny = true;
@@ -2422,6 +2450,7 @@ export function initializeStrategy(context: any, config: any): void {
         _exit_call_history: new Map<string, number>(),
         _exit_fallback_counter: 0,
         _exit_fallback_last_bar: -1,
+        _filled_exit_trade_ids: new Map<string, string[]>(),
     };
 }
 

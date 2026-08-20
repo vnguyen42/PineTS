@@ -178,6 +178,14 @@ export interface Order {
     // close order is cancelled.
     _intended_trade_ids?: string[];
 
+    // Internal: key used to remember that this conditional exit already
+    // filled against a still-open physical lot. A subsequent strategy.exit
+    // call with the same key must not arm another bracket for that lot.
+    _exit_lifecycle_key?: string;
+    // COF lifecycle: lots already consumed by this exit remain open after a
+    // partial fill and are excluded when a newly-added pyramid lot re-arms it.
+    _excluded_trade_ids?: string[];
+
     // Internal: set on `strategy.entry` orders whose qty was derived from the
     // strategy() default (no explicit qty argument) under
     // `default_qty_type = strategy.percent_of_equity`. With
@@ -366,4 +374,7 @@ export interface StrategyState {
     // stable synthetic id like `exit_raw_N`.
     _exit_fallback_counter?: number;
     _exit_fallback_last_bar?: number;
+    // Conditional exit lots that already filled but remain partially open,
+    // keyed by exit id + from_entry scope.
+    _filled_exit_trade_ids?: Map<string, string[]>;
 }
