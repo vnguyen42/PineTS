@@ -62,6 +62,7 @@ export class ScopeManager {
     private hoistingStack: any[][] = [];
     private suppressHoisting: boolean = false;
     private reservedNames: Set<string> = new Set();
+    private strategyHistorySeries: Set<string> = new Set();
     private userFunctions: Set<string> = new Set();
     private userMethods: Set<string> = new Set();
     /**
@@ -198,6 +199,14 @@ export class ScopeManager {
             value: `#${this.plotCallIdCounter++}`,
         };
     }
+    public markStrategyHistorySeries(name: string): void {
+        this.strategyHistorySeries.add(name);
+    }
+
+    public getStrategyHistorySeries(): string[] {
+        return [...this.strategyHistorySeries];
+    }
+
     public getNextAlertCallId(): any {
         return {
             type: 'Literal',

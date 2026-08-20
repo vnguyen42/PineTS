@@ -55,6 +55,8 @@ export class Context {
     public chartStyle: string = 'standard'; // Chart type DERIVED from the ticker's chart-type modifier ("SYM;heikinashi") at context init; read by chart.is_*
     public dataVersion: number = 0; // Incremented when market data changes (streaming mode)
     public pineVersion: number | null = null; // Pine source version; drives version-specific runtime defaults.
+    /** Strategy series referenced through Pine's history operator in the transpiled source. */
+    public _strategyHistorySeries?: string[];
 
     public __maxLoops: number = 500000;
     public NA: any = NaN;

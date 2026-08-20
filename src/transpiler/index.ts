@@ -268,6 +268,7 @@ export function transpile(source: string | Function, options: { debug: boolean; 
     if (slices && Object.keys(slices).length > 0) {
         (mainFn as any)._ltfSlices = slices;
     }
+    (mainFn as Function & { _strategyHistorySeries?: string[] })._strategyHistorySeries = scopeManager.getStrategyHistorySeries();
     (mainFn as Function & { _pineVersion: number | null })._pineVersion = pineVersion;
     return mainFn;
 }
