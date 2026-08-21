@@ -2027,7 +2027,32 @@ export function processExitOrders(context: any, phase: 'open' | 'intrabar' | 'cl
                     ? (order.trail_peak as number) - (order.trail_offset as number) * mintick
                     : (order.trail_peak as number) + (order.trail_offset as number) * mintick;
             const emitTrail = (price: number, forcedSegment: number) => {
-                trailEvent = { qty: Infinity, price, kind: 'trailing', forcedSegment };
+                let fillPrice = price;
+                if (isLong) {
+                    // VIN-86 (TV oracle 2602, 55/55): TV reports LONG trailing
+                    // sell-stop fills quantized UP to syminfo.mintick —
+                    // ceil(raw stop / mintick) * mintick — while the
+                    // trigger/crossing test above stays on the raw stop.
+                    // Snap float noise introduced by upstream price arithmetic
+                    // in price units before taking the strict upward ceil. A
+                    // quotient-only ULP check misses errors from
+                    // peak - offset * mintick (e.g. 0.1 - 0.09).
+                    const ticks = price / mintick;
+                    const nearestTicks = Math.round(ticks);
+                    const nearestGrid = nearestTicks * mintick;
+                    const priceTolerance = 1e-12 * Math.max(1, Math.abs(price));
+                    const snappedTicks = Math.abs(price - nearestGrid) <= priceTolerance
+                        ? nearestTicks
+                        : ticks;
+                    fillPrice = Math.ceil(snappedTicks) * mintick;
+                    // Clamp to the bar's [low, high] like the other
+                    // price-based fills (a fill may not leave the bar it
+                    // filled in).
+                    fillPrice = Math.min(highPrice, Math.max(lowPrice, fillPrice));
+                    // SHORT mirror (trailing buy stop, expected floor(raw)):
+                    // [HYPOTHÈSE] deferred — no short oracle witness yet.
+                }
+                trailEvent = { qty: Infinity, price: fillPrice, kind: 'trailing', forcedSegment };
             };
 
             if (trailArmedThisBar) {
