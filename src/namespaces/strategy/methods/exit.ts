@@ -127,22 +127,38 @@ export function exit(context: any) {
         const lastBarForSite = history.get(callsiteId);
         const isPersistent = lastBarForSite !== undefined && lastBarForSite === context.idx - 1;
         history.set(callsiteId, context.idx);
-        let excludedTradeIds: string[] | undefined;
-        if (context.strategy.config.calc_on_order_fills === true) {
-            const matchingTradeIds = context.strategy.opentrades
-                .filter((trade: { id: string; entry_id: string }) => !fromEntryId || trade.entry_id === fromEntryId)
-                .map((trade: { id: string }) => trade.id);
-            const alreadyFilled = context.strategy._filled_exit_trade_ids?.get(lifecycleKey) ?? [];
-            const excluded = alreadyFilled.filter((tradeId: string) => matchingTradeIds.includes(tradeId));
-            excludedTradeIds = excluded;
-            const waitingForEntry = hasPendingMatchingEntry(context.strategy, fromEntryId);
-            if (
-                matchingTradeIds.length > 0
-                && matchingTradeIds.every((tradeId: string) => excluded.includes(tradeId))
-                && !waitingForEntry
-            ) {
-                return;
-            }
+        const matchingTradeIds = context.strategy.opentrades.flatMap(
+            (trade: {
+                id: string;
+                entry_id: string;
+                _activation_id?: string;
+                _activation_entry_id?: string;
+                _activation_segments?: Array<{ id: string; entryId: string }>;
+            }) => {
+                const identities = trade._activation_segments
+                    ?? [{
+                        id: trade._activation_id ?? trade.id,
+                        entryId: trade._activation_entry_id ?? trade.entry_id,
+                    }];
+                return identities
+                    .filter((identity) => !fromEntryId || identity.entryId === fromEntryId)
+                    .map((identity) => identity.id);
+            },
+        );
+        const lifecycle = context.strategy._filled_exit_trade_ids?.get(lifecycleKey);
+        const sameBarLifecycle = lifecycle?.bar === context.idx ? lifecycle : undefined;
+        const partialExit = Number(qty) > 0 || Number(qtyPercent) > 0;
+        const activationLifecycle = partialExit ? lifecycle : sameBarLifecycle;
+        const excludedActivationTradeIds = (activationLifecycle?.activationTradeIds ?? [])
+            .filter((tradeId: string) => matchingTradeIds.includes(tradeId));
+        const excludedConsumedTradeIds = sameBarLifecycle?.consumedTradeIds ?? [];
+        const waitingForEntry = hasPendingMatchingEntry(context.strategy, fromEntryId);
+        if (
+            matchingTradeIds.length > 0
+            && matchingTradeIds.every((tradeId: string) => excludedActivationTradeIds.includes(tradeId))
+            && !waitingForEntry
+        ) {
+            return;
         }
 
         const order: Order = {
@@ -175,41 +191,35 @@ export function exit(context: any) {
             _isPersistent: isPersistent,
             _callsiteId: callsiteId,
             _exit_lifecycle_key: lifecycleKey,
-            _excluded_trade_ids: excludedTradeIds,
+            _excluded_activation_trade_ids: excludedActivationTradeIds,
+            _excluded_consumed_trade_ids: excludedConsumedTradeIds,
         };
 
-        // Pine semantic: calling strategy.exit with the same `id` REPLACES the
-        // prior pending exit order (allowing dynamic TP/SL adjustment each
-        // bar). Without this, stale exits accumulate across the strategy's
-        // lifetime — they survive past their originating trade, and when a
-        // later trade happens to satisfy the wrong-sided / stale-reversal
-        // checks geometrically, the old order fires at a phantom price.
-        // Same id + same from_entry scope is the replacement key.
-        //
-        // Trail state carry-over: `trail_armed` and `trail_peak` are NOT
-        // user-supplied parameters — they're engine-accumulated state that
-        // tracks the trail's progress across bars (running high for a long,
-        // running low for a short). When the user calls strategy.exit every
-        // bar (the canonical "persistent" pattern), naive replacement would
-        // reset these to false/NaN every bar, preventing the trail from ever
-        // accumulating beyond a single bar's range. TV's behavior is that
-        // the trail's state persists across re-calls — only the user-tunable
-        // parameters (trail_points, trail_offset, limit, stop, etc.) are
-        // refreshed. Mirror that by copying the trail state forward whenever
-        // the prior order had armed.
-        const replacementExitId = order.id;
+        // An unfilled pending instance is refreshed in place. A filled
+        // instance has already been removed by processExitOrders, so a later
+        // call creates the new instance below. This distinction keeps
+        // reservation/exclusion state scoped to one broker order instance.
         const list = context.strategy.pending_orders as Order[];
-        for (let i = list.length - 1; i >= 0; i--) {
-            const o = list[i];
-            if (o.category === 'exit' && o.id === replacementExitId &&
-                (o.from_entry ?? '') === (order.from_entry ?? '') &&
-                o.status === 'pending') {
-                if (o.trail_armed) {
-                    order.trail_armed = true;
-                    order.trail_peak  = o.trail_peak;
-                }
-                list.splice(i, 1);
+        const pending = list.find(
+            (candidate) =>
+                candidate.category === 'exit'
+                && candidate.id === order.id
+                && (candidate.from_entry ?? '') === (order.from_entry ?? '')
+                && candidate.status === 'pending',
+        );
+        if (pending !== undefined) {
+            const trailArmed = pending.trail_armed;
+            const trailPeak = pending.trail_peak;
+            const activationExclusions = pending._excluded_activation_trade_ids;
+            const consumedExclusions = pending._excluded_consumed_trade_ids;
+            Object.assign(pending, order);
+            if (trailArmed) {
+                pending.trail_armed = true;
+                pending.trail_peak = trailPeak;
             }
+            pending._excluded_activation_trade_ids = activationExclusions;
+            pending._excluded_consumed_trade_ids = consumedExclusions;
+            return;
         }
         list.push(order);
     };

@@ -80,6 +80,23 @@ export interface Trade {
      * before an older lot's (TV ledger convention).
      */
     _bracket_entry?: number;
+    /** Logical bracket identity, decoupled from FIFO ledger ownership. */
+    _activation_id?: string;
+    _activation_entry_id?: string;
+    _activation_bracket_entry?: number;
+    _activation_entry_bar_index?: number;
+    /** Position of this logical entry on its historical bar's assumed path. */
+    _activation_entry_path_segment?: number;
+    _activation_entry_path_distance?: number;
+    _activation_segments?: Array<{
+        qty: number;
+        id: string;
+        entryId: string;
+        bracketEntry: number;
+        entryBar: number;
+        entryPathSegment?: number;
+        entryPathDistance?: number;
+    }>;
 }
 
 /**
@@ -178,13 +195,13 @@ export interface Order {
     // close order is cancelled.
     _intended_trade_ids?: string[];
 
-    // Internal: key used to remember that this conditional exit already
-    // filled against a still-open physical lot. A subsequent strategy.exit
-    // call with the same key must not arm another bracket for that lot.
+    // Internal: key used to remember conditional-exit lifecycle state.
+    // Activation identities suppress geometrically re-arming the same
+    // bracket; consumed identities keep a partial FIFO lot from being
+    // consumed twice by that lifecycle during COF refresh.
     _exit_lifecycle_key?: string;
-    // COF lifecycle: lots already consumed by this exit remain open after a
-    // partial fill and are excluded when a newly-added pyramid lot re-arms it.
-    _excluded_trade_ids?: string[];
+    _excluded_activation_trade_ids?: string[];
+    _excluded_consumed_trade_ids?: string[];
 
     // Internal: set on `strategy.entry` orders whose qty was derived from the
     // strategy() default (no explicit qty argument) under
@@ -377,7 +394,11 @@ export interface StrategyState {
     // stable synthetic id like `exit_raw_N`.
     _exit_fallback_counter?: number;
     _exit_fallback_last_bar?: number;
-    // Conditional exit lots that already filled but remain partially open,
-    // keyed by exit id + from_entry scope.
-    _filled_exit_trade_ids?: Map<string, string[]>;
+    // Filled conditional-exit identities for COF re-calls on the same bar.
+    // A later bar starts a new order instance and ignores this record.
+    _filled_exit_trade_ids?: Map<string, {
+        bar: number;
+        activationTradeIds: string[];
+        consumedTradeIds: string[];
+    }>;
 }

@@ -352,7 +352,7 @@ describe('strategy calc_on_order_fills — same-bar sequencing', () => {
         expect(context.strategy.position_size).toBe(50);
     });
 
-    it('does not re-arm a filled qty_percent exit for the same entry lot on the next bar', () => {
+    it('does not re-arm a filled qty_percent exit for the same activation on the next bar', () => {
         const context = makeContext({ calc_on_order_fills: true });
         context.strategy.position_size = 100;
         context.strategy.position_avg_price = 100;
@@ -392,7 +392,7 @@ describe('strategy calc_on_order_fills — same-bar sequencing', () => {
         expect(context.strategy.position_size).toBe(50);
     });
 
-    it('re-arms only for a new pyramid lot and preserves persistent exit cadence', () => {
+    it('keeps a filled partial exit dead until a new pyramid activation appears', () => {
         const context = makeContext({ calc_on_order_fills: true, pyramiding: 2 });
         context.strategy.position_size = 100;
         context.strategy.position_avg_price = 100;
@@ -452,8 +452,8 @@ describe('strategy calc_on_order_fills — same-bar sequencing', () => {
 
         expect(context.strategy.pending_orders[0]._isPersistent).toBe(true);
         expect(processExitOrders(context, 'intrabar')).toBe(1);
-        expect(context.strategy.opentrades.find((trade: { id: string }) => trade.id === 'trade-old')?.size).toBe(50);
-        expect(context.strategy.opentrades.find((trade: { id: string }) => trade.id === 'trade-new')?.size).toBe(50);
+        expect(context.strategy.opentrades.find((trade: { id: string }) => trade.id === 'trade-old')).toBeUndefined();
+        expect(context.strategy.opentrades.find((trade: { id: string }) => trade.id === 'trade-new')?.size).toBe(100);
     });
 
     it('keeps a consumed exit waiting across COF passes for a delayed pyramid entry', () => {

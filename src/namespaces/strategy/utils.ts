@@ -86,6 +86,103 @@ export function roundToMintick(price: number, referencePrice: number, mintick: n
     return price > referencePrice ? Math.ceil(ticks - EPS) * mintick : Math.floor(ticks + EPS) * mintick;
 }
 
+interface IntrabarPathPosition {
+    pathSegment: number;
+    distanceAlongSegment: number;
+}
+
+interface PathTrigger {
+    position: IntrabarPathPosition;
+    fillPrice: number;
+}
+
+function assumedIntrabarPath(open: number, high: number, low: number, close: number): number[] {
+    return Math.abs(high - open) <= Math.abs(open - low)
+        ? [open, high, low, close]
+        : [open, low, high, close];
+}
+
+function comparePathPositions(left: IntrabarPathPosition, right: IntrabarPathPosition): number {
+    return left.pathSegment - right.pathSegment
+        || left.distanceAlongSegment - right.distanceAlongSegment;
+}
+
+/**
+ * Find the first point satisfying a monotonic price condition after `start`.
+ * A segment of -1 denotes the bar's open before any intrabar movement.
+ */
+function firstTriggerAfter(
+    path: readonly number[],
+    level: number,
+    isTriggered: (price: number) => boolean,
+    start: IntrabarPathPosition,
+    startPrice: number,
+): PathTrigger | undefined {
+    if (isTriggered(startPrice)) {
+        return { position: start, fillPrice: startPrice };
+    }
+
+    const firstSegment = Math.max(0, start.pathSegment);
+    let segmentStartPrice = start.pathSegment < 0 ? path[0] : startPrice;
+    for (let segment = firstSegment; segment < path.length - 1; segment++) {
+        const segmentEndPrice = path[segment + 1];
+        if (!isTriggered(segmentStartPrice) && isTriggered(segmentEndPrice)) {
+            const segmentLength = Math.abs(path[segment + 1] - path[segment]);
+            return {
+                position: {
+                    pathSegment: segment,
+                    distanceAlongSegment: segmentLength > 0
+                        ? Math.abs(level - path[segment]) / segmentLength
+                        : 0,
+                },
+                fillPrice: level,
+            };
+        }
+        segmentStartPrice = segmentEndPrice;
+    }
+    return undefined;
+}
+
+function entryFillPathPosition(
+    order: Order,
+    direction: number,
+    path: readonly number[],
+    cofState: { pass: number } | null,
+    atClose: boolean,
+): IntrabarPathPosition {
+    if (atClose) return { pathSegment: path.length - 2, distanceAlongSegment: 1 };
+    if (cofState !== null) {
+        if (cofState.pass === 0) return { pathSegment: -1, distanceAlongSegment: 0 };
+        const segment = cofState.pass - 1;
+        const level = order.type === 'stop' ? order.stop : order.limit;
+        const segmentLength = Math.abs(path[segment + 1] - path[segment]);
+        return {
+            pathSegment: segment,
+            distanceAlongSegment: level !== undefined && segmentLength > 0
+                ? Math.abs(level - path[segment]) / segmentLength
+                : 1,
+        };
+    }
+    if (order.type === 'market') return { pathSegment: -1, distanceAlongSegment: 0 };
+
+    const level = order.type === 'stop' ? order.stop : order.limit;
+    if (level === undefined) return { pathSegment: -1, distanceAlongSegment: 0 };
+    const isTriggered = order.type === 'stop'
+        ? direction === 1
+            ? (price: number) => price >= level
+            : (price: number) => price <= level
+        : direction === 1
+          ? (price: number) => price <= level
+          : (price: number) => price >= level;
+    return firstTriggerAfter(
+        path,
+        level,
+        isTriggered,
+        { pathSegment: -1, distanceAlongSegment: 0 },
+        path[0],
+    )?.position ?? { pathSegment: -1, distanceAlongSegment: 0 };
+}
+
 /**
  * Margin required to hold a position of `qty` contracts at `price`, given
  * the `marginPct` (% of notional that must be posted as collateral). The
@@ -226,6 +323,7 @@ export function processStrategyOrders(context: any, phase: 'open' | 'close' = 'o
     const lowPrice = Series.from(context.data.low).get(0);
     const closePrice = Series.from(context.data.close).get(0);
     const currentTime = Series.from(context.data.openTime).get(0);
+    const intrabarPath = assumedIntrabarPath(openPrice, highPrice, lowPrice, closePrice);
 
     // Per-trade peak adverse / favorable excursion (max-drawdown / max-runup
     // on each open trade) using INTRA-BAR high/low rather than close-only.
@@ -322,7 +420,7 @@ export function processStrategyOrders(context: any, phase: 'open' | 'close' = 'o
                             }
                         } else if (lowPrice <= order.limit) {
                             shouldFill = true;
-                            fillPrice = order.limit;
+                            fillPrice = openPrice <= order.limit ? openPrice : order.limit;
                         }
                     } else if (tickPrice !== undefined) {
                         const executable = cofState.pass === 0 || newlyActivated
@@ -334,7 +432,7 @@ export function processStrategyOrders(context: any, phase: 'open' | 'close' = 'o
                         }
                     } else if (highPrice >= order.limit) {
                         shouldFill = true;
-                        fillPrice = order.limit;
+                        fillPrice = openPrice >= order.limit ? openPrice : order.limit;
                     }
                 }
                 break;
@@ -534,8 +632,12 @@ export function processStrategyOrders(context: any, phase: 'open' | 'close' = 'o
                 }
             }
 
-            // Execute the order using the pre-calculated qty
-            executeOrder(context, order, fillPrice, currentTime);
+            // Preserve when this logical entry became active on the assumed
+            // path. A pre-existing exit may attach to it, but cannot inherit
+            // a trigger crossed earlier in the same bar.
+            const fillsAtClose = closePhase && order.type === 'market' && order.bar === context.idx;
+            const fillPathPosition = entryFillPathPosition(order, direction, intrabarPath, cofState, fillsAtClose);
+            executeOrder(context, order, fillPrice, currentTime, fillPathPosition);
             order.status = 'filled';
             order.fill_price = fillPrice;
             order.fill_bar = context.idx;
@@ -722,6 +824,7 @@ export function openTrade(
     time: number,
     entryComment?: string,
     isReversalOpen?: boolean,
+    entryPathPosition?: IntrabarPathPosition,
 ): void {
     const strategy: StrategyState = context.strategy;
     const tradeNum = strategy.opentrades.length + strategy.closedtrades.length;
@@ -748,6 +851,8 @@ export function openTrade(
         _bracket_entry: price,
         entry_bar_index: context.idx,
         entry_time: time,
+        _activation_entry_path_segment: entryPathPosition?.pathSegment,
+        _activation_entry_path_distance: entryPathPosition?.distanceAlongSegment,
         size: direction * qty, // SIGNED — matches Pine's closedtrades.size()
         commission: entryCommission,
         max_drawdown: 0,
@@ -763,18 +868,6 @@ export function openTrade(
         strategy._first_entry_price = price;
     }
 
-    // FIFO ledger-entry record for TV-style exit pairing (see
-    // consumeLedger / closePartialPosition): TV's xlsx pairs exit fills
-    // with entry records oldest-first, splitting at record boundaries.
-    ((strategy as any)._ledger_entries ??= []).push({
-        entry_id: entryId,
-        entry_price: price,
-        entry_time: time,
-        entry_bar_index: context.idx,
-        entry_comment: trade.entry_comment,
-        qty,
-        commission: entryCommission,
-    });
 
     // Realize the entry commission immediately as a cash outflow. TV reports
     // strategy.netprofit and strategy.grossloss net of entry commission the
@@ -876,7 +969,13 @@ export function openTrade(
  * Execute an order
  * strategy.order() modifies the net position directly
  */
-function executeOrder(context: any, order: Order, fillPrice: number, fillTime: number): void {
+function executeOrder(
+    context: any,
+    order: Order,
+    fillPrice: number,
+    fillTime: number,
+    entryPathPosition?: IntrabarPathPosition,
+): void {
     const strategy: StrategyState = context.strategy;
     const direction = parseDirection(order.direction);
     const oldPosition = strategy.position_size;
@@ -918,15 +1017,15 @@ function executeOrder(context: any, order: Order, fillPrice: number, fillTime: n
         if (remainingQty > 0) {
             const baseQty = (order as any)._base_qty;
             if (baseQty !== undefined && remainingQty > baseQty + 1e-9) {
-                openTrade(context, order.id, direction, baseQty, fillPrice, fillTime, order.comment, /* isReversalOpen */ true);
-                openTrade(context, order.id, direction, remainingQty - baseQty, fillPrice, fillTime, order.comment, /* isReversalOpen */ true);
+                openTrade(context, order.id, direction, baseQty, fillPrice, fillTime, order.comment, /* isReversalOpen */ true, entryPathPosition);
+                openTrade(context, order.id, direction, remainingQty - baseQty, fillPrice, fillTime, order.comment, /* isReversalOpen */ true, entryPathPosition);
             } else {
-                openTrade(context, order.id, direction, remainingQty, fillPrice, fillTime, order.comment, /* isReversalOpen */ true);
+                openTrade(context, order.id, direction, remainingQty, fillPrice, fillTime, order.comment, /* isReversalOpen */ true, entryPathPosition);
             }
         }
     } else {
         // We are increasing position or opening fresh
-        openTrade(context, order.id, direction, order.qty, fillPrice, fillTime, order.comment);
+        openTrade(context, order.id, direction, order.qty, fillPrice, fillTime, order.comment, undefined, entryPathPosition);
     }
 }
 
@@ -936,6 +1035,7 @@ function executeOrder(context: any, order: Order, fillPrice: number, fillTime: n
  * FIFO accounting: closes oldest open trades first. Splits a trade if the
  * close qty is smaller than the trade's remaining qty.
  */
+
 export interface CloseInfo {
     /** Which exit leg triggered ('profit'/'loss'/'trailing'), null otherwise. */
     triggerKind?: 'profit' | 'loss' | 'trailing' | null;
@@ -954,58 +1054,16 @@ export interface CloseInfo {
     isImplicitReversal?: boolean;
 }
 
-/**
- * Consume `qty` from the strategy's FIFO ledger-entry queue (records with
- * the closing lot's entry_id), splitting records at boundaries. Returns
- * the consumed slices (entry attributes + pro-rata entry commission).
- * Falls back to the physical lot's own attributes for any quantity the
- * queue cannot supply (hand-built test states have no queue records).
- */
-function consumeLedger(
-    strategy: StrategyState,
-    physical: Trade,
-    qty: number,
-): Array<{ qty: number; entry_price: number; entry_time: number; entry_bar_index: number; entry_comment?: string; commission: number }> {
-    const out: Array<{ qty: number; entry_price: number; entry_time: number; entry_bar_index: number; entry_comment?: string; commission: number }> =
-        [];
-    let need = qty;
-    const queue: any[] = (strategy as any)._ledger_entries ?? [];
-    for (const rec of queue) {
-        if (need <= 1e-9) break;
-        if (rec.entry_id !== physical.entry_id || rec.qty <= 1e-9) continue;
-        const take = Math.min(rec.qty, need);
-        const commShare = rec.qty > 0 ? rec.commission * (take / rec.qty) : 0;
-        out.push({
-            qty: take,
-            entry_price: rec.entry_price,
-            entry_time: rec.entry_time,
-            entry_bar_index: rec.entry_bar_index,
-            entry_comment: rec.entry_comment,
-            commission: commShare,
-        });
-        rec.qty -= take;
-        rec.commission -= commShare;
-        need -= take;
-    }
-    (strategy as any)._ledger_entries = queue.filter((r) => r.qty > 1e-9);
-    if (need > 1e-9) {
-        const physQty = Math.abs(physical.size);
-        out.push({
-            qty: need,
-            entry_price: physical.entry_price,
-            entry_time: physical.entry_time,
-            entry_bar_index: physical.entry_bar_index,
-            entry_comment: physical.entry_comment,
-            commission: physQty > 0 ? (physical.commission ?? 0) * (need / physQty) : 0,
-        });
-    }
-    return out;
-}
 
 export function closePartialPosition(context: any, qtyToClose: number, exitPrice: number, exitTime: number, closeInfo?: CloseInfo): void {
     const strategy: StrategyState = context.strategy;
     const pointValue = context.pine?.syminfo?.pointvalue ?? 1;
     let remainingQty = qtyToClose;
+    const remainingActivation = activationSegmentsAfterClose(
+        strategy.opentrades,
+        strategy.opentrades.flatMap((trade) => activationSegmentsOf(trade).map((segment) => segment.id)),
+        qtyToClose,
+    );
 
     // Close trades from oldest to newest (FIFO)
     const tradesToClose = [...strategy.opentrades];
@@ -1022,74 +1080,50 @@ export function closePartialPosition(context: any, qtyToClose: number, exitPrice
         const qtyClosing = Math.min(tradeQty, remainingQty);
         const tradeDirection = Math.sign(trade.size);
 
-        // TV LEDGER PAIRING: exit fills pair against a FIFO queue of ENTRY
-        // RECORDS (per entry_id), SPLITTING at record boundaries — a fill
-        // of 5 contracts can consume 4.74018 of the oldest unpaired entry
-        // plus 0.25982 of the next, producing TWO ledger rows (TV xlsx
-        // 2021-11-16). Physical lots (this loop) only drive position,
-        // margin and bracket levels; the closed-trade ROWS and the
-        // financial aggregates follow the ledger slices. `consumeLedger`
-        // falls back to the physical lot's own attributes when no queue
-        // records exist (hand-built tests).
-        //
-        // Per-row semantics preserved from the previous implementation:
-        //   - netprofit increment = gross − exit-commission share (the
-        //     entry leg was realized at fill), per the TV convention
-        //     verified in the drawdown/margin QA sessions;
-        //   - grossloss rollback of the entry-commission share;
-        //   - SL/TP per-trade peak overrides (loss → max_runup = 0,
-        //     profit → max_drawdown = entry commission share);
-        //   - cash_per_order half-fee on implicit-reversal closes.
         const emitClosedRows = (qtyClosed: number) => {
             const commType = strategy.config.commission_type ?? 'percent';
             const halveFlat = closeInfo?.isImplicitReversal && commType === 'cash_per_order';
             const rawExitCommission = computeLegCommission(context, strategy, qtyClosed, exitPrice);
-            const exitCommTotal = halveFlat ? rawExitCommission / 2 : rawExitCommission;
-
-            const slices = consumeLedger(strategy, trade, qtyClosed);
-            for (const s of slices) {
-                const exitCommShare = exitCommTotal * (s.qty / qtyClosed);
-                const priceChange = tradeDirection === 1 ? exitPrice - s.entry_price : s.entry_price - exitPrice;
-                const gross = priceChange * s.qty * pointValue;
-
-                const row: Trade = {
-                    id: `trade_${strategy.opentrades.length + strategy.closedtrades.length + tradesToClose.length}`,
-                    entry_id: trade.entry_id,
-                    entry_comment: s.entry_comment,
-                    entry_price: s.entry_price,
-                    _bracket_entry: trade._bracket_entry,
-                    entry_bar_index: s.entry_bar_index,
-                    entry_time: s.entry_time,
-                    size: tradeDirection * s.qty,
-                    commission: s.commission + exitCommShare,
-                    max_drawdown: trade.max_drawdown,
-                    max_runup: trade.max_runup,
-                    status: 'closed',
-                    exit_price: exitPrice,
-                    exit_bar_index: context.idx,
-                    exit_time: exitTime,
-                    exit_id: closeInfo?.exitId ?? trade.exit_id,
-                    exit_comment: closeInfo?.exitComment ?? trade.exit_comment,
-                    profit: gross - s.commission - exitCommShare,
-                };
-                if (closeInfo?.triggerKind === 'loss') row.max_runup = 0;
-                if (closeInfo?.triggerKind === 'profit') row.max_drawdown = s.commission;
-
-                strategy.netprofit += gross - exitCommShare;
-                strategy.grossloss -= s.commission;
-                if (row.profit! > 0) {
-                    strategy.grossprofit += row.profit!;
-                    strategy.wintrades++;
-                    strategy.wintrades_total_profit += row.profit!;
-                } else if (row.profit! < 0) {
-                    strategy.grossloss += Math.abs(row.profit!);
-                    strategy.losstrades++;
-                    strategy.losstrades_total_loss += Math.abs(row.profit!);
-                } else {
-                    strategy.eventrades++;
-                }
-                strategy.closedtrades.push(row);
+            const exitCommission = halveFlat ? rawExitCommission / 2 : rawExitCommission;
+            const entryCommission = (trade.commission ?? 0) * (qtyClosed / tradeQty);
+            const priceChange = tradeDirection === 1 ? exitPrice - trade.entry_price : trade.entry_price - exitPrice;
+            const gross = priceChange * qtyClosed * pointValue;
+            const row: Trade = {
+                id: `trade_${strategy.opentrades.length + strategy.closedtrades.length + tradesToClose.length}`,
+                entry_id: trade.entry_id,
+                entry_comment: trade.entry_comment,
+                entry_price: trade.entry_price,
+                _bracket_entry: trade._bracket_entry,
+                entry_bar_index: trade.entry_bar_index,
+                entry_time: trade.entry_time,
+                size: tradeDirection * qtyClosed,
+                commission: entryCommission + exitCommission,
+                max_drawdown: trade.max_drawdown,
+                max_runup: trade.max_runup,
+                status: 'closed',
+                exit_price: exitPrice,
+                exit_bar_index: context.idx,
+                exit_time: exitTime,
+                exit_id: closeInfo?.exitId ?? trade.exit_id,
+                exit_comment: closeInfo?.exitComment ?? trade.exit_comment,
+                profit: gross - entryCommission - exitCommission,
+            };
+            if (closeInfo?.triggerKind === 'loss') row.max_runup = 0;
+            if (closeInfo?.triggerKind === 'profit') row.max_drawdown = entryCommission;
+            strategy.netprofit += gross - exitCommission;
+            strategy.grossloss -= entryCommission;
+            if (row.profit! > 0) {
+                strategy.grossprofit += row.profit!;
+                strategy.wintrades++;
+                strategy.wintrades_total_profit += row.profit!;
+            } else if (row.profit! < 0) {
+                strategy.grossloss += Math.abs(row.profit!);
+                strategy.losstrades++;
+                strategy.losstrades_total_loss += Math.abs(row.profit!);
+            } else {
+                strategy.eventrades++;
             }
+            strategy.closedtrades.push(row);
         };
 
         // Epsilon on the full-close decision: when the requested qty is a
@@ -1105,10 +1139,8 @@ export function closePartialPosition(context: any, qtyToClose: number, exitPrice
             emitClosedRows(tradeQty);
             remainingQty -= qtyClosing;
         } else {
-            // Partially close this physical lot — emit ledger rows for the
-            // closed quantity, keep the remainder open with its residual
-            // PHYSICAL entry-commission share (used by the equity-peak
-            // basis and margin checks).
+            // Partially close this physical lot and keep its residual entry
+            // commission on the canonical open lot.
             emitClosedRows(qtyClosing);
             const entryCommissionShare = (trade.commission ?? 0) * (qtyClosing / tradeQty);
 
@@ -1119,6 +1151,7 @@ export function closePartialPosition(context: any, qtyToClose: number, exitPrice
             remainingQty = 0;
         }
     }
+    assignActivationSegments(strategy, remainingActivation);
 
     // Catastrophic risk-rule halt check after this close.
     evaluateCatastrophicRiskHalt(strategy);
@@ -1161,27 +1194,13 @@ export function closePartialPosition(context: any, qtyToClose: number, exitPrice
     }
 }
 
-/**
- * The open book in LEDGER view: the FIFO entry records not yet paired
- * with exit fills. ALL equity-side computations (unrealized PnL, average
- * entry, open entry commissions) must use this view so they stay
- * consistent with `netprofit`, whose increments follow the ledger slices
- * — TV's equity is fully ledger-based, and mixing ledger-realized with
- * physical-unrealized breaks total-equity invariance whenever exit
- * pairing crosses lot boundaries. Falls back to the physical lots when
- * no records exist (hand-built test states).
- */
+/** Canonical chronological open-lot view used by all equity calculations. */
 function ledgerOpenLots(strategy: StrategyState): Array<{ qty: number; entry_price: number; commission: number; dir: number }> {
-    const records: any[] = (strategy as any)._ledger_entries ?? [];
-    const dir = Math.sign(strategy.position_size) || 1;
-    if (records.length > 0) {
-        return records.map((r) => ({ qty: r.qty, entry_price: r.entry_price, commission: r.commission, dir }));
-    }
-    return strategy.opentrades.map((t) => ({
-        qty: Math.abs(t.size),
-        entry_price: t.entry_price,
-        commission: t.commission ?? 0,
-        dir: Math.sign(t.size),
+    return strategy.opentrades.map((trade) => ({
+        qty: Math.abs(trade.size),
+        entry_price: trade.entry_price,
+        commission: trade.commission ?? 0,
+        dir: Math.sign(trade.size),
     }));
 }
 
@@ -1314,13 +1333,98 @@ function updateEquityPeaks(context: any, highPrice: number, lowPrice: number): v
     }
 }
 
+interface ActivationSegment {
+    qty: number;
+    id: string;
+    entryId: string;
+    bracketEntry: number;
+    entryBar: number;
+    entryPathSegment?: number;
+    entryPathDistance?: number;
+}
+
+
+function activationSegmentsOf(trade: Trade): ActivationSegment[] {
+    if (trade._activation_segments !== undefined) {
+        return trade._activation_segments.map((segment) => ({ ...segment }));
+    }
+    return [{
+        qty: Math.abs(trade.size),
+        id: trade._activation_id ?? trade.id,
+        entryId: trade._activation_entry_id ?? trade.entry_id,
+        bracketEntry: trade._activation_bracket_entry ?? trade._bracket_entry ?? trade.entry_price,
+        entryBar: trade._activation_entry_bar_index ?? trade.entry_bar_index,
+        entryPathSegment: trade._activation_entry_path_segment,
+        entryPathDistance: trade._activation_entry_path_distance,
+    }];
+}
+
+
+function activationSegmentsAfterClose(trades: readonly Trade[], activationIds: readonly string[], qty: number): ActivationSegment[] {
+    const targetIds = new Set(activationIds);
+    let remaining = qty;
+    const segments: ActivationSegment[] = [];
+    for (const trade of trades) {
+        for (const segment of activationSegmentsOf(trade)) {
+            const removed = targetIds.has(segment.id) ? Math.min(remaining, segment.qty) : 0;
+            remaining -= removed;
+            if (segment.qty - removed > 1e-9) segments.push({ ...segment, qty: segment.qty - removed });
+        }
+    }
+    return segments;
+}
+
+function consumedActivationIds(trades: readonly Trade[], activationIds: readonly string[], qty: number): string[] {
+    const targetIds = new Set(activationIds);
+    const consumed: string[] = [];
+    let remaining = qty;
+    for (const trade of trades) {
+        for (const segment of activationSegmentsOf(trade)) {
+            if (remaining <= 1e-9) return consumed;
+            if (!targetIds.has(segment.id)) continue;
+            const take = Math.min(remaining, segment.qty);
+            if (take > 1e-9 && !consumed.includes(segment.id)) consumed.push(segment.id);
+            remaining -= take;
+        }
+    }
+    return consumed;
+}
+
+function assignActivationSegments(strategy: StrategyState, segments: readonly ActivationSegment[]): void {
+    let segmentIndex = 0;
+    let segmentOffset = 0;
+    for (const trade of strategy.opentrades) {
+        const pieces: ActivationSegment[] = [];
+        let assigned = 0;
+        const tradeQty = Math.abs(trade.size);
+        while (assigned < tradeQty - 1e-9 && segmentIndex < segments.length) {
+            const segment = segments[segmentIndex];
+            const available = segment.qty - segmentOffset;
+            const take = Math.min(tradeQty - assigned, available);
+            pieces.push({ ...segment, qty: take });
+            assigned += take;
+            segmentOffset += take;
+            if (segmentOffset >= segment.qty - 1e-9) {
+                segmentIndex += 1;
+                segmentOffset = 0;
+            }
+        }
+        trade._activation_segments = pieces;
+        const first = pieces[0];
+        if (first !== undefined) {
+            trade._activation_id = first.id;
+            trade._activation_entry_id = first.entryId;
+            trade._activation_bracket_entry = first.bracketEntry;
+            trade._activation_entry_bar_index = first.entryBar;
+            trade._activation_entry_path_segment = first.entryPathSegment;
+            trade._activation_entry_path_distance = first.entryPathDistance;
+        }
+    }
+}
 /**
- * FIFO close of `qtyToClose` contracts from open trades, optionally filtered
- * by `fromEntry` — when set, only trades whose `entry_id === fromEntry` are
- * eligible. Falls back to closing across all open trades when empty/undefined.
- *
- * Wraps `closePartialPosition` by temporarily reorganizing `opentrades` so
- * the matching trades sit at the head of the FIFO queue.
+ * Allocate a close against the canonical open-lot queue. `fromEntry` and
+ * `specificTradeId` define activation scope only under the default FIFO
+ * rule. The legacy ANY rule retains targeted physical allocation.
  */
 export function closeMatching(
     context: any,
@@ -1331,43 +1435,43 @@ export function closeMatching(
     closeInfo?: CloseInfo,
     specificTradeId?: string,
     excludedTradeIds?: readonly string[],
-): void {
+    activationTradeIds?: readonly string[],
+): number {
     const strategy: StrategyState = context.strategy;
-
-    // Per-LOT close (exit brackets): TV binds each bracket to the physical
-    // entry lot whose entry price computed its level — the fill closes
-    // THAT lot, not the oldest. FIFO entry/exit pairing for the ledger is
-    // handled inside closePartialPosition (see the ledger-swap there).
-    if (specificTradeId !== undefined) {
-        const target: Trade[] = [];
-        const others: Trade[] = [];
-        for (const t of strategy.opentrades) {
-            if (t.id === specificTradeId && !excludedTradeIds?.includes(t.id)) target.push(t);
-            else others.push(t);
-        }
-        if (target.length === 0) return;
-        const targetQty = Math.abs(target[0].size);
-        strategy.opentrades = [...target, ...others];
-        closePartialPosition(context, Math.min(qtyToClose, targetQty), exitPrice, exitTime, closeInfo);
-        return;
-    }
-
-    // Reorder eligible trades first (preserving their relative order).
-    // closePartialPosition closes FIFO from the front, so this provides a
-    // filtered FIFO for both from_entry and COF lifecycle exclusions.
-    const matching: Trade[] = [];
+    const fifo = (strategy.config.close_entries_rule ?? 'FIFO').toUpperCase() !== 'ANY';
+    const chronologicalIndex = fifo
+        ? new Map(strategy.opentrades.map((trade, index) => [trade.id, index]))
+        : null;
+    const eligible: Trade[] = [];
     const others: Trade[] = [];
-    for (const t of strategy.opentrades) {
-        const inScope = !fromEntry || fromEntry === '' || t.entry_id === fromEntry;
-        if (inScope && !excludedTradeIds?.includes(t.id)) matching.push(t);
-        else others.push(t);
+    for (const trade of strategy.opentrades) {
+        const allowed = fifo
+            ? !excludedTradeIds?.includes(trade.id)
+            : specificTradeId !== undefined
+              ? (trade._activation_id ?? trade.id) === specificTradeId && !excludedTradeIds?.includes(trade.id)
+              : (!fromEntry || fromEntry === '' || (trade._activation_entry_id ?? trade.entry_id) === fromEntry)
+                && !excludedTradeIds?.includes(trade.id);
+        if (allowed) eligible.push(trade);
+        else others.push(trade);
     }
-    const matchingQty = matching.reduce((sum, t) => sum + Math.abs(t.size), 0);
-    if (matchingQty === 0) return;
-    const effectiveClose = Math.min(qtyToClose, matchingQty);
-
-    strategy.opentrades = [...matching, ...others];
+    if (eligible.length === 0) return 0;
+    const eligibleQty = eligible.reduce((sum, trade) => sum + Math.abs(trade.size), 0);
+    const effectiveClose = Math.min(qtyToClose, eligibleQty);
+    const remainingActivation = fifo && activationTradeIds !== undefined
+        ? activationSegmentsAfterClose(strategy.opentrades, activationTradeIds, effectiveClose)
+        : null;
+    strategy.opentrades = [...eligible, ...others];
     closePartialPosition(context, effectiveClose, exitPrice, exitTime, closeInfo);
+    if (chronologicalIndex !== null) {
+        strategy.opentrades.sort(
+            (left, right) => chronologicalIndex.get(left.id)! - chronologicalIndex.get(right.id)!,
+        );
+        if (strategy.opentrades.length > 0) {
+            strategy.position_entry_name = strategy.opentrades[0].entry_id;
+        }
+    }
+    if (remainingActivation !== null) assignActivationSegments(strategy, remainingActivation);
+    return effectiveClose;
 }
 
 export function hasPendingMatchingEntry(strategy: StrategyState, fromEntry: string | undefined): boolean {
@@ -1379,6 +1483,23 @@ export function hasPendingMatchingEntry(strategy: StrategyState, fromEntry: stri
     );
 }
 
+type ExitFillKind = 'profit' | 'loss' | 'trailing' | 'market';
+
+interface ExitFillEvent {
+    order: Order;
+    orderSequence: number;
+    qty: number;
+    reservedQty: number;
+    direction: number;
+    price: number;
+    kind: ExitFillKind;
+    tradeId?: string;
+    activationTradeIds: string[];
+    excludedConsumedTradeIds: readonly string[];
+    pathSegment: number;
+    distanceAlongSegment: number;
+    fillCount: number;
+}
 /**
  * Process exit-category orders each bar (after entry-order fills, before the
  * user script runs). Handles:
@@ -1397,6 +1518,7 @@ export function processExitOrders(context: any, phase: 'open' | 'intrabar' | 'cl
     // calc_on_order_fills=true intrabar sequencing (see CofBarState): market
     // closes placed during a same-bar recalculation fill on the next assumed
     // intrabar tick at that tick's OHLC value. The fill count drives the
+
     // execution loop's recalc decision.
     const cof = strategy.config.calc_on_order_fills === true;
     const cofState = cof ? (strategy._cof ?? null) : null;
@@ -1417,6 +1539,53 @@ export function processExitOrders(context: any, phase: 'open' | 'intrabar' | 'cl
     const cofPreviousPrice = cofState && cofState.pass > 0
         ? cofState.ticks[cofState.pass - 1]
         : undefined;
+    const activationBook = strategy.opentrades.flatMap((trade) =>
+        activationSegmentsOf(trade).map((segment) => ({
+            ...trade,
+            size: Math.sign(trade.size) * segment.qty,
+            _activation_id: segment.id,
+            _activation_entry_id: segment.entryId,
+            _activation_bracket_entry: segment.bracketEntry,
+            _activation_entry_bar_index: segment.entryBar,
+            _activation_entry_path_segment: segment.entryPathSegment,
+            _activation_entry_path_distance: segment.entryPathDistance,
+            _activation_segments: undefined,
+        })),
+    );
+    const globalEvents: ExitFillEvent[] = [];
+    const openCloserToHigh = Math.abs(highPrice - openPrice) <= Math.abs(openPrice - lowPrice);
+    const path = assumedIntrabarPath(openPrice, highPrice, lowPrice, closePrice);
+    const rankEvent = (price: number, gap: boolean, forcedSegment?: number): { pathSegment: number; distanceAlongSegment: number } => {
+        if (gap || phase === 'open' || (cofState !== null && cofState.pass === 0)) {
+            return { pathSegment: -1, distanceAlongSegment: 0 };
+        }
+        if (cofState !== null) {
+            return {
+                pathSegment: cofState.pass,
+                distanceAlongSegment: Math.abs(price - (cofPreviousPrice as number)),
+            };
+        }
+        const start = forcedSegment ?? 0;
+        const end = forcedSegment === undefined ? path.length - 1 : forcedSegment + 1;
+        for (let segment = start; segment < end; segment++) {
+            const lo = Math.min(path[segment], path[segment + 1]);
+            const hi = Math.max(path[segment], path[segment + 1]);
+            if (price >= lo - 1e-9 && price <= hi + 1e-9) {
+                const length = Math.abs(path[segment + 1] - path[segment]);
+                return {
+                    pathSegment: segment,
+                    distanceAlongSegment: length > 0 ? Math.abs(price - path[segment]) / length : 0,
+                };
+            }
+        }
+        return { pathSegment: Number.MAX_SAFE_INTEGER, distanceAlongSegment: 0 };
+    };
+    const forcedSegmentFor = (execution: PathTrigger | undefined): number | undefined => {
+        if (execution === undefined || execution.position.pathSegment < 0) return undefined;
+        return comparePathPositions(rankEvent(execution.fillPrice, false), execution.position) === 0
+            ? undefined
+            : execution.position.pathSegment;
+    };
 
     // Two-phase evaluation (TV broker-emulator order precedence at the
     // bar's open):
@@ -1438,7 +1607,7 @@ export function processExitOrders(context: any, phase: 'open' | 'intrabar' | 'cl
     // order surviving to intra-bar crossing closes same-bar entries too
     // (2020-12-17), and a waiting order attaches to a reversal entry and
     // gap-exits it at its own fill price (2021-09-08).
-    for (const order of strategy.pending_orders) {
+    for (const [orderSequence, order] of strategy.pending_orders.entries()) {
         if (order.status !== 'pending') continue;
         if ((order.category ?? 'entry') !== 'exit') continue;
 
@@ -1451,9 +1620,12 @@ export function processExitOrders(context: any, phase: 'open' | 'intrabar' | 'cl
         // cancelled, mirroring TV's behavior of treating
         // strategy.close_all() as a no-op when its intended position is
         // already gone.
-        const excludedTradeIds = order._excluded_trade_ids;
-        let matching = strategy.opentrades.filter(
-            (t) => (!order.from_entry || t.entry_id === order.from_entry) && !excludedTradeIds?.includes(t.id),
+        const excludedActivationTradeIds = order._excluded_activation_trade_ids;
+        const excludedConsumedTradeIds = order._excluded_consumed_trade_ids ?? [];
+        let matching = activationBook.filter(
+            (t) =>
+                (!order.from_entry || (t._activation_entry_id ?? t.entry_id) === order.from_entry)
+                && !excludedActivationTradeIds?.includes(t._activation_id ?? t.id),
         );
         if (order._intended_trade_ids) {
             const snapshot = new Set(order._intended_trade_ids);
@@ -1517,15 +1689,19 @@ export function processExitOrders(context: any, phase: 'open' | 'intrabar' | 'cl
                 qtyToClose = matchingQty * (order.qty_percent / 100);
             }
 
-            closeMatching(context, order.from_entry, qtyToClose, fillPrice, currentTime, {
-                exitId: order.id,
-                exitComment: order.comment,
+            globalEvents.push({
+                order,
+                orderSequence,
+                qty: qtyToClose,
+                reservedQty: qtyToClose,
+                direction: matchingDir,
+                price: fillPrice,
+                kind: 'market',
+                activationTradeIds: matching.map((trade) => trade._activation_id ?? trade.id),
+                excludedConsumedTradeIds,
+                fillCount: 1,
+                ...rankEvent(fillPrice, true),
             });
-            order.status = 'filled';
-            order.fill_price = fillPrice;
-            order.fill_bar = context.idx;
-            order.fill_time = currentTime;
-            fills += 1;
             continue;
         }
         // Brackets queued by the normal bar-close evaluation are not market
@@ -1552,7 +1728,9 @@ export function processExitOrders(context: any, phase: 'open' | 'intrabar' | 'cl
         // trail under pyramiding yet; single-trade behavior is identical
         // either way.
         let totalCost = 0;
-        for (const t of matching) totalCost += Math.abs(t.size) * t.entry_price;
+        for (const t of matching) {
+            totalCost += Math.abs(t.size) * (t._activation_bracket_entry ?? t._bracket_entry ?? t.entry_price);
+        }
         const avgEntry = totalCost / matchingQty;
         const isLong = matchingDir === 1;
 
@@ -1634,7 +1812,6 @@ export function processExitOrders(context: any, phase: 'open' | 'intrabar' | 'cl
 
         // Evaluate TP/SL against the current COF path point. Outside COF the
         // existing full-bar path model remains in force.
-        const openCloserToHigh = Math.abs(highPrice - openPrice) <= Math.abs(openPrice - lowPrice);
         const favorableFirst = isLong ? openCloserToHigh : !openCloserToHigh;
 
         // Per-trade bracket evaluation. Each triggered bracket becomes a
@@ -1645,7 +1822,15 @@ export function processExitOrders(context: any, phase: 'open' | 'intrabar' | 'cl
         // fill price is the OPEN, not the literal trigger price. This
         // mirrors real broker behavior — if you'd planned a stop at $100
         // and the bar opens at $95, you fill at $95.
-        type FillEvent = { qty: number; price: number; kind: 'profit' | 'loss' | 'trailing'; tradeId?: string };
+        type FillEvent = {
+            qty: number;
+            price: number;
+            kind: 'profit' | 'loss' | 'trailing';
+            tradeId?: string;
+            gap?: boolean;
+            forcedSegment?: number;
+            sourceCount?: number;
+        };
         const tpEvents: FillEvent[] = [];
         const slEvents: FillEvent[] = [];
 
@@ -1658,10 +1843,9 @@ export function processExitOrders(context: any, phase: 'open' | 'intrabar' | 'cl
         const mcLocked = mcLock && mcLock.bar === context.idx;
 
         for (const t of matching) {
-            if (mcLocked && t.id !== mcLock.tradeId) continue;
-            // Tick legs compute from the lot's PHYSICAL entry — immutable
-            // under FIFO ledger pairing (see closePartialPosition).
-            const entry = t._bracket_entry ?? t.entry_price;
+            const activationId = t._activation_id ?? t.id;
+            if (mcLocked && activationId !== mcLock.tradeId) continue;
+            const entry = t._activation_bracket_entry ?? t._bracket_entry ?? t.entry_price;
             const tQty = Math.abs(t.size);
             let tp = absTp;
             if (tp === undefined && order.profit !== undefined) {
@@ -1672,6 +1856,29 @@ export function processExitOrders(context: any, phase: 'open' | 'intrabar' | 'cl
                 sl = isLong ? entry - order.loss * mintick : entry + order.loss * mintick;
             }
 
+            // A waiting bracket can attach to an entry filled on this bar,
+            // but only the remaining path is executable. Prices visited
+            // before that entry filled cannot retroactively trigger it.
+            // TV 2257 proves both sides: Long2 enters at the open and its
+            // bracket fills on the later rise, while Long5 enters during a
+            // later down-segment and its already-marketable bracket does not
+            // inherit the bar's earlier open/high.
+            const entryBar = t._activation_entry_bar_index ?? t.entry_bar_index;
+            const entryPathSegment = t._activation_entry_path_segment;
+            const gateToActivation = phase === 'intrabar'
+                && cofState === null
+                && entryBar === context.idx
+                && entryPathSegment !== undefined;
+            const activationPosition: IntrabarPathPosition | undefined = gateToActivation
+                ? {
+                    pathSegment: entryPathSegment,
+                    distanceAlongSegment: t._activation_entry_path_distance ?? 0,
+                }
+                : undefined;
+            const activationPrice = entryPathSegment === -1 ? openPrice : entry;
+            let tpExecution: PathTrigger | undefined;
+            let slExecution: PathTrigger | undefined;
+
             // During COF, price-based orders require a fresh crossing of
             // their level. A recalculation can refresh an order while price
             // is already beyond it; that order stays inert until the path
@@ -1679,7 +1886,16 @@ export function processExitOrders(context: any, phase: 'open' | 'intrabar' | 'cl
             let tpHit = false;
             let slHit = false;
             if (tp !== undefined) {
-                if (phase === 'open' || (cofState !== null && cofState.pass === 0)) {
+                if (activationPosition !== undefined) {
+                    tpExecution = firstTriggerAfter(
+                        path,
+                        tp,
+                        isLong ? (price) => price >= tp! : (price) => price <= tp!,
+                        activationPosition,
+                        activationPrice,
+                    );
+                    tpHit = tpExecution !== undefined;
+                } else if (phase === 'open' || (cofState !== null && cofState.pass === 0)) {
                     tpHit = isLong ? openPrice >= tp : openPrice <= tp;
                 } else if (cofState !== null) {
                     tpHit = isLong
@@ -1690,7 +1906,16 @@ export function processExitOrders(context: any, phase: 'open' | 'intrabar' | 'cl
                 }
             }
             if (sl !== undefined) {
-                if (phase === 'open' || (cofState !== null && cofState.pass === 0)) {
+                if (activationPosition !== undefined) {
+                    slExecution = firstTriggerAfter(
+                        path,
+                        sl,
+                        isLong ? (price) => price <= sl! : (price) => price >= sl!,
+                        activationPosition,
+                        activationPrice,
+                    );
+                    slHit = slExecution !== undefined;
+                } else if (phase === 'open' || (cofState !== null && cofState.pass === 0)) {
                     slHit = isLong ? openPrice <= sl : openPrice >= sl;
                 } else if (cofState !== null) {
                     slHit = isLong
@@ -1701,15 +1926,24 @@ export function processExitOrders(context: any, phase: 'open' | 'intrabar' | 'cl
                 }
             }
 
-            // OCO per trade: when both legs are reachable within the current
-            // path segment, the first leg along the assumed path wins.
+            // OCO per trade: when both legs are reachable, the first one
+            // along the executable portion of the assumed path wins.
             let kind: 'profit' | 'loss' | null = null;
-            if (tpHit && slHit) kind = favorableFirst ? 'profit' : 'loss';
-            else if (tpHit) kind = 'profit';
+            if (tpHit && slHit) {
+                kind = tpExecution !== undefined && slExecution !== undefined
+                    ? comparePathPositions(tpExecution.position, slExecution.position) <= 0
+                        ? 'profit'
+                        : 'loss'
+                    : favorableFirst
+                      ? 'profit'
+                      : 'loss';
+            } else if (tpHit) kind = 'profit';
             else if (slHit) kind = 'loss';
 
             if (kind === 'loss') {
-                const openPastSl = atOpenTick && (isLong ? openPrice <= (sl as number) : openPrice >= (sl as number));
+                const openPastSl = slExecution !== undefined
+                    ? slExecution.position.pathSegment === -1
+                    : atOpenTick && (isLong ? openPrice <= (sl as number) : openPrice >= (sl as number));
                 // TV asymmetry (637-event census from the gap_precedence
                 // probe, BTCUSDT 1D): a BUY-stop — the SL leg of a SHORT
                 // position — that is already in-the-money at the open does
@@ -1718,16 +1952,32 @@ export function processExitOrders(context: any, phase: 'open' | 'intrabar' | 'cl
                 // always catch (403/403). Suppress the stop leg for
                 // same-bar short entries gapped past at the open; the TP
                 // leg (if also reachable) still applies.
-                const buyStopSparesFreshEntry = !isLong && openPastSl && t.entry_bar_index === context.idx;
+                const buyStopSparesFreshEntry = !isLong && openPastSl && entryBar === context.idx;
                 if (!buyStopSparesFreshEntry) {
-                    slEvents.push({ qty: tQty, price: openPastSl ? openPrice : (sl as number), kind: 'loss', tradeId: t.id });
+                    slEvents.push({
+                        qty: tQty,
+                        price: slExecution?.fillPrice ?? (openPastSl ? openPrice : (sl as number)),
+                        kind: 'loss',
+                        tradeId: activationId,
+                        gap: openPastSl,
+                        forcedSegment: forcedSegmentFor(slExecution),
+                    });
                 } else if (tpHit) {
                     kind = 'profit';
                 }
             }
             if (kind === 'profit') {
-                const openPastTp = atOpenTick && (isLong ? openPrice >= (tp as number) : openPrice <= (tp as number));
-                tpEvents.push({ qty: tQty, price: openPastTp ? openPrice : (tp as number), kind: 'profit', tradeId: t.id });
+                const openPastTp = tpExecution !== undefined
+                    ? tpExecution.position.pathSegment === -1
+                    : atOpenTick && (isLong ? openPrice >= (tp as number) : openPrice <= (tp as number));
+                tpEvents.push({
+                    qty: tQty,
+                    price: tpExecution?.fillPrice ?? (openPastTp ? openPrice : (tp as number)),
+                    kind: 'profit',
+                    tradeId: activationId,
+                    gap: openPastTp,
+                    forcedSegment: forcedSegmentFor(tpExecution),
+                });
             }
         }
 
@@ -1776,8 +2026,8 @@ export function processExitOrders(context: any, phase: 'open' | 'intrabar' | 'cl
                 isLong
                     ? (order.trail_peak as number) - (order.trail_offset as number) * mintick
                     : (order.trail_peak as number) + (order.trail_offset as number) * mintick;
-            const emitTrail = (price: number) => {
-                trailEvent = { qty: Infinity, price, kind: 'trailing' };
+            const emitTrail = (price: number, forcedSegment: number) => {
+                trailEvent = { qty: Infinity, price, kind: 'trailing', forcedSegment };
             };
 
             if (trailArmedThisBar) {
@@ -1788,28 +2038,28 @@ export function processExitOrders(context: any, phase: 'open' | 'intrabar' | 'cl
                     // Phase 2 (favorable extreme → adverse extreme): low for
                     // long / high for short crosses trigger.
                     const hit = isLong ? lowPrice <= trig : highPrice >= trig;
-                    if (hit) emitTrail(trig);
+                    if (hit) emitTrail(trig, 1);
                 } else {
                     // Phase 3 (favorable extreme → close): close past trigger.
                     const seg3 = isLong ? closePrice <= trig : closePrice >= trig;
-                    if (seg3) emitTrail(trig);
+                    if (seg3) emitTrail(trig, 2);
                 }
             } else if (favorableFirst) {
                 // Already armed in a prior bar. Full segment model.
                 updatePeak();
                 const trig = triggerFromPeak();
                 const hit = isLong ? lowPrice <= trig : highPrice >= trig;
-                if (hit) emitTrail(trig);
+                if (hit) emitTrail(trig, 1);
             } else {
                 const oldTrig = triggerFromPeak();
                 const seg1 = isLong ? lowPrice <= oldTrig : highPrice >= oldTrig;
                 if (seg1) {
-                    emitTrail(oldTrig);
+                    emitTrail(oldTrig, 0);
                 } else {
                     updatePeak();
                     const newTrig = triggerFromPeak();
                     const seg3 = isLong ? closePrice <= newTrig : closePrice >= newTrig;
-                    if (seg3) emitTrail(newTrig);
+                    if (seg3) emitTrail(newTrig, 2);
                 }
             }
         }
@@ -1821,100 +2071,158 @@ export function processExitOrders(context: any, phase: 'open' | 'intrabar' | 'cl
             ? [...tpEvents, ...slEvents, ...(trailEvent ? [trailEvent] : [])]
             : [...slEvents, ...(trailEvent ? [trailEvent] : []), ...tpEvents];
 
-        if (events.length > 0) {
-            // qty / qty_percent caps apply to the TOTAL closed by this order.
-            let capRemaining = matchingQty;
-            if (order.qty && order.qty > 0) capRemaining = Math.min(order.qty, matchingQty);
-            else if (order.qty_percent && order.qty_percent > 0) {
-                capRemaining = matchingQty * (order.qty_percent / 100);
-            }
+        if (events.length === 0) continue;
 
-            const remainingMatchingQty = () =>
-                strategy.opentrades
-                    .filter((t) => (!order.from_entry || t.entry_id === order.from_entry) && !excludedTradeIds?.includes(t.id))
-                    .reduce((sum, t) => sum + Math.abs(t.size), 0);
+        let reservedQty = matchingQty;
+        if (order.qty && order.qty > 0) reservedQty = Math.min(order.qty, matchingQty);
+        else if (order.qty_percent && order.qty_percent > 0) {
+            reservedQty = matchingQty * (order.qty_percent / 100);
+        }
 
-            let lastFill = NaN;
-            let closedAny = false;
-            for (const ev of events) {
-                if (capRemaining <= 1e-9) break;
-                const remaining = remainingMatchingQty();
-                if (remaining <= 1e-9) break;
-                const qtyThis = Math.min(ev.qty === Infinity ? remaining : ev.qty, capRemaining, remaining);
-                // Apply slippage to the trigger price (closing side direction).
-                const fillPrice = applySlippage(context, -matchingDir, ev.price);
-
-                // Resolve which per-leg comment to stamp on the closed
-                // trade. strategy.exit() exposes comment_profit /
-                // comment_loss / comment_trailing — each fires only when
-                // its leg triggers. Fall back to the generic `comment`.
-                const legComment =
-                    ev.kind === 'profit'
-                        ? (order.comment_profit ?? order.comment)
-                        : ev.kind === 'loss'
-                          ? (order.comment_loss ?? order.comment)
-                          : (order.comment_trailing ?? order.comment);
-                const eligibleSizesBefore = cof && order._exit_lifecycle_key !== undefined
-                    ? new Map(
-                        strategy.opentrades
-                            .filter((trade) =>
-                                (!order.from_entry || trade.entry_id === order.from_entry)
-                                && !excludedTradeIds?.includes(trade.id),
-                            )
-                            .map((trade) => [trade.id, Math.abs(trade.size)]),
-                    )
-                    : null;
-
-                // Bracket fills close their SOURCE lot (per-lot binding);
-                // the trail event has no source lot and closes FIFO.
-                closeMatching(
-                    context,
-                    order.from_entry,
-                    qtyThis,
-                    fillPrice,
-                    currentTime,
-                    {
-                        triggerKind: ev.kind,
-                        exitId: order.id,
-                        exitComment: legComment,
-                    },
-                    ev.tradeId,
-                    excludedTradeIds,
-                );
-                if (eligibleSizesBefore !== null && order._exit_lifecycle_key !== undefined) {
-                    const stillOpenById = new Map(strategy.opentrades.map((trade) => [trade.id, trade]));
-                    const lifecycle = strategy._filled_exit_trade_ids ??= new Map<string, string[]>();
-                    const filledIds = (lifecycle.get(order._exit_lifecycle_key) ?? [])
-                        .filter((tradeId) => stillOpenById.has(tradeId));
-                    for (const [tradeId, sizeBefore] of eligibleSizesBefore) {
-                        const trade = stillOpenById.get(tradeId);
-                        if (trade !== undefined && Math.abs(trade.size) < sizeBefore - 1e-9 && !filledIds.includes(tradeId)) {
-                            filledIds.push(tradeId);
-                        }
-                    }
-                    lifecycle.set(order._exit_lifecycle_key, filledIds);
-                }
-                capRemaining -= qtyThis;
-                lastFill = fillPrice;
-                closedAny = true;
-                fills += 1;
-            }
-
-            // The order is consumed when nothing matching remains open or
-            // its qty cap is exhausted; otherwise it stays pending so the
-            // surviving trades' brackets remain active on later bars (TV
-            // brackets persist until filled or replaced).
-            if (closedAny && (remainingMatchingQty() <= 1e-9 || capRemaining <= 1e-9)) {
-                order.status = 'filled';
-                order.fill_price = lastFill;
-                order.fill_bar = context.idx;
-                order.fill_time = currentTime;
+        const combinedEvents: FillEvent[] = [];
+        for (const event of events) {
+            const existing = combinedEvents.find(
+                (candidate) =>
+                    candidate.kind === event.kind
+                    && candidate.price === event.price
+                    && candidate.gap === event.gap
+                    && candidate.forcedSegment === event.forcedSegment,
+            );
+            if (existing === undefined) {
+                combinedEvents.push({ ...event, sourceCount: 1 });
+            } else {
+                existing.qty = existing.qty === Infinity || event.qty === Infinity
+                    ? Infinity
+                    : existing.qty + event.qty;
+                existing.tradeId = undefined;
+                existing.sourceCount = (existing.sourceCount ?? 1) + 1;
             }
         }
+        for (const event of combinedEvents) {
+            globalEvents.push({
+                order,
+                orderSequence,
+                qty: event.qty,
+                reservedQty,
+                direction: matchingDir,
+                price: event.price,
+                kind: event.kind,
+                tradeId: event.tradeId,
+                activationTradeIds: matching.map((trade) => trade._activation_id ?? trade.id),
+                excludedConsumedTradeIds,
+                fillCount: event.sourceCount ?? 1,
+                ...rankEvent(event.price, event.gap === true, event.forcedSegment),
+            });
+        }
     }
+    globalEvents.sort((left, right) =>
+        left.pathSegment - right.pathSegment
+        || left.distanceAlongSegment - right.distanceAlongSegment
+        || left.orderSequence - right.orderSequence,
+    );
+
+    const capRemaining = new Map<Order, number>();
+    const lastFillByOrder = new Map<Order, number>();
+    for (const event of globalEvents) {
+        const remainingCap = capRemaining.get(event.order) ?? event.reservedQty;
+        if (remainingCap <= 1e-9 || event.order.status !== 'pending') continue;
+
+        const liveQty = strategy.opentrades
+            .filter((trade) =>
+                Math.sign(trade.size) === event.direction
+                && !event.excludedConsumedTradeIds.includes(trade.id),
+            )
+            .reduce((sum, trade) => sum + Math.abs(trade.size), 0);
+        if (liveQty <= 1e-9) continue;
+
+        const qtyThis = Math.min(event.qty === Infinity ? liveQty : event.qty, remainingCap, liveQty);
+        const fillPrice = event.kind === 'market'
+            ? event.price
+            : applySlippage(context, -event.direction, event.price);
+        const sizesBefore = new Map(strategy.opentrades.map((trade) => [trade.id, Math.abs(trade.size)]));
+        const exitComment = event.kind === 'profit'
+            ? (event.order.comment_profit ?? event.order.comment)
+            : event.kind === 'loss'
+              ? (event.order.comment_loss ?? event.order.comment)
+              : event.kind === 'trailing'
+                ? (event.order.comment_trailing ?? event.order.comment)
+                : event.order.comment;
+        const closeInfo: CloseInfo = {
+            exitId: event.order.id,
+            exitComment,
+        };
+        if (event.kind !== 'market') closeInfo.triggerKind = event.kind;
+
+        const eventActivationIds = event.tradeId !== undefined
+            ? [event.tradeId]
+            : event.kind === 'market'
+              ? []
+              : event.activationTradeIds;
+        const activatedIds = consumedActivationIds(strategy.opentrades, eventActivationIds, qtyThis);
+        const closedQty = closeMatching(
+            context,
+            event.order.from_entry,
+            qtyThis,
+            fillPrice,
+            currentTime,
+            closeInfo,
+            event.tradeId,
+            event.excludedConsumedTradeIds,
+            event.tradeId !== undefined ? [event.tradeId] : event.activationTradeIds,
+        );
+        if (closedQty <= 1e-9) continue;
+
+        const nextCap = remainingCap - closedQty;
+        capRemaining.set(event.order, nextCap);
+        lastFillByOrder.set(event.order, fillPrice);
+        fills += event.fillCount;
+
+        const excludedActivation = event.order._excluded_activation_trade_ids ??= [];
+        for (const tradeId of activatedIds) {
+            if (!excludedActivation.includes(tradeId)) excludedActivation.push(tradeId);
+        }
+
+        const partialExit = (event.order.qty ?? 0) > 0 || (event.order.qty_percent ?? 0) > 0;
+        if ((cof || partialExit) && event.order._exit_lifecycle_key !== undefined) {
+            const lifecycleMap = strategy._filled_exit_trade_ids ??= new Map();
+            const previous = lifecycleMap.get(event.order._exit_lifecycle_key);
+            const lifecycle = previous?.bar === context.idx
+                ? previous
+                : {
+                    bar: context.idx,
+                    activationTradeIds: partialExit ? [...(previous?.activationTradeIds ?? [])] : [],
+                    consumedTradeIds: [],
+                };
+            for (const tradeId of activatedIds) {
+                if (!lifecycle.activationTradeIds.includes(tradeId)) lifecycle.activationTradeIds.push(tradeId);
+            }
+            const sizesAfter = new Map(strategy.opentrades.map((trade) => [trade.id, Math.abs(trade.size)]));
+            for (const [tradeId, sizeBefore] of sizesBefore) {
+                const sizeAfter = sizesAfter.get(tradeId) ?? 0;
+                if (sizeAfter < sizeBefore - 1e-9 && !lifecycle.consumedTradeIds.includes(tradeId)) {
+                    lifecycle.consumedTradeIds.push(tradeId);
+                }
+            }
+            lifecycleMap.set(event.order._exit_lifecycle_key, lifecycle);
+        }
+
+        // Keep the broker order alive until every crossed event collected
+        // for this pass has executed, bounded by its reserved quantity.
+    }
+
+    for (const [order, fillPrice] of lastFillByOrder) {
+        order.status = 'filled';
+        order.fill_price = fillPrice;
+        order.fill_bar = context.idx;
+        order.fill_time = currentTime;
+    }
+
 
     // Remove filled/cancelled exit orders.
     strategy.pending_orders = strategy.pending_orders.filter((o) => o.status === 'pending');
+    if (Math.abs(strategy.position_size) < 1e-9) {
+        strategy._filled_exit_trade_ids?.clear();
+    }
 
     // Refresh equity for any caller reading metrics between processExitOrders
     // and the bar-finalize step. Peaks are latched in finalizeBar().
@@ -2352,6 +2660,7 @@ export function initializeStrategy(context: any, config: any): void {
         pyramiding: 1,
         calc_on_order_fills: false,
         process_orders_on_close: false,
+        close_entries_rule: 'FIFO',
         calc_on_every_tick: false,
         max_bars_back: 0,
         backtest_fill_limits_assumption: 0,
@@ -2450,15 +2759,14 @@ export function initializeStrategy(context: any, config: any): void {
         _exit_call_history: new Map<string, number>(),
         _exit_fallback_counter: 0,
         _exit_fallback_last_bar: -1,
-        _filled_exit_trade_ids: new Map<string, string[]>(),
+        _filled_exit_trade_ids: new Map<string, { bar: number; activationTradeIds: string[]; consumedTradeIds: string[] }>(),
     };
 }
 
 /**
  * Deep-clone a plain-data value (primitives, arrays, plain objects, Map).
- * Strategy state holds only plain data — Trade/Order/ledger rows are object
- * literals, `_exit_call_history` is a Map<string, number> — so this covers
- * every field without a structuredClone dependency.
+ * Strategy state holds only plain data, so this covers every field without a
+ * structuredClone dependency.
  */
 function clonePlainValue<T>(value: T): T {
     if (Array.isArray(value)) {
@@ -2483,9 +2791,8 @@ function clonePlainValue<T>(value: T): T {
  * Snapshot the full strategy ledger for streaming rollback.
  *
  * Iterates the ACTUAL own keys of the state object instead of a hand-kept
- * field list, so internal fields written via `(strategy as any)`
- * (`_ledger_entries`, `_mc_exit_lock`, `_pending_close_mc`, ...) are covered
- * even though they are absent from the StrategyState type.
+ * field list, so internal broker-emulator fields are covered even when they
+ * are absent from the StrategyState type.
  *
  * Two fields get special treatment:
  *   - `config`: skipped — rebuilt by `strategy.any()` on every script
