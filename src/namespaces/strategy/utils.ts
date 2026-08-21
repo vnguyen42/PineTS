@@ -1782,6 +1782,8 @@ export function processExitOrders(context: any, phase: 'open' | 'intrabar' | 'cl
         // trailArmedThisBar, making the segment model treat the arming bar
         // as an armed-prior bar).
         let trailArmedThisBar = false;
+        let trailArmPrice: number | undefined;
+        let trailActivationPosition: IntrabarPathPosition | undefined;
         if (phase === 'intrabar' && !order.trail_armed && (order.trail_price !== undefined || order.trail_points !== undefined)) {
             let armPrice: number | undefined;
             if (order.trail_price !== undefined) armPrice = order.trail_price;
@@ -1791,6 +1793,14 @@ export function processExitOrders(context: any, phase: 'open' | 'intrabar' | 'cl
             if (armPrice !== undefined) {
                 const armed = isLong ? highPrice >= armPrice : lowPrice <= armPrice;
                 if (armed) {
+                    trailArmPrice = armPrice;
+                    trailActivationPosition = firstTriggerAfter(
+                        path,
+                        armPrice,
+                        isLong ? (price) => price >= armPrice! : (price) => price <= armPrice!,
+                        { pathSegment: -1, distanceAlongSegment: 0 },
+                        openPrice,
+                    )?.position;
                     order.trail_armed = true;
                     order.trail_peak = isLong ? highPrice : lowPrice;
                     trailArmedThisBar = true;
@@ -2013,61 +2023,89 @@ export function processExitOrders(context: any, phase: 'open' | 'intrabar' | 'cl
         // armed yet). Only phase 2 (favorable-first) or phase 3
         // (adverse-first) can fire on the arming bar.
         //
-        // The fill is always the LITERAL trigger price — gap-fill at
-        // open is incorrect for trail (the bar's open precedes any
-        // peak update for this trade).
+        // The offset is truncated toward zero before the stop is computed.
+        // The rounded stop is the level used for both crossing and
+        // fill; a gap through an already-armed stop fills at the bar's open.
         let trailEvent: FillEvent | null = null;
         if (phase === 'intrabar' && !mcLocked && order.trail_armed && order.trail_offset !== undefined) {
             const updatePeak = () => {
                 if (isLong) order.trail_peak = Math.max(order.trail_peak ?? -Infinity, highPrice);
                 else order.trail_peak = Math.min(order.trail_peak ?? Infinity, lowPrice);
             };
-            const triggerFromPeak = (): number =>
-                isLong
-                    ? (order.trail_peak as number) - (order.trail_offset as number) * mintick
-                    : (order.trail_peak as number) + (order.trail_offset as number) * mintick;
-            const emitTrail = (price: number, forcedSegment: number) => {
-                let fillPrice = price;
-                if (isLong) {
-                    // VIN-86 (TV oracle 2602, 55/55): TV reports LONG trailing
-                    // sell-stop fills quantized UP to syminfo.mintick —
-                    // ceil(raw stop / mintick) * mintick — while the
-                    // trigger/crossing test above stays on the raw stop.
-                    // Snap float noise introduced by upstream price arithmetic
-                    // in price units before taking the strict upward ceil. A
-                    // quotient-only ULP check misses errors from
-                    // peak - offset * mintick (e.g. 0.1 - 0.09).
-                    const ticks = price / mintick;
-                    const nearestTicks = Math.round(ticks);
-                    const nearestGrid = nearestTicks * mintick;
-                    const priceTolerance = 1e-12 * Math.max(1, Math.abs(price));
-                    const snappedTicks = Math.abs(price - nearestGrid) <= priceTolerance
-                        ? nearestTicks
-                        : ticks;
-                    fillPrice = Math.ceil(snappedTicks) * mintick;
-                    // Clamp to the bar's [low, high] like the other
-                    // price-based fills (a fill may not leave the bar it
-                    // filled in).
-                    fillPrice = Math.min(highPrice, Math.max(lowPrice, fillPrice));
-                    // SHORT mirror (trailing buy stop, expected floor(raw)):
-                    // [HYPOTHÈSE] deferred — no short oracle witness yet.
-                }
-                trailEvent = { qty: Infinity, price: fillPrice, kind: 'trailing', forcedSegment };
+            const whole = Math.trunc(order.trail_offset as number);
+            const roundTrailLevel = (raw: number): number => {
+                if (!mintick || mintick <= 0 || !Number.isFinite(raw)) return raw;
+                const ticks = raw / mintick;
+                const nearestTicks = Math.round(ticks);
+                const nearestGrid = nearestTicks * mintick;
+                // Snap only representation noise in price units. A genuine
+                // sub-tick fraction remains visible to the per-side ceil or
+                // floor below.
+                const priceTolerance = 1e-12 * Math.max(1, Math.abs(raw));
+                const roundedTicks = Math.abs(raw - nearestGrid) <= priceTolerance
+                    ? nearestTicks
+                    : isLong
+                      ? Math.floor(ticks)
+                      : Math.ceil(ticks);
+                const mintickNotation = mintick.toString().toLowerCase();
+                const [coefficient, exponentText] = mintickNotation.split('e');
+                const exponent = exponentText === undefined ? 0 : Number(exponentText);
+                const decimalPlaces = Math.max(0, (coefficient.split('.')[1]?.length ?? 0) - exponent);
+                return Number((roundedTicks * mintick).toFixed(decimalPlaces));
+            };
+            const triggerFromPeak = (peak: number = order.trail_peak as number): number => {
+                const raw = isLong
+                    ? peak - whole * mintick
+                    : peak + whole * mintick;
+                return roundTrailLevel(raw);
+            };
+            const emitTrail = (price: number, forcedSegment?: number, gap = false) => {
+                trailEvent = {
+                    qty: Infinity,
+                    price: gap ? openPrice : price,
+                    kind: 'trailing',
+                    gap,
+                    forcedSegment,
+                };
             };
 
-            if (trailArmedThisBar) {
+            const priorPeak = order.trail_peak as number;
+            const priorTrigger = Number.isFinite(priorPeak) ? triggerFromPeak(priorPeak) : undefined;
+            const gapAtOpen = atOpenTick
+                && !trailArmedThisBar
+                && priorTrigger !== undefined
+                && (isLong ? openPrice < priorTrigger : openPrice > priorTrigger);
+            if (gapAtOpen) {
+                emitTrail(openPrice, undefined, true);
+            } else if (trailArmedThisBar) {
                 // Peak is already the bar's favorable extreme (set by the
-                // arming logic). Don't update again.
-                const trig = triggerFromPeak();
-                if (favorableFirst) {
-                    // Phase 2 (favorable extreme → adverse extreme): low for
-                    // long / high for short crosses trigger.
-                    const hit = isLong ? lowPrice <= trig : highPrice >= trig;
-                    if (hit) emitTrail(trig, 1);
+                // arming logic). A sub-tick offset fills at the activation
+                // crossing using the away-rounded trail_price.
+                if (whole === 0) {
+                    const activationFillPrice = order.trail_price !== undefined
+                        ? order.trail_price
+                        : trailArmPrice !== undefined
+                          ? roundToMintick(trailArmPrice, avgEntry, mintick)
+                          : undefined;
+                    if (activationFillPrice !== undefined) {
+                        const activationSegment = trailActivationPosition?.pathSegment;
+                        emitTrail(
+                            activationFillPrice,
+                            activationSegment !== undefined && activationSegment >= 0 ? activationSegment : undefined,
+                        );
+                    }
                 } else {
-                    // Phase 3 (favorable extreme → close): close past trigger.
-                    const seg3 = isLong ? closePrice <= trig : closePrice >= trig;
-                    if (seg3) emitTrail(trig, 2);
+                    const trig = triggerFromPeak();
+                    if (favorableFirst) {
+                        // Phase 2 (favorable extreme → adverse extreme): low for
+                        // long / high for short crosses trigger.
+                        const hit = isLong ? lowPrice <= trig : highPrice >= trig;
+                        if (hit) emitTrail(trig, 1);
+                    } else {
+                        // Phase 3 (favorable extreme → close): close past trigger.
+                        const seg3 = isLong ? closePrice <= trig : closePrice >= trig;
+                        if (seg3) emitTrail(trig, 2);
+                    }
                 }
             } else if (favorableFirst) {
                 // Already armed in a prior bar. Full segment model.

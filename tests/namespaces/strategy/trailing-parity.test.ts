@@ -3,7 +3,6 @@ import { Context } from '../../../src/Context.class';
 import { Series } from '../../../src/Series';
 import { StrategyState } from '../../../src/namespaces/strategy/types';
 import { processExitOrders } from '../../../src/namespaces/strategy/utils';
-
 function createTrailingContext({
     open,
     high,
@@ -12,6 +11,9 @@ function createTrailingContext({
     mintick = 1,
     trailPeak = 110,
     trailOffset = 5,
+    direction = 'long',
+    trailPrice,
+    trailArmed = true,
 }: {
     open: number;
     high: number;
@@ -20,7 +22,12 @@ function createTrailingContext({
     mintick?: number;
     trailPeak?: number;
     trailOffset?: number;
+    direction?: 'long' | 'short';
+    trailPrice?: number;
+    trailArmed?: boolean;
 }) {
+    const isLong = direction === 'long';
+    const entryId = isLong ? 'buy' : 'sell';
     const context = new Context({
         marketData: [],
         source: [],
@@ -43,11 +50,11 @@ function createTrailingContext({
         opentrades: [
             {
                 id: 'trade_1',
-                entry_id: 'buy',
+                entry_id: entryId,
                 entry_price: 100,
                 entry_bar_index: 0,
                 entry_time: 0,
-                size: 1,
+                size: isLong ? 1 : -1,
                 status: 'open',
             },
         ],
@@ -55,23 +62,24 @@ function createTrailingContext({
         pending_orders: [
             {
                 id: 'exit_1',
-                direction: -1,
+                direction: isLong ? -1 : 1,
                 qty: 1,
                 type: 'stop',
                 category: 'exit',
-                from_entry: 'buy',
-                trail_points: 10,
+                from_entry: entryId,
+                trail_points: trailPrice === undefined ? 10 : undefined,
+                trail_price: trailPrice,
                 trail_offset: trailOffset,
-                trail_peak: trailPeak,
-                trail_armed: true,
+                trail_peak: trailArmed ? trailPeak : NaN,
+                trail_armed: trailArmed,
                 status: 'pending',
                 bar: 0,
                 time: 0,
             },
         ],
-        position_size: 1,
+        position_size: isLong ? 1 : -1,
         position_avg_price: 100,
-        position_entry_name: 'buy',
+        position_entry_name: entryId,
         initial_capital: 10000,
         account_currency: 'USD',
         equity: 10000,
@@ -91,10 +99,9 @@ function createTrailingContext({
         losstrades: 0,
         eventrades: 0,
         wintrades_total_profit: 0,
-        losstrades_total_loss: 0,
         max_contracts_held_all: 1,
-        max_contracts_held_long: 1,
-        max_contracts_held_short: 0,
+        max_contracts_held_long: isLong ? 1 : 0,
+        max_contracts_held_short: isLong ? 0 : 1,
         risk_rules: {},
         risk_halted: false,
     };
@@ -163,40 +170,166 @@ describe('Strategy - Trailing Stop Price Path Parity', () => {
         expect(strategy.closedtrades[0].exit_price).toBe(115);
     });
 
-    it('quantizes a long trailing sell-stop fill up to the mintick (ceil) while the trigger stays on the raw stop', () => {
-        // VIN-86 (TV oracle 2602, 55/55): favorable-first O-H-L-C bar. Raw
-        // stop = peak(120) - offset(5.5 ticks) * mintick(1) = 114.5. The
-        // trigger fires because low (114.5) <= raw stop; TV reports the fill
-        // at ceil(114.5 / 1) * 1 = 115, which stays within [low 114.5, high 120].
+    it('truncates fractional offset ticks before computing a long stop', () => {
+        // TV truncates 1.2744 ticks to one tick. With peak 13.4699 and
+        // mintick 0.001, the rounded stop is floor(13.4689 / 0.001) =
+        // 13.468.
         const { context, order, strategy } = createTrailingContext({
-            open: 118,
-            high: 120,
-            low: 114.5,
-            close: 118.5,
-            trailPeak: 120,
-            trailOffset: 5.5,
+            open: 13.469,
+            high: 13.4699,
+            low: 13.467,
+            close: 13.4685,
+            mintick: 0.001,
+            trailPeak: 13.4699,
+            trailOffset: 1.2744,
         });
 
         processExitOrders(context);
 
         expect(order.status).toBe('filled');
-        expect(order.fill_price).toBe(115);
-        expect(order.trail_peak).toBe(120);
-        expect(strategy.closedtrades).toHaveLength(1);
-        expect(strategy.closedtrades[0].exit_price).toBe(115);
+        expect(order.fill_price).toBe(13.468);
+        expect(strategy.closedtrades[0].exit_price).toBe(13.468);
     });
 
-    it('keeps the long trailing trigger on the raw stop (a low between raw and ceil does not fire)', () => {
-        // Same raw stop 114.5; bar low 114.6 does not cross it. If the
-        // crossing test used the quantized level (115), 114.6 <= 115 would
-        // fire — this proves the trigger/crossing test still uses the raw stop.
+    it('uses the long floor stop for crossing and fill', () => {
+        // Raw = 13.4699 - 1 * 0.001 = 13.4689; the TV stop is the
+        // per-side floor, 13.468.
         const { context, order, strategy } = createTrailingContext({
-            open: 118,
-            high: 120,
-            low: 114.6,
-            close: 118.5,
-            trailPeak: 120,
-            trailOffset: 5.5,
+            open: 13.469,
+            high: 13.4699,
+            low: 13.467,
+            close: 13.4675,
+            mintick: 0.001,
+            trailPeak: 13.4699,
+            trailOffset: 1,
+        });
+
+        processExitOrders(context);
+
+        expect(order.status).toBe('filled');
+        expect(order.fill_price).toBe(13.468);
+        expect(strategy.closedtrades).toHaveLength(1);
+        expect(strategy.closedtrades[0].exit_price).toBe(13.468);
+    });
+
+    it('uses the short ceil stop for crossing and fill', () => {
+        // Raw = 11.0608 + 1 * 0.001 = 11.0618; the TV stop is the
+        // per-side ceil, 11.062.
+        const { context, order, strategy } = createTrailingContext({
+            open: 11.061,
+            high: 11.063,
+            low: 11.0608,
+            close: 11.0615,
+            mintick: 0.001,
+            trailPeak: 11.0608,
+            trailOffset: 1,
+            direction: 'short',
+        });
+
+        processExitOrders(context);
+
+        expect(order.status).toBe('filled');
+        expect(order.fill_price).toBe(11.062);
+        expect(strategy.closedtrades).toHaveLength(1);
+        expect(strategy.closedtrades[0].exit_price).toBe(11.062);
+    });
+
+    it('fills a long sub-tick trail at the ceil-rounded activation price', () => {
+        const { context, order, strategy } = createTrailingContext({
+            open: 13.46,
+            high: 13.48,
+            low: 13.45,
+            close: 13.46,
+            mintick: 0.001,
+            trailPeak: NaN,
+            trailOffset: 0.5,
+            // exit.ts has already away-rounded a raw 13.4702 trail_price
+            // to 13.471 before this order reaches processExitOrders.
+            trailPrice: 13.471,
+            trailArmed: false,
+        });
+
+        processExitOrders(context);
+        expect(order.status).toBe('filled');
+        expect(order.fill_price).toBe(13.471);
+        expect(strategy.closedtrades).toHaveLength(1);
+        expect(strategy.closedtrades[0].exit_price).toBe(13.471);
+    });
+
+    it('fills a short sub-tick trail at the floor-rounded activation price', () => {
+        const { context, order, strategy } = createTrailingContext({
+            open: 11.07,
+            high: 11.08,
+            low: 11.05,
+            close: 11.07,
+            mintick: 0.001,
+            trailPeak: NaN,
+            trailOffset: 0.5,
+            // exit.ts has already away-rounded a raw 11.0598 trail_price
+            // to 11.059 before this order reaches processExitOrders.
+            trailPrice: 11.059,
+            trailArmed: false,
+            direction: 'short',
+        });
+
+        processExitOrders(context);
+
+        expect(order.status).toBe('filled');
+        expect(order.fill_price).toBe(11.059);
+        expect(strategy.closedtrades).toHaveLength(1);
+        expect(strategy.closedtrades[0].exit_price).toBe(11.059);
+    });
+
+    it('fills a long trail at the open when the bar gaps below the current stop', () => {
+        const { context, order, strategy } = createTrailingContext({
+            open: 23.35,
+            high: 23.7,
+            low: 23,
+            close: 23.28,
+            mintick: 0.001,
+            trailPeak: 23.7,
+            trailOffset: 2,
+        });
+
+        processExitOrders(context);
+
+        expect(order.status).toBe('filled');
+        expect(order.fill_price).toBe(23.35);
+        expect(order.trail_peak).toBe(23.7);
+        expect(strategy.closedtrades).toHaveLength(1);
+        expect(strategy.closedtrades[0].exit_price).toBe(23.35);
+    });
+
+    it('keeps exact-grid long stops stable against floating-point noise', () => {
+        const { context, order, strategy } = createTrailingContext({
+            open: 0.071,
+            high: 0.1,
+            low: 0.069,
+            close: 0.07,
+            mintick: 0.01,
+            trailPeak: 0.1,
+            trailOffset: 3,
+        });
+
+        processExitOrders(context);
+
+        expect(order.status).toBe('filled');
+        expect(order.fill_price).toBe(0.07);
+        expect(strategy.closedtrades[0].exit_price).toBe(0.07);
+    });
+    it('preserves a genuine sub-tick short fraction instead of rounding it down', () => {
+        // lowWater 10.0000000005 + one tick = 11.0000000005. The genuine
+        // 5e-10 fraction is larger than the price-domain tolerance, so ceil
+        // yields 12; a fixed 1e-9 tick epsilon would incorrectly yield 11.
+        const { context, order, strategy } = createTrailingContext({
+            open: 10.5,
+            high: 11.5,
+            low: 10.0000000005,
+            close: 10.5,
+            mintick: 1,
+            trailPeak: 10.0000000005,
+            trailOffset: 1,
+            direction: 'short',
         });
 
         processExitOrders(context);
@@ -205,139 +338,24 @@ describe('Strategy - Trailing Stop Price Path Parity', () => {
         expect(strategy.closedtrades).toHaveLength(0);
     });
 
-    it('clamps a long trailing fill to the bar range when the mintick ceil would exit it', () => {
-        // Adverse-first O-H-L-C bar. Armed prior bar with peak 126: the raw
-        // segment-1 trigger = 126 - 5 = 121 sits ABOVE the bar's high (120).
-        // Segment 1 crosses it (low 106 <= 121); ceil(121) = 121 would leave
-        // the bar, so the fill-model clamp pins the reported fill to 120.
+    it('canonicalizes a long exact-grid stop after subtraction dust', () => {
+        // 13.469000000000001 - 3 * 0.001 =
+        // 13.466000000000001; the snapped grid level is 13.466.
         const { context, order, strategy } = createTrailingContext({
-            open: 108,
-            high: 120,
-            low: 106,
-            close: 110,
-            trailPeak: 126,
-            trailOffset: 5,
+            open: 13.468,
+            high: 13.469000000000001,
+            low: 13.465,
+            close: 13.466,
+            mintick: 0.001,
+            trailPeak: 13.469000000000001,
+            trailOffset: 3,
         });
 
         processExitOrders(context);
 
         expect(order.status).toBe('filled');
-        expect(order.fill_price).toBe(120);
-        expect(order.trail_peak).toBe(126);
-        expect(strategy.closedtrades).toHaveLength(1);
-        expect(strategy.closedtrades[0].exit_price).toBe(120);
-    });
-
-    it('keeps a long trailing fill unchanged when the raw stop is exactly on a tick (EPS guard)', () => {
-        // VIN-86 regression (review): raw stop = peak(0.22) - 15 ticks *
-        // mintick(0.01) = 0.07. In floats 0.07 / 0.01 = 7.000000000000001,
-        // so a naive ceil would report 0.08; the price-grid-aware upward
-        // quantizer must leave the exact-tick stop unchanged at 0.07.
-        const { context, order, strategy } = createTrailingContext({
-            open: 0.218,
-            high: 0.22,
-            low: 0.069,
-            close: 0.1,
-            mintick: 0.01,
-            trailPeak: 0.22,
-            trailOffset: 15,
-        });
-
-        processExitOrders(context);
-
-        expect(order.status).toBe('filled');
-        expect(order.fill_price).toBe(0.07);
-        expect(order.trail_peak).toBe(0.22);
-        expect(strategy.closedtrades).toHaveLength(1);
-        expect(strategy.closedtrades[0].exit_price).toBe(0.07);
-    });
-    it('absorbs upstream subtraction noise before the long trailing ceil (0.1 - 0.09 -> 0.01)', () => {
-        // The raw stop is 0.01000000000000000368 from 0.1 - 9 * 0.01.
-        // A quotient-only ceil sees 1.0000000000000004 and reports 0.02;
-        // snapping the raw price to its nearby 0.01 grid must report 0.01.
-        const { context, order, strategy } = createTrailingContext({
-            open: 0.099,
-            high: 0.1,
-            low: 0,
-            close: 0.05,
-            mintick: 0.01,
-            trailPeak: 0.1,
-            trailOffset: 9,
-        });
-
-        processExitOrders(context);
-
-        expect(order.status).toBe('filled');
-        expect(order.fill_price).toBe(0.01);
-        expect(order.trail_peak).toBe(0.1);
-        expect(strategy.closedtrades).toHaveLength(1);
-        expect(strategy.closedtrades[0].exit_price).toBe(0.01);
-    });
-
-    it('keeps a large exact-grid long trailing stop on its tick (50000 - 9 ticks)', () => {
-        // The price-unit tolerance is relative to price magnitude: a
-        // 50000 - 9 * 0.01 stop must remain 49999.91, not 49999.92.
-        const { context, order, strategy } = createTrailingContext({
-            open: 49999.99,
-            high: 50000,
-            low: 49999,
-            close: 49999.5,
-            mintick: 0.01,
-            trailPeak: 50000,
-            trailOffset: 9,
-        });
-
-        processExitOrders(context);
-
-        expect(order.status).toBe('filled');
-        expect(order.fill_price).toBe(49999.91);
-        expect(order.trail_peak).toBe(50000);
-        expect(strategy.closedtrades).toHaveLength(1);
-        expect(strategy.closedtrades[0].exit_price).toBe(49999.91);
-    });
-
-
-    it('ceils a genuinely fractional long trailing raw stop to the next tick (0.073 -> 0.08)', () => {
-        // VIN-86: raw stop = peak(0.123) - 5 ticks * mintick(0.01) = 0.073,
-        // genuinely off-grid — the upward quantization must report 0.08.
-        const { context, order, strategy } = createTrailingContext({
-            open: 0.121,
-            high: 0.123,
-            low: 0.069,
-            close: 0.1,
-            mintick: 0.01,
-            trailPeak: 0.123,
-            trailOffset: 5,
-        });
-
-        processExitOrders(context);
-
-        expect(order.status).toBe('filled');
-        expect(order.fill_price).toBe(0.08);
-        expect(order.trail_peak).toBe(0.123);
-        expect(strategy.closedtrades).toHaveLength(1);
-        expect(strategy.closedtrades[0].exit_price).toBe(0.08);
-    });
-    it('keeps a genuine sub-noise fraction on the upward side (5e-10 / 1 -> 1)', () => {
-        // The relative price-grid tolerance must not swallow a genuine
-        // fraction: 5e-10 price is real at mintick 1, so ceil(5e-10) = 1.
-        const { context, order, strategy } = createTrailingContext({
-            open: 1,
-            high: 1.0000000005,
-            low: 0,
-            close: 0.5,
-            mintick: 1,
-            trailPeak: 1.0000000005,
-            trailOffset: 1,
-        });
-
-        processExitOrders(context);
-
-        expect(order.status).toBe('filled');
-        expect(order.fill_price).toBe(1);
-        expect(order.trail_peak).toBe(1.0000000005);
-        expect(strategy.closedtrades).toHaveLength(1);
-        expect(strategy.closedtrades[0].exit_price).toBe(1);
+        expect(order.fill_price).toBe(13.466);
+        expect(strategy.closedtrades[0].exit_price).toBe(13.466);
     });
 
 });
