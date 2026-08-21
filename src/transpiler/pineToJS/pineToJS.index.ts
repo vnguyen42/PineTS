@@ -8,6 +8,7 @@ import { Lexer } from './lexer';
 import { Parser } from './parser';
 import { CodeGenerator } from './codegen';
 import { lowerV4LegacyBuiltins } from './v4LegacyLowering';
+import { lowerV4InputCalls } from './v4InputLowering';
 
 /**
  * Extract Pine Script version from source code
@@ -68,11 +69,15 @@ export function pineToJS(sourceCode: string, options: any = {}) {
         const ast = parser.parse();
 
         // Step 2b: v4-only lowering — rewrite legacy flat builtins in call
-        // position into their v5 namespaced equivalents (ta.*, math.*, …).
+        // position into their v5 namespaced equivalents (ta.*, math.*, …),
+        // then the v4 `input(...)` forms into the typed input.* methods
+        // (type= consumed, defval-lexical inference, explicit error on
+        // unsupported families).
         // STRICTLY gated on version === 4: v5/v6/forced-v5 sources never
-        // reach this pass, so their behavior is byte-identical.
+        // reach these passes, so their behavior is byte-identical.
         if (version === 4) {
             lowerV4LegacyBuiltins(ast);
+            lowerV4InputCalls(ast);
         }
 
         // Step 3: Generate JavaScript (pass source code for comments)
