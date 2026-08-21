@@ -233,6 +233,10 @@ export const CONTEXT_PINE_VARS = [
     'fixnan',
     'na',
     'nz',
+    // Pine v4 legacy `iff(cond, a, b)` — runtime helper on context.pine,
+    // resolved for v4 sources only (see Core.iff / v4LegacyLowering).
+    'iff',
+    'v4_rsi',
     'timestamp',
     'str',
     'box',

@@ -187,9 +187,14 @@ export class Context {
             na: new NAHelper(),
 
             nz: core.nz.bind(core),
+            // Pine v4 legacy `iff(cond, a, b)` — both branches evaluated;
+            // see Core.iff. Kept out of v5 semantics (v5 has no `iff`), it
+            // only resolves for v4 sources that use the legacy name.
+            iff: core.iff.bind(core),
             indicator: core.indicator.bind(core),
             fixnan: core.fixnan.bind(core),
             alertcondition: core.alertcondition.bind(core),
+            v4_rsi: core.v4RsiLegacy.bind(core),
             alert: new AlertHelper(this),
             error: core.error.bind(core),
             max_bars_back: core.max_bars_back.bind(core),

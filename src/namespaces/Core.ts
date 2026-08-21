@@ -258,6 +258,36 @@ export class Core {
         return NaN;
     }
 
+    /**
+     * Pine v4 `iff(condition, a, b)` — legacy function removed in v5 (the
+     * ternary operator replaced it). Both `a` and `b` are evaluated before
+     * this helper is called; it only selects a result, so the transpiler
+     * preserves eager v4 call semantics without short-circuit rewriting.
+     *
+     * Selection deliberately delegates to the same scalar conditional
+     * semantics emitted for Pine ternaries (`cond ? a : b`). This keeps
+     * `iff` and ternary behavior identical, including their treatment of
+     * `na`.
+     *
+     * [HYPOTHÈSE] The fork's ternary treatment of an `na` condition is the
+     * compatibility behavior used here; TradingView execution is not run by
+     * this harness.
+     */
+    iff(condition: any, a: any, b: any) {
+        const cond = Series.from(condition).get(0);
+        return cond ? a : b;
+    }
+    /**
+     * Formula-only helper selected statically by the v4 lowering for the
+     * legacy `rsi(series, series)` overload. It performs no dispatch and is
+     * never injected for v5/v6 sources.
+     */
+    v4RsiLegacy(source: any, length: any) {
+        const value = Series.from(source).get(0);
+        const ratio = Series.from(length).get(0);
+        return this.context.precision(100 - 100 / (1 + value / ratio));
+    }
+
     private _acCounter: number = 0;
     private _acLastExecTick: number = -1;
     /** Per-callsite, per-bar dedup for alertcondition (prevents duplicate fires on live re-execution). */

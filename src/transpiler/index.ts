@@ -68,12 +68,15 @@ function getPineTSFromSource(source: string | Function): string {
         // Assume version-less source is PineTS syntax and parse it as-is first.
         return source;
     }
-    if (pineScriptVersion >= 5) {
+    if (pineScriptVersion >= 4) {
+        // Version 4 is accepted and lowered to the v5 builtin model inside
+        // pineToJS (v4LegacyLowering) — v4 sources take the exact same
+        // pipeline as v5, plus the version-gated legacy rewriting.
         const pineToJSResult = pineToJS(source);
         if (pineToJSResult.success) return pineToJSResult.code;
         throw new Error(`Failed to transpile Pine Script version ${pineScriptVersion}: ${pineToJSResult.error}`);
     }
-    throw new Error(`Unsupported Pine Script version ${pineScriptVersion}. Only version 5 and above are supported.`);
+    throw new Error(`Unsupported Pine Script version ${pineScriptVersion}. Only version 4 and above are supported.`);
 }
 
 export interface ParsedTranspilerSource {
@@ -133,7 +136,7 @@ export function transpile(source: string | Function, options: { debug: boolean; 
     normalizeNativeImports(ast);
 
     // Pre-process: Inject implicit imports for missing context variables
-    injectImplicitImports(ast);
+    injectImplicitImports(ast, pineVersion);
 
     const scopeManager = new ScopeManager();
 
