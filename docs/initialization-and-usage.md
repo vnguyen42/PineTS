@@ -496,21 +496,21 @@ use `run()` / `update()`.
 **The chart type is the ticker.** To run a script "on a Heikin Ashi chart", construct PineTS with an **extended ticker** — the plain symbol plus a chart-type modifier suffix:
 
 ```javascript
-const pineTS = new PineTS(myHaAwareSource, 'BTCUSDT;heikinashi', 'D', 500);
+const pineTS = new PineTS(myProvider, 'BTCUSDT;heikinashi', 'D', 500);
 ```
 
 Everything derives from that one setting:
 
 -   `chart.is_heikinashi` is `true` (and `chart.is_standard` is `false`);
 -   `syminfo.tickerid` carries the modifier (`"BINANCE:BTCUSDT;heikinashi"`), while `syminfo.ticker` stays clean;
--   `request.security(syminfo.tickerid, tf, expr)` requests **chart-typed** data from the data source, and `request.security(ticker.standard(syminfo.tickerid), tf, expr)` explicitly requests **standard** data — including at the chart's own timeframe.
+-   `request.security(syminfo.tickerid, tf, expr)` returns **chart-typed** (Heikin Ashi) values, and `request.security(ticker.standard(syminfo.tickerid), tf, expr)` explicitly requests **standard** values — including at the chart's own timeframe.
 
-**PineTS never transforms bars.** The extended ticker is a *routing marker*, not a conversion request:
+**The engine owns the transform.** The extended ticker is engine routing metadata, and PineTS materializes the deterministic Heikin-Ashi bars itself (TradingView semantics: `haClose = (O+H+L+C)/4`, `haOpen = (haOpen[1]+haClose[1])/2` with first-bar `(O+C)/2`, `haHigh = max(H, haOpen, haClose)`, `haLow = min(L, haOpen, haClose)`, warmup from the first feed candle):
 
--   A **host data source that owns the transform** (e.g. a charting library embedding PineTS and serving Heikin Ashi views) receives the extended ticker verbatim from `getMarketData()` / `getSymbolInfo()` and must serve the derived bars for it — and raw bars for the plain symbol.
--   PineTS' **bundled providers** (Binance, Alpaca, FMP, Mock) strip the modifier at their boundary and always serve standard candles — so on a bundled provider the extended ticker is a documented no-op (the chart *reports* Heikin Ashi but runs on standard data).
+-   Providers always receive the **base ticker** (modifier stripped) from `getMarketData()` / `getSymbolInfo()` and serve **standard candles** — including custom `IProvider` implementations. A source that used to pre-transform Heikin Ashi bars for `";heikinashi"` requests must stop (breaking change, see CHANGELOG).
+-   PineTS' **bundled providers** (Binance, Alpaca, FMP, Mock) behave exactly the same: standard candles in, standard candles out; the Heikin Ashi view is applied by the engine.
 
-Consequently, a consistent standalone Heikin Ashi run requires a data source that distinguishes `"SYM;heikinashi"` from `"SYM"`. Renko / Kagi / Line Break / Point & Figure have no such source and remain unsupported (`chart.is_renko` etc. are always `false`; `ticker.renko()` etc. return the plain symbol).
+Consequently, a standalone Heikin Ashi run needs no special data source — any standard-candle provider works. Renko / Kagi / Line Break / Point & Figure remain unsupported (`chart.is_renko` etc. are always `false`; `ticker.renko()` etc. return the plain symbol).
 
 ---
 

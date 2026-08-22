@@ -2,7 +2,7 @@
 // Copyright (C) 2026 LuxAlgo
 import { IProvider, ISymbolInfo } from './marketData/IProvider';
 import { Context } from './Context.class';
-import { splitTickerModifier, withTickerModifier } from './tickerModifier';
+import { splitTickerModifier, stripTickerModifier, transformHeikinAshi, transformHeikinAshiCandle, withTickerModifier } from './tickerModifier';
 import { Series } from './Series';
 import { Indicator } from './Indicator';
 import { processStrategyOrders, processExitOrders, processMarginCall, finalizeStrategyBar, finalizeStrategyRun, isAdverseFirstBar, applyPendingCloseMarginCall, snapshotStrategyState, restoreStrategyState } from './namespaces/strategy/utils';
@@ -72,6 +72,12 @@ export class PineTS {
     private _currentIndicator: Indicator | null = null;
 
     private _isSecondaryContext: boolean = false;
+
+    /** Whether this context's ticker requests Heikin-Ashi candles. */
+    private _isHeikinAshi: boolean = false;
+
+    /** The provider-facing ticker: chart-type modifiers stripped — the engine owns the transform. */
+    private _providerTickerId: string = '';
     public markAsSecondary() {
         this._isSecondaryContext = true;
     }
@@ -219,9 +225,11 @@ export class PineTS {
         private sDate?: number,
         private eDate?: number,
     ) {
+        this._isHeikinAshi = splitTickerModifier(String(tickerId ?? '')).modifier === 'heikinashi';
+        this._providerTickerId = stripTickerModifier(String(tickerId ?? ''));
         this._readyPromise = new Promise((resolve) => {
-            this.loadMarketData(source, tickerId, timeframe, limit, sDate, eDate).then((data) => {
-                const marketData = data;
+            this.loadMarketData(source, this._providerTickerId, timeframe, limit, sDate, eDate).then((data) => {
+                const marketData = this._isHeikinAshi ? transformHeikinAshi(data) : data;
 
                 //this._periods = marketData.length;
                 this.data = marketData;
@@ -258,7 +266,7 @@ export class PineTS {
 
                 if (source && (source as IProvider).getSymbolInfo) {
                     const symbolInfo = (source as IProvider)
-                        .getSymbolInfo(tickerId)
+                        .getSymbolInfo(this._providerTickerId)
                         .then((symbolInfo) => {
                             this._syminfo = symbolInfo;
                             this._ready = true;
@@ -747,7 +755,7 @@ export class PineTS {
 
         try {
             // Fetch new data starting from the last candle's open time
-            const newData = await provider.getMarketData(this.tickerId!, this.timeframe!, undefined, lastCandleOpenTime, eDate);
+            const newData = await provider.getMarketData(this._providerTickerId, this.timeframe!, undefined, lastCandleOpenTime, eDate);
 
             if (!newData || newData.length === 0) {
                 return { newCandles: 0, updatedLastCandle: false };
@@ -785,18 +793,21 @@ export class PineTS {
      * @private
      */
     private _replaceCandle(index: number, candle: any): void {
-        this.data[index] = candle;
-        this.open[index] = candle.open;
-        this.close[index] = candle.close;
-        this.high[index] = candle.high;
-        this.low[index] = candle.low;
-        this.volume[index] = candle.volume;
-        this.hl2[index] = (candle.high + candle.low) / 2;
-        this.hlc3[index] = (candle.high + candle.low + candle.close) / 3;
-        this.ohlc4[index] = (candle.high + candle.low + candle.open + candle.close) / 4;
-        this.hlcc4[index] = (candle.high + candle.low + candle.close + candle.close) / 4;
-        this.openTime[index] = candle.openTime;
-        this.closeTime[index] = candle.closeTime;
+        const materialized = this._isHeikinAshi
+            ? transformHeikinAshiCandle(candle, index > 0 ? this.data[index - 1] : undefined)
+            : candle;
+        this.data[index] = materialized;
+        this.open[index] = materialized.open;
+        this.close[index] = materialized.close;
+        this.high[index] = materialized.high;
+        this.low[index] = materialized.low;
+        this.volume[index] = materialized.volume;
+        this.hl2[index] = (materialized.high + materialized.low) / 2;
+        this.hlc3[index] = (materialized.high + materialized.low + materialized.close) / 3;
+        this.ohlc4[index] = (materialized.high + materialized.low + materialized.open + materialized.close) / 4;
+        this.hlcc4[index] = (materialized.high + materialized.low + materialized.close + materialized.close) / 4;
+        this.openTime[index] = materialized.openTime;
+        this.closeTime[index] = materialized.closeTime;
     }
 
     /**
@@ -804,18 +815,21 @@ export class PineTS {
      * @private
      */
     private _appendCandle(candle: any): void {
-        this.data.push(candle);
-        this.open.push(candle.open);
-        this.close.push(candle.close);
-        this.high.push(candle.high);
-        this.low.push(candle.low);
-        this.volume.push(candle.volume);
-        this.hl2.push((candle.high + candle.low) / 2);
-        this.hlc3.push((candle.high + candle.low + candle.close) / 3);
-        this.ohlc4.push((candle.high + candle.low + candle.open + candle.close) / 4);
-        this.hlcc4.push((candle.high + candle.low + candle.close + candle.close) / 4);
-        this.openTime.push(candle.openTime);
-        this.closeTime.push(candle.closeTime);
+        const materialized = this._isHeikinAshi
+            ? transformHeikinAshiCandle(candle, this.data[this.data.length - 1])
+            : candle;
+        this.data.push(materialized);
+        this.open.push(materialized.open);
+        this.close.push(materialized.close);
+        this.high.push(materialized.high);
+        this.low.push(materialized.low);
+        this.volume.push(materialized.volume);
+        this.hl2.push((materialized.high + materialized.low) / 2);
+        this.hlc3.push((materialized.high + materialized.low + materialized.close) / 3);
+        this.ohlc4.push((materialized.high + materialized.low + materialized.open + materialized.close) / 4);
+        this.hlcc4.push((materialized.high + materialized.low + materialized.close + materialized.close) / 4);
+        this.openTime.push(materialized.openTime);
+        this.closeTime.push(materialized.closeTime);
     }
 
     /**
@@ -1083,12 +1097,12 @@ export class PineTS {
         context.pine.syminfo = this._syminfo;
         // THE CHART TYPE IS THE TICKER (single source of truth): a non-standard chart is
         // addressed by an extended ticker — `new PineTS(source, "SYM;heikinashi", …)` — so
-        // the data source can distinguish the chart series from standard-data requests.
+        // the provider fetches the underlying standard feed while the constructor
+        // materializes the chart-type view before this context is initialized.
         // Everything else derives from that modifier here: `context.chartStyle` (behind
         // `chart.is_*`) and the `syminfo.tickerid` suffix (a CLONE — the provider's cached
         // syminfo object, which is always modifier-free since providers strip, must stay
-        // untouched). PineTS never transforms bars: the source of an extended ticker is
-        // expected to serve the chart-type view already.
+        // untouched).
         const chartModifier = splitTickerModifier(String(this.tickerId ?? '')).modifier;
         context.chartStyle = chartModifier === 'heikinashi' ? 'heikinashi' : 'standard';
         if (this._syminfo && chartModifier === 'heikinashi') {

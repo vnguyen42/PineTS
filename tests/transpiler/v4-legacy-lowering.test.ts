@@ -49,6 +49,11 @@ describe('V4 legacy builtin lowering (call position → v5 namespaces)', () => {
         expect(code).toContain('request.security(syminfo.tickerid, \'D\', close)');
         expect(code).not.toMatch(/(?<!\.)\bsecurity\(/);
     });
+    it('maps the v4 heikinashi ticker modifier to ticker.heikinashi', () => {
+        const code = codeOf('a = heikinashi(syminfo.tickerid)\nplot(close)');
+        expect(code).toContain('ticker.heikinashi(syminfo.tickerid)');
+        expect(code).not.toMatch(/(?<!\.)\bheikinashi\(/);
+    });
 
     it('keeps v4 single-argument forms (highest/change) — engine handles the callId swap', () => {
         const code = codeOf('a = highest(20)\nb = lowest(5)\nc = change(close)\nplot(a)');

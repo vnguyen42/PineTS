@@ -15,12 +15,12 @@ import { splitTickerModifier, stripTickerModifier, withTickerModifier } from '..
  * CHART-TYPE modifiers travel as an EXTENDED-TICKER suffix
  * (`"BINANCE:BTCUSDT;heikinashi"` — see `tickerModifier.ts`):
  * `ticker.heikinashi()` appends it, `ticker.standard()` strips it, and
- * `request.security` passes it through to the data source untouched. An
- * embedding host that owns the transform honors it; PineTS' own bundled
- * providers serve standard candles only and strip it at their boundary
- * (documented no-op for standalone use). The other non-standard types
- * (Renko, Kagi, Line Break, Point & Figure) remain plain-symbol stubs —
- * no data source we route to can construct those bars.
+ * `request.security` passes it through to the data source untouched. Bundled
+ * providers fetch standard candles and strip the marker at their boundary;
+ * PineTS materializes the deterministic Heikin-Ashi candles for contexts
+ * carrying the modifier. The other non-standard types (Renko, Kagi, Line
+ * Break, Point & Figure) remain plain-symbol stubs — no data source we route
+ * to can construct those bars.
  *
  * For the plain "no-modifier" cases — which cover virtually every
  * real-world Pine script — the returned tickerid strings match
@@ -107,10 +107,8 @@ export class Ticker {
      *
      * Returns the symbol with the Heikin-Ashi chart-type modifier
      * appended (`"BINANCE:BTCUSDT;heikinashi"`). `request.security`
-     * passes it through to the data source: an embedding host that owns
-     * the Heikin-Ashi transform serves derived bars; PineTS' own bundled
-     * providers strip the modifier and serve standard candles (documented
-     * standalone limitation). Idempotent on already-modified tickers.
+     * routes the marker to a context whose standard feed is transformed into
+     * derived Heikin-Ashi candles. Idempotent on already-modified tickers.
      */
     heikinashi(symbol: any): string {
         return withTickerModifier(this._coerce(symbol), 'heikinashi');

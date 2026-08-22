@@ -26,7 +26,7 @@ parent: API Coverage
 
 Non-standard chart types travel **in the ticker id** as a `";modifier"` suffix (the *extended ticker*): `"BINANCE:BTCUSDT;heikinashi"`. This is PineTS' equivalent of TradingView's encoded chart-type ticker IDs, and it is the **single source of truth** for the chart type (see [Chart](chart.html)):
 
-- **`ticker.heikinashi(sym)`** → `"sym;heikinashi"` (idempotent). Passed to `request.security`, the extended ticker rides through to the data source: a host data source that owns the Heikin Ashi transform serves derived bars; PineTS' **bundled providers strip the modifier** and serve standard candles (standalone no-op — PineTS never synthesises bars).
+- **`ticker.heikinashi(sym)`** → `"sym;heikinashi"` (idempotent). Passed to `request.security`, the extended ticker selects the engine-owned Heikin Ashi transform: providers are always called with the base ticker and serve standard candles, and PineTS materializes the deterministic Heikin Ashi bars itself (TradingView semantics, verified against a TV oracle capture). Hosts that previously pre-transformed Heikin Ashi bars must stop (breaking change, see CHANGELOG).
 - **`ticker.standard(sym?)`** → strips any chart-type modifier. On a Heikin Ashi chart, `ticker.standard(syminfo.tickerid)` turns `"…;heikinashi"` back into the plain ticker, so the request fetches STANDARD candles (the opt-out).
 - **`ticker.inherit(from, sym)`** → propagates the chart-type modifier from `from` onto `sym` (`inherit(syminfo.tickerid, "ETHUSDT")` on an HA chart → `"ETHUSDT;heikinashi"`). Other modifier kinds (session, adjustment) are dropped, as before.
 

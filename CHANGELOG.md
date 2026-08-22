@@ -1,5 +1,20 @@
 # Change Log
 
+## [Unreleased] - 2026-08-22 - Heikin-Ashi Transform (VIN-92)
+
+### Changed (BREAKING)
+
+- **The engine now owns the Heikin-Ashi transform.** Previously `";heikinashi"` was pure routing metadata: PineTS never transformed bars, and a data source that owned the transform (an embedding host) was expected to serve derived bars for the extended ticker (`docs/data-providers.md`, CHANGELOG 0.9.29). PineTS now strips chart-type modifiers from the ticker BEFORE any provider call (`getMarketData`, `getSymbolInfo`, streaming updates) and materializes the deterministic TradingView Heikin-Ashi transform itself on the standard candles it receives (`haClose = (O+H+L+C)/4`, `haOpen = (haOpen[1]+haClose[1])/2` with first-bar `(O+C)/2`, `haHigh = max(H, haOpen, haClose)`, `haLow = min(L, haOpen, haClose)`, warmup from the first feed candle). **Hosts that pre-transformed Heikin-Ashi bars must stop** — they would now be double-transformed. This is an assumed breaking change for the standalone host path.
+- **v4 `heikinashi(tickerid)` now lowers to `ticker.heikinashi(tickerid)`** (previously a runtime `ReferenceError`).
+- **v5 `ticker.heikinashi()` is no longer a no-op**: `request.security(ticker.heikinashi(syminfo.tickerid), …)` now returns real Heikin-Ashi values instead of the raw standard candles under a Heikin-Ashi label (verified against a TradingView oracle capture, VIN-92, script 1622: 41/41 trades in the exact captured window match; deep-history comparison ECART_MINOR).
+
+### Added
+
+- **`transformHeikinAshi` / `transformHeikinAshiCandle`** in `src/tickerModifier.ts` (exported): the immutable candle transform, reused by the constructor, streaming `_replaceCandle`/`_appendCandle`, and the `security()` secondary-context path.
+- **Tests**: manual 5-candle hand-computed values (first-bar rule + recurrence), v5 `ticker.heikinashi` security path on a manual feed, v4 lowering of the bare `heikinashi` builtin, and provider-boundary stripping (single-transform contract).
+
+---
+
 ## [0.9.31] - 2026-08-12 - Input Source Runtime Overrides
 
 ### Fixed

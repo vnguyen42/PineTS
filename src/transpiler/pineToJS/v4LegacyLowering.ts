@@ -45,6 +45,7 @@
 // Value-position builtins: tr 26/20, obv 4/2, vwap 3/2.
 //   str.*         : tostring 337/25, tonumber 1/1
 //   request.*     : security 241/41
+//   ticker.*      : heikinashi 35/12
 //   runtime iff   : iff 102/28 — NOT rewritten here. v4 `iff(cond, a, b)`
 //                   evaluates BOTH branches; the runtime helper added to
 //                   `context.pine.iff` (Core.iff) receives already-evaluated
@@ -52,11 +53,10 @@
 //                   CONTEXT_PINE_VARS entry makes the implicit destructure
 //                   emit `const { iff } = $.pine`, so bare `iff(...)` calls
 //                   resolve to the helper like `nz`/`na` do.
-//
 // NOT mapped (engine target absent — left to crash with today's
 // ReferenceError, per contract "ne pas inventer") :
-//   heikinashi 35/12, renko 5/4 — v5 equivalents request.heikinashi/
-//   request.renko are not implemented in the PineTS runtime.
+//   renko 5/4 — v5 equivalent `ticker.renko` is not implemented in the
+//   PineTS runtime.
 //
 // Arity notes (engine already accepts the v4 forms; no argument rewrite):
 //   - ta.highest/ta.lowest/ta.change support the v4 single-argument forms
@@ -142,6 +142,8 @@ const LEGACY_CALL_TARGETS: Record<string, NamespaceTarget> = {
     tostring: { ns: 'str', name: 'tostring' },
     tonumber: { ns: 'str', name: 'tonumber' },
     // request.* data requests
+    // ticker.* chart-type modifiers
+    heikinashi: { ns: 'ticker', name: 'heikinashi' },
     security: { ns: 'request', name: 'security' },
 };
 // V4 built-ins also used as bare values in this corpus. They are lowered to

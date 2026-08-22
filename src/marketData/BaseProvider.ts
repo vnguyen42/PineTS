@@ -154,9 +154,10 @@ export abstract class BaseProvider<TConfig extends BaseProviderConfig = BaseProv
         sDate?: number,
         eDate?: number,
     ): Promise<Kline[]> {
-        // Extended-ticker chart-type modifiers (";heikinashi") are honored only by data
-        // sources that own the transform; bundled providers serve STANDARD candles, so the
-        // modifier is stripped here — the venue APIs must never see it.
+        // Extended-ticker chart-type modifiers are PineTS-owned after the provider
+        // boundary: bundled providers fetch STANDARD candles, so strip the marker
+        // before sending the ticker to the venue. PineTS materializes any derived
+        // chart view (currently Heikin-Ashi) after this fetch.
         tickerId = stripTickerModifier(tickerId);
         const normalizedTf = normalizeTimeframeKey(timeframe);
         const supported = this.getSupportedTimeframes();

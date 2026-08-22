@@ -422,9 +422,9 @@ Provider['MyProvider'] = new MyProvider();
 
 A ticker may carry a chart-type modifier suffix — `"BTCUSDT;heikinashi"` (see [Non-Standard Chart Types](initialization-and-usage.html#non-standard-chart-types-heikin-ashi)). The contract at the provider boundary:
 
--   **Providers extending `BaseProvider`** never see the modifier in `getMarketData()` — the base class strips it, because a venue API serves standard candles only. Strip it likewise at the top of your `getSymbolInfo()` (all bundled providers do): `tickerId = stripTickerModifier(tickerId)` (exported from `pinets`).
--   **A source that OWNS a chart-type transform** (typically an embedding host implementing `IProvider` directly, not via `BaseProvider`) receives the extended ticker verbatim and must serve the derived bars for `"SYM;heikinashi"` and raw bars for `"SYM"` — the modifier is the only thing distinguishing the two requests.
--   **PineTS itself never transforms bars** — the modifier is routing metadata, end to end.
+-   **The engine owns the transform.** PineTS strips chart-type modifiers from the ticker BEFORE any provider call (`getMarketData`, `getSymbolInfo`, streaming updates) and materializes the derived chart view itself (currently the deterministic Heikin-Ashi transform) on the standard candles it receives. Providers — whether extending `BaseProvider` or implementing `IProvider` directly — always serve and receive STANDARD tickers. `stripTickerModifier` is still exported for providers that want to be defensive.
+-   **Hosts that pre-transformed** Heikin-Ashi bars for `"SYM;heikinashi"` requests MUST stop: the engine now transforms once, and a provider serving pre-transformed bars would be double-transformed (breaking change vs the pre-VIN-92 routing-only contract).
+-   **PineTS itself never passes the modifier to a data source** — it is engine-owned routing metadata.
 
 ---
 
