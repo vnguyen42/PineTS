@@ -1,15 +1,25 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright (C) 2026 LuxAlgo
 
-import { calculateOrderQty, parseDirection, wouldExceedPyramiding, roundToMintick } from '../utils';
+import { calculateOrderQty, parseDirection, parseEntryDirection, wouldExceedPyramiding, roundToMintick } from '../utils';
 import { Order } from '../types';
 import { Series } from '../../../Series';
 import { parseArgsForPineParams } from '../../utils';
 
 /**
  * Pine signature:
- *   strategy.entry(id, direction, qty, limit, stop, oca_name, oca_type,
- *                  comment, alert_message, disable_alert) → void
+ *   v4: strategy.entry(id, long, qty, limit, stop, oca_name, oca_type, comment, when) → void
+ *   v5: strategy.entry(id, direction, qty, limit, stop, oca_name, oca_type, comment,
+ *                      alert_message, disable_alert, when) → void
+ *
+ * The v4 `long` parameter is a `series bool` (true = long, false = short) and
+ * also accepts the legacy int idiom `1`/`0` and the v4 bool-like constants
+ * strategy.long/strategy.short. Translation is TYPE-based (see
+ * parseEntryDirection): booleans and 0/1 are the v4 forms, 'long'/'short'
+ * strings are the v5 direction constants — a v5 call can never produce a
+ * boolean in that slot, so the v5 path is untouched. Named `long=` arrives in
+ * the trailing options bag as `parsed.long` (the transpiler collects named
+ * args); positional forms land in `parsed.direction`.
  *
  * Differences vs strategy.order:
  *   - Respects the strategy() declaration's `pyramiding` cap (no-op when
@@ -55,16 +65,45 @@ export function entry(context: any) {
         if (!whenValue) return;
 
         const idValue       = extractValue(parsed.id);
-        const directionVal  = extractValue(parsed.direction);
+        // Direction translation (VIN-91). The v4 legacy parameter is only
+        // active when the transpiled source declares //@version=4:
+        //   - named `long=<bool>`: the transpiler collects named args into a
+        //     trailing options bag, so `long=` arrives as `parsed.long`;
+        //   - positional 2nd slot: bool true/false or legacy int 1/0.
+        // v5 uses `direction` and strategy.long/strategy.short strings. Its
+        // invalid bool/long forms must not be silently accepted as v4.
+        const isV4 = context.pineVersion === 4;
+        const hasNamedLong = isV4 && Object.prototype.hasOwnProperty.call(parsed, 'long');
+        if (Object.prototype.hasOwnProperty.call(parsed, 'short')) {
+            throw new Error(
+                'strategy.entry(): paramètre `short=` non supporté — v4 n\'a pas de paramètre short= (utiliser long=false) ; ' +
+                'v5 utilise direction=strategy.short',
+            );
+        }
+        const directionVal = hasNamedLong
+            ? extractValue(parsed.long)
+            : extractValue(parsed.direction);
+        if (directionVal === undefined) {
+            throw new Error('strategy.entry: direction is required');
+        }
+        const dir = isV4
+            ? parseEntryDirection(directionVal)
+            : parseDirection(directionVal);
+        if (dir === 0) {
+            throw new Error(
+                `strategy.entry(): direction non traduisible (${JSON.stringify(directionVal)}). ` +
+                (isV4
+                    ? 'v4 attend long=true/false ou 1/0 ; v5 attend strategy.long/strategy.short'
+                    : 'v5 attend strategy.long/strategy.short'),
+            );
+        }
+        const strategy = context.strategy;
         const qtyValue      = extractValue(parsed.qty);
         const limitValue    = extractValue(parsed.limit);
         const stopValue     = extractValue(parsed.stop);
         const ocaName       = extractValue(parsed.oca_name);
         const ocaType       = extractValue(parsed.oca_type);
         const commentValue  = extractValue(parsed.comment);
-
-        const dir = parseDirection(directionVal);
-        const strategy = context.strategy;
         // [HYPOTHÈSE] Same-direction, same-ID orders coexist only while flat,
         // pyramiding has a free slot, and the price definition changes.
         // Otherwise this implementation modifies one pending order. TV's

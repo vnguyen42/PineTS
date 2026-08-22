@@ -667,6 +667,35 @@ export function parseDirection(direction: number | string): number {
 }
 
 /**
+ * Translate the legacy v4 direction value for strategy.entry().
+ *
+ * Pine v4 declares the direction parameter as `long: series bool` (named
+ * `long=`); Pine v5+ renamed it to `direction: series const string`
+ * (strategy.long / strategy.short). The caller gates this helper on
+ * `context.pineVersion === 4`; v5 strings continue through parseDirection()
+ * unchanged. The transpiler collects named arguments into a trailing
+ * options bag, so v4 `long=<value>` arrives as a bag key while v4's
+ * positional bool/int arrives in the `direction` slot:
+ *   - boolean true/false → +1/-1   (`long=true` / `long=false`)
+ *   - number 1 → +1, 0 → -1       (legacy int idiom `entry("L", 1)`)
+ *   - 'long' / 'short' → +1/-1    (v4 bool-like constants as represented by
+ *                                  the fork runtime)
+ *   - anything else (na, objects, 'all', …) → 0 → explicit caller error;
+ *     no dir=0/qty=0 ghost order is enqueued.
+ */
+export function parseEntryDirection(raw: unknown): number {
+    if (typeof raw === 'boolean') return raw ? 1 : -1;
+    if (typeof raw === 'number') {
+        if (Number.isNaN(raw)) return 0; // Pine `na` in the direction slot
+        if (raw === 1) return 1;
+        if (raw === 0 || raw === -1) return -1;
+        return 0;
+    }
+    if (typeof raw === 'string') return parseDirection(raw);
+    return 0;
+}
+
+/**
  * Charge commission for one fill leg (entry OR exit) given the qty filled and
  * the price at fill. Returns the dollar amount to deduct.
  *
