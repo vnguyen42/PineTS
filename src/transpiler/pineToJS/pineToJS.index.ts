@@ -64,8 +64,10 @@ export function pineToJS(sourceCode: string, options: any = {}) {
         const lexer = new Lexer(sourceCode);
         const tokens = lexer.tokenize();
 
-        // Step 2: Parse to AST
-        const parser = new Parser(tokens);
+        // Step 2: Parse to AST (the parser gates version-specific syntax
+        // tolerance on the detected Pine version, e.g. the v4-only comma
+        // statement sequence spanning a var declaration).
+        const parser = new Parser(tokens, version);
         const ast = parser.parse();
 
         // Step 2b: v4-only lowering — rewrite legacy flat builtins in call
@@ -80,8 +82,10 @@ export function pineToJS(sourceCode: string, options: any = {}) {
             lowerV4InputCalls(ast);
         }
 
-        // Step 3: Generate JavaScript (pass source code for comments)
-        const codegenOptions = { ...options, sourceCode };
+        // Step 3: Generate JavaScript (pass source code for comments and the
+        // detected Pine version — codegen gates v4-only identifier renaming
+        // on it, e.g. `return` as a legal v4 identifier).
+        const codegenOptions = { ...options, sourceCode, version };
         const codegen = new CodeGenerator(codegenOptions);
         const jsCode = codegen.generate(ast);
 

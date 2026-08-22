@@ -24,10 +24,14 @@ export class CodeGenerator {
     // destructuring). Later `_` occurrences are renamed to unique bindings
     // (see writeArrayPatternElements).
     private discardSeen: boolean;
+    // Pine script version of the transpiled source (null when unknown/forced).
+    // Gates version-specific identifier renaming (v4: `return` is a legal
+    // identifier, a keyword in v5+).
+    private pineVersion: number | null;
     // Maps user-defined function names to their ordered parameter names.
     // Used to resolve named arguments to correct positional slots.
     private functionParams: Map<string, string[]>;
-    constructor(options: { indentStr?: string; sourceCode?: string; includeSourceComments?: boolean } = {}) {
+    constructor(options: { indentStr?: string; sourceCode?: string; includeSourceComments?: boolean; version?: number | null } = {}) {
         this.indent = 0;
         this.indentStr = options.indentStr || '  ';
         this.output = [];
@@ -38,6 +42,7 @@ export class CodeGenerator {
         this.paramRenameCounter = 0;
         this.discardSeen = false;
         this.functionParams = new Map();
+        this.pineVersion = options.version ?? null;
     }
 
     generate(ast) {
@@ -116,9 +121,18 @@ export class CodeGenerator {
     /**
      * True if `name` requires renaming — either a Pine namespace collision
      * or a JS reserved keyword (which would make the generated JS invalid).
+     * `return` is a valid Pine v4 identifier that became reserved in v5:
+     * renaming is therefore STRICTLY gated on the source being v4 — v5/v6
+     * (and version-less/forced-v5) sources never reach this branch, keeping
+     * their generated JS byte-identical. Emitting a user variable named
+     * `return` as raw JS would be a SyntaxError ("Unexpected keyword
+     * 'return'"), so v4 declarations/reads are renamed like any other
+     * JS-reserved word.
      */
     private isReservedName(name: string | undefined): boolean {
-        return !!name && (NAMESPACE_COLLISION_NAMES.has(name) || JS_RESERVED_WORDS.has(name));
+        if (!name) return false;
+        if (this.pineVersion === 4 && name === 'return') return true;
+        return NAMESPACE_COLLISION_NAMES.has(name) || JS_RESERVED_WORDS.has(name);
     }
 
     /**
@@ -588,7 +602,14 @@ export class CodeGenerator {
         const paramRenameMap = new Map<string, string>();
         for (const param of node.params) {
             const paramName = param.type === 'AssignmentPattern' ? param.left.name : param.name;
-            if (paramName && CONFLICTING_NAMES.has(paramName)) {
+            // Version-gated reserved identifiers are legal Pine v4 names that
+            // would be invalid JS in parameter position (`function f(return)`
+            // → SyntaxError). CONFLICTING_NAMES alone misses them because it
+            // only tracks the Pine context variables. The check mirrors the
+            // codegen isReservedName gate but is restricted to the version-
+            // gated name — the blanket JS-reserved set is deliberately NOT
+            // applied here so v5/v6 sources keep their byte-identical output.
+            if (paramName && (CONFLICTING_NAMES.has(paramName) || (this.pineVersion === 4 && paramName === 'return'))) {
                 const newName = `${paramName}_$${this.paramRenameCounter++}`;
                 paramRenameMap.set(paramName, newName);
             }

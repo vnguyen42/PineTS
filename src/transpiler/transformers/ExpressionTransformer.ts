@@ -516,8 +516,42 @@ export function transformMemberExpression(memberNode: any, originalParamName: st
         if (!memberNode.object._transformed) {
             transformCallExpression(memberNode.object, scopeManager);
         }
+        const callCallee = memberNode.object.callee;
+        const isRequestSecurityCall =
+            callCallee?.type === 'MemberExpression' &&
+            callCallee.object?.type === 'Identifier' &&
+            callCallee.object.name === 'request' &&
+            callCallee.property?.type === 'Identifier' &&
+            ASYNC_METHODS.includes(`request.${callCallee.property.name}`);
         if (memberNode.property.type === 'CallExpression') {
             transformCallExpression(memberNode.property, scopeManager);
+        } else if (memberNode.property.type === 'Identifier' && !isRequestSecurityCall) {
+            // Variable index on a call result (`ta.highest(14)[check]`): the
+            // index must be scoped and unwrapped to its current scalar, or it
+            // escapes the context rename and fails at runtime with a
+            // ReferenceError (`check is not defined` — corpus 1708 L27). Loop
+            // variables are plain JS identifiers and stay raw; function
+            // parameters are hoisted and only need the scalar unwrap; global
+            // variables are context-bound (`$.let.glb1_*`).
+            //
+            // request.security results are resolved through a secondary
+            // context. Preserve its legacy raw offset handling: unwrapping a
+            // function parameter at this boundary changes request execution
+            // for the v5 corpus helper (1936) and turns its SILENT result into
+            // an unrelated runtime timeframe error.
+            const indexName = memberNode.property.name;
+            if (scopeManager.isLoopVariable(indexName)) {
+                // leave raw — loop variables are JS-scoped
+            } else if (scopeManager.isLocalSeriesVar(indexName)) {
+                const plain = ASTFactory.createIdentifier(indexName);
+                plain._skipTransformation = true;
+                memberNode.property = ASTFactory.createGetCall(plain, 0);
+            } else if (scopeManager.getCurrentScopeType() === 'if') {
+                // Context-bound indexes are the v4 if-condition regression
+                // being fixed (corpus 1708). Outside an if scope, preserve
+                // the existing history-offset behavior.
+                memberNode.property = createScopedVariableAccess(indexName, scopeManager);
+            }
         }
         const paramId = scopeManager.generateParamId();
         const paramCall = {

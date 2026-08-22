@@ -40,6 +40,12 @@ import {
 export class Parser {
     private tokens: Token[];
     private pos: number;
+    // Pine script version of the parsed source (null when unknown/forced).
+    // Gates version-specific syntax tolerance: the comma-separated statement
+    // sequence spanning a var declaration (`var x = label(na), stmt2, …`) is
+    // accepted ONLY for v4 (corpus 1547/1633) — v5/v6 keep rejecting it with
+    // the pre-existing "Unexpected token COMMA" (byte-identical to HEAD).
+    private pineVersion: number | null;
     private functionNames: Set<string> = new Set();
     // Names of user variables that were actually renamed to `<name>_var` at a
     // declaration site because they shadow a user function. References are
@@ -59,9 +65,10 @@ export class Parser {
     // Used inside single-line switch case bodies to prevent binary operator
     // continuation from absorbing the next case's negative test value.
     private noLineContinuation: boolean = false;
-    constructor(tokens: Token[]) {
+    constructor(tokens: Token[], pineVersion?: number | null) {
         this.tokens = tokens;
         this.pos = 0;
+        this.pineVersion = pineVersion ?? null;
         this.preScanFunctionNames();
     }
 
@@ -1260,9 +1267,28 @@ export class Parser {
             return new ExpressionStatement(new Identifier(keyword));
         }
 
-        // Check for var/varip declarations (can appear in function bodies)
+        // Check for var/varip declarations (can appear in function bodies).
+        // `sequenceItems` is declared here so the var branch can fall through
+        // into the shared sequence loop below on a trailing comma.
+        const sequenceItems = [];
         if (this.match(TokenType.KEYWORD, 'var') || this.match(TokenType.KEYWORD, 'varip')) {
-            return this.parseVarDeclaration();
+            const stmt = this.parseVarDeclaration();
+            // Comma-separated statement sequence continuation: Pine v4 allows
+            // `var x = label(na), stmt2, stmt3` — a statement sequence
+            // spanning the var declaration (corpus: 1547 L300, 1633 L307).
+            // parseVarDeclaration only absorbs `, var y = ...` multi-
+            // declarations; a trailing comma with a NON-var continuation
+            // falls through to the sequence loop below, mirroring the
+            // top-level parseStatement tail.
+            // STRICTLY gated on version 4: v5/v6 sources keep their pre-fix
+            // "Unexpected token COMMA" rejection (byte-identical to HEAD).
+            if (this.pineVersion !== 4 || !this.match(TokenType.COMMA)) {
+                return stmt;
+            }
+            this.advance(); // consume comma
+            this.skipNewlines();
+            sequenceItems.push(stmt);
+            // fall through to the shared sequence loop
         }
 
         // Tuple destructuring [a, b] = ...
@@ -1311,8 +1337,6 @@ export class Parser {
 
         // Try to parse as sequence (assignment, assignment, ..., expression)
         // This handles: mean = ta.sma(...), sd = ta.stdev(...), (source - mean) / sd
-        const sequenceItems = [];
-
         while (true) {
             // Parse one item (could be assignment or expression)
             const expr = this.parseExpression();
