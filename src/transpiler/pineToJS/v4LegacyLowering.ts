@@ -141,6 +141,9 @@ const LEGACY_CALL_TARGETS: Record<string, NamespaceTarget> = {
     // str.* formatting
     tostring: { ns: 'str', name: 'tostring' },
     tonumber: { ns: 'str', name: 'tonumber' },
+    // v4 natural-log alias exercised with a user variable of the same name.
+    // Function and variable namespaces are separate in Pine v4.
+    ln: { ns: 'math', name: 'log' },
     // request.* data requests
     // ticker.* chart-type modifiers
     heikinashi: { ns: 'ticker', name: 'heikinashi' },
@@ -405,6 +408,45 @@ function inferFunctionParamKinds(node: unknown, functionParams: ReadonlyMap<stri
 
 
 /**
+ * v4's `security(..., resolution=...)` named parameter was renamed to
+ * `timeframe` in v5. The parser stores named arguments in an ObjectExpression,
+ * so consume this compatibility spelling here rather than widening the v5
+ * request.security runtime signature.
+ */
+function rewriteV4SecurityResolution(call: CallExpression): void {
+    const bag = [...(call.arguments ?? [])].reverse().find((arg: unknown) => {
+        if (!isPineNode(arg) || arg.type !== 'ObjectExpression' || !('properties' in arg)) return false;
+        return Array.isArray(arg.properties);
+    });
+    if (!bag || !('properties' in bag) || !Array.isArray(bag.properties)) return;
+    for (const property of bag.properties) {
+        if (!isPineNode(property) || property.type !== 'Property' || !('key' in property)) continue;
+        if (identifierName(property.key) === 'resolution') {
+            property.key = new Identifier('timeframe');
+        }
+    }
+}
+
+function deleteChildField(node: { type: string }, key: string): void {
+    const fields = node as unknown as Record<string, unknown>;
+    delete fields[key];
+}
+
+/**
+ * Pine v4's calculation-only `offset(series, n)` is the history operator
+ * equivalent `series[n]` in v5. Lower it before code generation so the
+ * existing history-index machinery owns dynamic index scoping.
+ */
+function rewriteV4OffsetCall(call: CallExpression): void {
+    const args = call.arguments ?? [];
+    if (args.length !== 2) return;
+    const replacement = new MemberExpression(args[0], args[1], true);
+    Object.assign(call, replacement);
+    deleteChildField(call, 'callee');
+    deleteChildField(call, 'arguments');
+}
+
+/**
  * Rewrite bare legacy builtin callees in call position into namespaced
  * member calls, skipping user-function-shadowed names.
  */
@@ -426,6 +468,11 @@ function rewriteLegacyCalls(node: unknown, userFunctions: ReadonlySet<string>, r
                     } else {
                         throw new Error('v4 rsi(series, series) overload: cannot statically resolve second argument');
                     }
+                } else if (name === 'security') {
+                    rewriteV4SecurityResolution(call);
+                    call.callee = new MemberExpression(new Identifier('request'), new Identifier('security'), false);
+                } else if (name === 'offset') {
+                    rewriteV4OffsetCall(call);
                 } else {
                     const target = LEGACY_CALL_TARGETS[name];
                     if (target) {

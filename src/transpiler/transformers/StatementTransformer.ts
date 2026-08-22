@@ -1367,6 +1367,20 @@ export function transformReturnStatement(node: any, scopeManager: ScopeManager):
                         }
                     },
                     MemberExpression(node: any, state: ScopeManager, c: any) {
+                        // The complex-return walker owns member nodes but does
+                        // not visit computed properties. Scope a user/context
+                        // variable history index here before the member
+                        // lowering, e.g. `return src[lookback]` in a ternary.
+                        if (node.computed && node.property?.type === 'Identifier') {
+                            const indexName = node.property.name;
+                            const [scopedName] = state.getVariable(indexName);
+                            const isKnownBinding =
+                                state.isContextBound(indexName) || scopedName !== indexName;
+                            if (isKnownBinding && !state.isRootParam(indexName) &&
+                                !state.isLoopVariable(indexName) && !state.isLocalSeriesVar(indexName)) {
+                                node.property = createScopedVariableAccess(indexName, state);
+                            }
+                        }
                         // walk.recursive's base visitor suppresses custom
                         // visitors for member-expression objects, so a nested
                         // chain like `self.signal.isNegative` would otherwise

@@ -87,6 +87,35 @@ plot(f(2))`);
         // fix — the identifier branch must not interfere with it.
         expect(code).toMatch(/\$\.param\([^)]*\)\s*,\s*1\)/);
     });
+    it('scopes a context-variable index in a function return ternary for v4 and v5', () => {
+        const body = `
+length = input(1)
+f() =>
+    c = close
+    true ? c[length] : na
+x = f()
+plot(x)`;
+        const v4Code = transpiledCode(body);
+        const v5Code = transpile(`//@version=5\nlength = input.int(1)\nf() =>\n    c = close\n    true ? c[length] : na\nx = f()\nplot(x)`).toString();
+        for (const code of [v4Code, v5Code]) {
+            expect(code).toContain('$.get($.let.glb1_length, 0)');
+            expect(code).not.toMatch(/,\s*length\)/);
+        }
+    });
+
+
+    it('keeps loop-variable history indexes raw inside a function body', () => {
+        const code = transpiledCode(`
+f() =>
+    sum = 0.0
+    for i = 1 to 10
+        sum := sum + close[i]
+    sum
+x = f()
+plot(x)`);
+        expect(code).toMatch(/\$\.get\(close,\s*i\)/);
+        expect(code).not.toMatch(/glb1_i\b/);
+    });
 
     it('runs the corpus 1708 if-condition pattern end-to-end (no ReferenceError)', async () => {
         const engine = new PineTS(makeBars(60), 'TEST', 'D');

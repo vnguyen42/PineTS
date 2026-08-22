@@ -49,6 +49,48 @@ describe('V4 legacy builtin lowering (call position → v5 namespaces)', () => {
         expect(code).toContain('request.security(syminfo.tickerid, \'D\', close)');
         expect(code).not.toMatch(/(?<!\.)\bsecurity\(/);
     });
+    it('maps v4 security resolution= to the v5 timeframe= slot', () => {
+        const code = codeOf('a = security(symbol=syminfo.tickerid, resolution="D", expression=close)\nplot(a)');
+        expect(code).toContain('timeframe: \'D\'');
+        expect(code).not.toContain('resolution:');
+    });
+
+    it('keeps a user ln variable while lowering the v4 ln() builtin', () => {
+        const code = codeOf('ln = input(1)\nx = ln(close)\nplot(x)');
+        expect(code).toContain('math.log(close)');
+        expect(code).not.toContain('ln(close)');
+    });
+
+    it('lowers v4 offset() despite a same-name user variable', () => {
+        const code = codeOf(`
+offset = input(0)
+off(s, o) =>
+    shifted = offset(s, o)
+    shifted
+x = off(close, 1)
+plot(x)
+`);
+        expect(code).toContain('s[o]');
+        expect(code).not.toContain('offset(s, o)');
+    });
+
+    it('keeps a USER FUNCTION named offset untouched (no builtin lowering)', () => {
+        const code = codeOf(`
+offset(s, o) => s + o
+x = offset(close, 1)
+plot(x)`);
+        expect(code).toContain('function offset(s, o)');
+        expect(code).toContain('offset(close, 1)');
+        expect(code).not.toContain('close[1]');
+    });
+
+    it('v5 sources keep security resolution= untouched (v4-only lowering)', () => {
+        const result = pineToJS('//@version=5\nx = request.security(syminfo.tickerid, resolution="D", close)\nplot(x)');
+        expect(result.success).toBe(true);
+        expect(result.code).toContain("resolution: 'D'");
+        expect(result.code).not.toContain('timeframe:');
+    });
+
     it('maps the v4 heikinashi ticker modifier to ticker.heikinashi', () => {
         const code = codeOf('a = heikinashi(syminfo.tickerid)\nplot(close)');
         expect(code).toContain('ticker.heikinashi(syminfo.tickerid)');
