@@ -255,20 +255,19 @@ export function calculateOrderQty(context: any, specifiedQty: number | undefined
         qtyValue = (qtyValue as Function)();
     }
 
-    // Pine's broker emulator truncates the computed qty to 6 decimal
-    // places. The precision is hardcoded — independent of the symbol's
-    // mincontract or pricescale. Truncation applies to every code path
-    // (specifiedQty, fixed, cash, percent_of_equity) so a downstream
-    // mark-to-market loop doesn't accumulate the sub-microscopic delta
-    // between the raw float and TV's reported size over many bars.
+    // Pine's broker emulator truncates computed quantities. The generic
+    // precision remains six decimals for explicit/fixed/cash quantities;
+    // percent_of_equity uses TV's five-decimal equity-sizing quantum.
     const QTY_PRECISION = 1e6;
-    const truncateQty = (q: number) => Math.floor(q * QTY_PRECISION) / QTY_PRECISION;
+    const PERCENT_QTY_PRECISION = 1e5;
+    const truncateQty = (q: number, precision = QTY_PRECISION) => Math.floor(q * precision) / precision;
 
     if (specifiedQty !== undefined && specifiedQty !== null) {
         return truncateQty(Math.abs(specifiedQty));
     }
 
     let rawQty: number;
+    let qtyPrecision = QTY_PRECISION;
     switch (qtyType) {
         case 'fixed':
             rawQty = qtyValue;
@@ -280,17 +279,22 @@ export function calculateOrderQty(context: any, specifiedQty: number | undefined
             break;
 
         case 'percent_of_equity': {
-            // Calculate quantity based on percentage of equity
-            // qty_value=10 means 10% of equity
+            // TradingView reserves the entry commission inside the requested
+            // equity notional. With commission_value=0.11%, for example:
+            // qty = equity * pct / (price * (1 + 0.0011)).
             const positionValue = (strategy.equity * qtyValue) / 100;
-            rawQty = positionValue / fillPrice;
+            const commissionRate = strategy.config.commission_type === 'percent'
+                ? (Number(strategy.config.commission_value) || 0) / 100
+                : 0;
+            rawQty = positionValue / (fillPrice * (1 + commissionRate));
+            qtyPrecision = PERCENT_QTY_PRECISION;
             break;
         }
 
         default:
             rawQty = qtyValue;
     }
-    return truncateQty(rawQty);
+    return truncateQty(rawQty, qtyPrecision);
 }
 
 /**
@@ -555,7 +559,6 @@ export function processStrategyOrders(context: any, phase: 'open' | 'close' = 'o
                 const oldSize = strategy.position_size;
                 const oldSign = Math.sign(oldSize);
                 const isReversal = oldSign !== 0 && oldSign !== direction;
-
                 // calc_on_order_fills mode: TV sizes percent_of_equity default
                 // orders at FILL ("position sizes will be calculated as a
                 // percentage of the available equity when the trade opens" —
@@ -573,9 +576,13 @@ export function processStrategyOrders(context: any, phase: 'open' | 'close' = 'o
                     if (qtyType === 'percent_of_equity') {
                         let qtyValue = strategy.config.default_qty_value ?? 1;
                         if (typeof qtyValue === 'function') qtyValue = (qtyValue as Function)();
-                        const QTY_PRECISION = 1e6;
+                        const commissionRate = strategy.config.commission_type === 'percent'
+                            ? (Number(strategy.config.commission_value) || 0) / 100
+                            : 0;
                         const positionValue = (strategy.equity * Number(qtyValue)) / 100;
-                        const baseQty = Math.floor((positionValue / fillPrice) * QTY_PRECISION) / QTY_PRECISION;
+                        const baseQty = Math.floor(
+                            (positionValue / (fillPrice * (1 + commissionRate))) * 1e5,
+                        ) / 1e5;
                         order._base_qty = baseQty;
                         order.qty = isReversal ? Math.abs(oldSize) + baseQty : baseQty;
                     }

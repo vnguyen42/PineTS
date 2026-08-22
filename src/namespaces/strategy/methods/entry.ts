@@ -165,9 +165,14 @@ export function entry(context: any) {
         // Determine the order qty. For a reversal (direction differs from
         // current position), Pine ADDS the absolute current position to the
         // requested qty so that one market order both flattens the prior
-        // position AND opens the new direction with the requested size.
+        // position AND opens a new one of the requested qty.
         const currentPrice = Series.from(context.data.close).get(0);
-        const baseQty = calculateOrderQty(context, qtyValue, dir, currentPrice);
+        const sizingPrice = stopValue !== undefined
+            ? stopValue
+            : limitValue !== undefined
+              ? limitValue
+              : currentPrice;
+        const baseQty = calculateOrderQty(context, qtyValue, dir, sizingPrice);
 
         // Flag orders whose qty came from the strategy() default under
         // percent_of_equity (no explicit qty argument). With

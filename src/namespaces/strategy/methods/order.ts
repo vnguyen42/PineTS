@@ -82,11 +82,16 @@ export function order(context: any) {
         const dir = parseDirection(directionVal);
 
         // Reference price for qty conversion (cash / percent_of_equity sizing).
-        // The order itself fills at the NEXT bar's open, but qty is locked in
-        // at the call site using the current close — matching TradingView's
-        // backtest accounting.
+        // Market orders use the signal bar's close; price-based orders use
+        // their declared execution level, which is the price TV uses when
+        // locking the default quantity.
         const currentPrice = Series.from(context.data.close).get(0);
-        const calculatedQty = calculateOrderQty(context, qtyValue, dir, currentPrice);
+        const sizingPrice = stopValue !== undefined
+            ? stopValue
+            : limitValue !== undefined
+              ? limitValue
+              : currentPrice;
+        const calculatedQty = calculateOrderQty(context, qtyValue, dir, sizingPrice);
 
         // Determine order type from which price levels are set.
         let orderType: 'market' | 'limit' | 'stop' | 'stop-limit' = 'market';
