@@ -3,7 +3,7 @@
 
 import * as walk from 'acorn-walk';
 import ScopeManager from '../analysis/ScopeManager';
-import { ASTFactory } from '../utils/ASTFactory';
+import { ASTFactory, CONTEXT_NAME } from '../utils/ASTFactory';
 import { transformIdentifier, transformCallExpression, transformMemberExpression, addArrayAccess } from './ExpressionTransformer';
 import {
     transformVariableDeclaration,
@@ -375,7 +375,72 @@ export function runTransformationPass(
             transformVariableDeclaration(node, state);
         },
         Identifier(node: any, state: ScopeManager) {
+            // Capture name + parent BEFORE transformIdentifier mutates
+            // `node` in place (Object.assign overwrites both on rewrites
+            // such as wrap-in-$.get).
+            const name = node.name;
+            const parent = node.parent;
+            const isUnary = parent && parent.type === 'UnaryExpression';
+            const isBinary = parent && parent.type === 'BinaryExpression';
+            const isLogical = parent && parent.type === 'LogicalExpression';
+            const isConditional = parent && parent.type === 'ConditionalExpression';
+
             transformIdentifier(node, state);
+
+            // Context-bound data vars (close, open, high, low, volume, …) are
+            // left BARE by transformIdentifier in non-argument positions, so
+            // arithmetic on them inside the main walk's territory — IIFE-branch
+            // returns produced from nested if-expressions, switch-case bodies,
+            // loop bodies — emitted `close * x` with a raw Series → NaN at
+            // runtime (JS ToPrimitive on a Series yields NaN). transformAssignment
+            // Expression already wraps `:=` RHS operands via addArrayAccess;
+            // mirror it here so bare CONTEXT-BOUND identifiers under an
+            // operator get unwrapped to scalars ($.get(name, 0)) before the
+            // operator applies (VIN-90).
+            //
+            // Strictly scoped to context-bound variables: loop variables,
+            // native globals (NaN, Infinity, …) and other bare identifiers
+            // that transformIdentifier deliberately leaves alone must NOT be
+            // wrapped — $.get() would be a no-op for them but the rewrite is
+            // out of contract (reviewer VIN-90).
+            const isContextBound = state.isContextBound(name) && !state.isRootParam(name);
+            if (node.type === 'Identifier' && (isUnary || isBinary || isLogical || isConditional) && isContextBound) {
+                const isGetCall = parent && parent.type === 'CallExpression' && parent.callee &&
+                    parent.callee.object && parent.callee.object.name === CONTEXT_NAME &&
+                    parent.callee.property?.name === 'get';
+                if (!isGetCall) {
+                    addArrayAccess(node, state);
+                }
+            }
+        },
+        // Binary/Logical/Unary/Conditional visitors thread `node.parent` into
+        // operand identifiers so the Identifier handler above can distinguish
+        // arithmetic positions (mirror of the transformIfStatement walker).
+        // Without this, `node.parent` is stale and bare context-bound vars in
+        // these positions are missed (VIN-90).
+        BinaryExpression(node: any, state: ScopeManager, c: any) {
+            if (node.left.type === 'Identifier') node.left.parent = node;
+            if (node.right.type === 'Identifier') node.right.parent = node;
+            c(node.left, state);
+            c(node.right, state);
+        },
+        LogicalExpression(node: any, state: ScopeManager, c: any) {
+            if (node.left.type === 'Identifier') node.left.parent = node;
+            if (node.right.type === 'Identifier') node.right.parent = node;
+            c(node.left, state);
+            c(node.right, state);
+        },
+        UnaryExpression(node: any, state: ScopeManager, c: any) {
+            if (node.argument.type === 'Identifier') node.argument.parent = node;
+            c(node.argument, state);
+        },
+        ConditionalExpression(node: any, state: ScopeManager, c: any) {
+            if (node.test.type === 'Identifier') node.test.parent = node;
+            if (node.consequent.type === 'Identifier') node.consequent.parent = node;
+            if (node.alternate.type === 'Identifier') node.alternate.parent = node;
+            c(node.test, state);
+            c(node.consequent, state);
+            c(node.alternate, state);
         },
         CallExpression(node: any, state: ScopeManager, c: any) {
             // For IIFE patterns (() => { ... })(), we need to traverse the arrow function body
