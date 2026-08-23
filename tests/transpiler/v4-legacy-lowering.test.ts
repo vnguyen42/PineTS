@@ -250,4 +250,54 @@ plot(vwapValue, "vwap")
             expect(v4Context.plots[name].data).toEqual(v5Context.plots[name].data);
         }
     });
+
+    it('iff inside a := recursion keeps x[1] reading the previous bar value', async () => {
+        // VIN-98 famille 1 : non-identifier `iff` branches are materialized as
+        // `$.param(expr, undefined, 'pN')` wrappers; if the chosen wrapper leaks
+        // into the target series buffer, a later `x[1]` read re-resolves it
+        // against the param buffer rewritten by the next bars. Invariant: the
+        // `x[1]` plot observed at bar n must equal the `x` plot at bar n-1.
+        const source = v4(`
+x = 0.0
+x := iff(close > nz(x[1], 0), max(nz(x[1]), close - 1), close + 1)
+plot(x, "x")
+plot(x[1], "x1")
+`);
+        const context = await pineTS.run(source);
+        const values = (name: string) => context.plots[name].data.map((point: { value: unknown }) => point.value);
+        const x = values('x');
+        const x1 = values('x1');
+        // Guard against a vacuous pass: the recursion must actually run on
+        // history, and bar 0 has no previous bar (x[1] is na there).
+        expect(x.length).toBeGreaterThan(1);
+        expect(x1[0]).toBeNaN();
+        for (let n = 1; n < x.length; n++) {
+            expect(x1[n]).toEqual(x[n - 1]);
+        }
+    });
+
+    it('two same-bar calls through one iff callsite do not alias the param buffer', async () => {
+        // The `iff` callsite inside `pick` is invoked twice within a single
+        // bar with different arguments; each invocation must evaluate against
+        // its own param buffer (call-path-scoped `pN`), not a shared one.
+        const source = v4(`
+pick(x) => iff(true, x, 0)
+a = pick(5)
+b = pick(7)
+plot(a, "a")
+plot(b, "b")
+plot(b - a, "diff")
+`);
+        const context = await pineTS.run(source);
+        const values = (name: string) => context.plots[name].data.map((point: { value: unknown }) => point.value);
+        const a = values('a');
+        const b = values('b');
+        const diff = values('diff');
+        expect(a.length).toBeGreaterThan(0);
+        for (let n = 0; n < a.length; n++) {
+            expect(a[n]).toEqual(5);
+            expect(b[n]).toEqual(7);
+            expect(diff[n]).toEqual(2);
+        }
+    });
 });

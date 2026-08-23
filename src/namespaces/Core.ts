@@ -275,7 +275,17 @@ export class Core {
      */
     iff(condition: any, a: any, b: any) {
         const cond = Series.from(condition).get(0);
-        return cond ? a : b;
+        const chosen = cond ? a : b;
+        // VIN-98 famille 1 : the transpiler materializes non-identifier branch
+        // expressions as `$.param(expr, undefined, 'pN')` wrappers (persistent
+        // per-callsite param buffer). Returning the wrapper leaks it into
+        // `$.set`/target series buffers; a later `x[1]` read then re-resolves
+        // the wrapper against the param buffer rewritten by the next bars,
+        // corrupting the history of var recursions `x := iff(...)`. Unwrap
+        // ONLY Series branches to their current scalar (same guard as
+        // timestamp/parseIndicatorOptions); colors, strings, `na`, and
+        // ordinary objects/UDT keep their identity untouched.
+        return chosen instanceof Series ? chosen.get(0) : chosen;
     }
     /**
      * Formula-only helper selected statically by the v4 lowering for the
