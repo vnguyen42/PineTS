@@ -11,7 +11,7 @@ export function pivotlow(source: number[], leftbars: number, rightbars: number):
 
         // Check if the pivot is lower than all bars to the left within leftbars range
         for (let j = 1; j <= leftbars; j++) {
-            if (source[i - rightbars - j] <= pivot) {
+            if (source[i - rightbars - j] < pivot) {
                 isPivot = false;
                 break;
             }
