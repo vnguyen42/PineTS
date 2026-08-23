@@ -2202,7 +2202,8 @@ export class Parser {
             return last.expression;
         }
         if (last.type === 'VariableDeclaration' && last.declarations.length > 0) {
-            return last.declarations[0].id;
+            const declaration = last.declarations[0];
+            return declaration.init ?? declaration.id;
         }
 
         return new Literal(null);

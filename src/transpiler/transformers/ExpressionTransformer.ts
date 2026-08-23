@@ -599,7 +599,22 @@ export function transformMemberExpression(memberNode: any, originalParamName: st
                 memberNode.parent.type === 'Property');
 
         if (!isAlreadyBeingCalled && !isInDestructuring) {
-            // Convert namespace.method to namespace.method()
+            // `ta.vwap` defaults to hlc3. This direct-member path can appear
+            // inside an operand (e.g. `close > ta.vwap`) and bypass the
+            // function-argument auto-call path below, so lower it completely
+            // here with source before the synthetic TA call ID.
+            const isBareTaVwap =
+                memberNode.object.name === 'ta' &&
+                memberNode.property.type === 'Identifier' &&
+                memberNode.property.name === 'vwap';
+            const callArguments: any[] = [];
+            if (isBareTaVwap) {
+                const defaultSource = ASTFactory.createMemberExpression(
+                    ASTFactory.createMemberExpression(ASTFactory.createContextIdentifier(), ASTFactory.createIdentifier('data')),
+                    ASTFactory.createIdentifier('hlc3')
+                );
+                callArguments.push(defaultSource, scopeManager.getNextTACallId());
+            }
             const callExpr: any = {
                 type: 'CallExpression',
                 callee: {
@@ -608,8 +623,8 @@ export function transformMemberExpression(memberNode: any, originalParamName: st
                     property: memberNode.property,
                     computed: false,
                 },
-                arguments: [],
-                _transformed: false, // Allow further transformation of this call
+                arguments: callArguments,
+                _transformed: isBareTaVwap,
             };
 
             // Preserve location info
@@ -1400,8 +1415,18 @@ export function transformFunctionArgument(arg: any, namespace: string, scopeMana
                 _transformed: true,
             };
 
-            // Inject TA call ID for state management (same as transformCallExpression does)
+            // ta.vwap's Pine default source is hlc3. Keep it before the
+            // synthetic call ID so the runtime sees the source in its first
+            // positional parameter.
             if (nsName === 'ta') {
+                if (arg.property.name === 'vwap') {
+                    callExpr.arguments.push(
+                        ASTFactory.createMemberExpression(
+                            ASTFactory.createMemberExpression(ASTFactory.createContextIdentifier(), ASTFactory.createIdentifier('data')),
+                            ASTFactory.createIdentifier('hlc3')
+                        )
+                    );
+                }
                 callExpr.arguments.push(scopeManager.getNextTACallId());
             }
 
