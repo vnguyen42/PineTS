@@ -770,22 +770,25 @@ export class CodeGenerator {
 
             this.write(';\n');
 
-            // Preserve the explicit Pine type annotation so the AnalysisPass
-            // can register the variable as a UDT instance even when the
-            // initializer's type cannot be inferred from the expression alone
-            // (e.g. `Holder r = arr.get(0)` or `Holder r = map.get(key)`).
-            // Emit a bare string-literal expression statement — acorn keeps it
-            // as `ExpressionStatement(Literal)` and it is a no-op at runtime.
+            // Preserve one canonical annotation marker for the later
+            // transpiler passes. The clean Acorn AST cannot retain the custom
+            // parser `varType` property, so TypeInferencePass reads this
+            // marker and removes it before lowering. UDT markers remain
+            // separate because AnalysisPass consumes them for UDT registry
+            // bookkeeping.
             const declaredType = decl.id?.varType;
             const declaredName = decl.id?.type === 'Identifier' ? decl.id.name : null;
-            if (
-                declaredName &&
-                typeof declaredType === 'string' &&
-                /^[A-Za-z_$][\w$]*$/.test(declaredType) &&
-                declaredType[0] === declaredType[0].toUpperCase()
-            ) {
-                this.write(this.indentStr.repeat(this.indent));
-                this.write(`"__pineUdtVar:${declaredName}=${declaredType}";\n`);
+            if (declaredName && typeof declaredType === 'string') {
+                if (
+                    /^[A-Za-z_$][\w$]*$/.test(declaredType)
+                    && declaredType[0] === declaredType[0].toUpperCase()
+                ) {
+                    this.write(this.indentStr.repeat(this.indent));
+                    this.write(`"__pineUdtVar:${declaredName}=${declaredType}";\n`);
+                } else {
+                    this.write(this.indentStr.repeat(this.indent));
+                    this.write(`"__pineVarType@${declaredName}=${declaredType}";\n`);
+                }
             }
         }
     }
@@ -1292,8 +1295,8 @@ export class CodeGenerator {
             // `100000`), but preserve float-ness for integer-valued float literals
             // (`2.0` → value 2 → "2" would read as an int). pine2js stores the raw
             // source text in node.raw; a `.` in it marks a float literal. This is
-            // required so the int/float type inference can distinguish `2` from
-            // `2.0` (`int / int` truncates in Pine, `int / float` does not).
+            // required so the version/qualifier-aware integer-division pass
+            // can distinguish `2` from `2.0` (`2.0` must remain fractional).
             const s = String(node.value);
             if (typeof node.raw === 'string' && node.raw.includes('.') && !/[.eE]/.test(s)) {
                 this.write(s + '.0');

@@ -556,10 +556,13 @@ export function processStrategyOrders(context: any, phase: 'open' | 'close' = 'o
         if (shouldFill) {
             // Risk rules run below, after any fill-time quantity re-sizing.
 
-            // Apply slippage against the trade direction (longs fill higher,
-            // shorts fill lower). slippage is in ticks of syminfo.mintick.
+            // TV applies strategy slippage to market and stop fills, but not
+            // limit fills. A stop-limit becomes a limit after activation and
+            // therefore also bypasses slippage here.
             const direction = parseDirection(order.direction);
-            fillPrice = applySlippage(context, direction, fillPrice);
+            fillPrice = order.type === 'limit'
+                ? fillPrice
+                : applySlippage(context, direction, fillPrice);
             // A price-based fill, including slippage, cannot exist outside
             // the bar that filled it. Gap fills use the open above; ordinary
             // crossings use the trigger level.
@@ -2300,9 +2303,11 @@ export function processExitOrders(
             )
             .reduce((sum, trade) => sum + Math.abs(trade.size), 0);
         if (liveQty <= 1e-9) continue;
-
         const qtyThis = Math.min(event.qty === Infinity ? liveQty : event.qty, remainingCap, liveQty);
-        const fillPrice = event.kind === 'market'
+        // Profit events are limit take-profits and do not receive slippage.
+        // Market, loss/stop, and trailing events retain the configured
+        // strategy slippage.
+        const fillPrice = event.kind === 'market' || event.kind === 'profit'
             ? event.price
             : applySlippage(context, -event.direction, event.price);
         const sizesBefore = new Map(strategy.opentrades.map((trade) => [trade.id, Math.abs(trade.size)]));

@@ -3,15 +3,15 @@
 import { Series } from '../../../Series';
 
 /**
- * Pine integer division — the `/` (and `%`, via the transpiler) operator applied
- * to two **integer** operands. In Pine, `int / int` yields an `int`: the result
- * is truncated toward zero (`11 / 2 === 5`, `-11 / 2 === -5`), whereas JavaScript
- * `/` is always float division (`5.5`).
+ * Pine's legacy integer division for v4/v5 const-int expressions. The
+ * transpiler emits this helper only for two operands proven to be both `const
+ * int`; input/simple/series integers and all v6 divisions remain native `/`.
+ * The helper truncates toward zero (`11 / 2 === 5`, `-11 / 2 === -5`),
+ * whereas JavaScript `/` is always fractional.
  *
- * The transpiler rewrites a `/` BinaryExpression to this helper ONLY when BOTH
- * operands are provably `int` at compile time (see TypeInferencePass). Any float
- * operand keeps native `/`, so genuine float division (`4.0 / 2.0`, `close / 2`)
- * is untouched.
+ * The compile-time qualifier gate lives in TypeInferencePass. Any float,
+ * non-const qualifier, unknown value, v6 operand, or version-less expression
+ * keeps native `/`.
  *
  * Semantics:
  * - `na` (NaN) in either operand propagates → NaN.

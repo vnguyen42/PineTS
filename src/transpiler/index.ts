@@ -169,11 +169,12 @@ export function transpile(source: string | Function, options: { debug: boolean; 
     // slicing) keep collapsing the variants onto the Pine name.
     renameFunctionArityVariants(ast, scopeManager);
 
-    // Type inference (RC2b): replicate Pine `int / int → int`. Runs on the clean
-    // pre-lowering AST (operands still bare identifiers / `input.int(...)` /
-    // literals) and rewrites provably-int `/` to `$.pine.math.__idiv(...)`. The
-    // main pass below then lowers the operand subtrees inside the call args.
-    runTypeInferencePass(ast, scopeManager);
+    // Type inference: Pine v4/v5 truncate only division of two provably-const
+    // integer expressions. v6 and version-less PineTS sources keep native `/`.
+    // The pass runs on the clean pre-lowering AST (operands still bare
+    // identifiers / `input.int(...)` / literals); the main pass then lowers
+    // operand subtrees inside any emitted helper call.
+    runTypeInferencePass(ast, scopeManager, pineVersion);
 
     // Second pass: transform the code
     runTransformationPass(ast, scopeManager, originalParamName, options, sourceLines);

@@ -110,10 +110,14 @@ plot(a)
         expect(jsCode).toContain('100000');
     });
 
-    it('should reject Pine Script version < 5', () => {
+    it('should transpile Pine Script version 4', () => {
         const code = '//@version=4\nindicator("Test")';
 
-        expect(() => transpile(code)).toThrow('Unsupported Pine Script version 4');
+        expect(() => transpile(code)).not.toThrow();
+    });
+    it.each([1, 2, 3])('should reject Pine Script version %s', (version) => {
+        const code = `//@version=${version}\nindicator("Test")`;
+        expect(() => transpile(code)).toThrow(`Unsupported Pine Script version ${version}`);
     });
 
     it('should fail gracefully when version is missing', () => {
@@ -408,9 +412,9 @@ plot(sum)
         expect(jsCode).toContain('+');
         expect(jsCode).toContain('-');
         expect(jsCode).toContain('*');
-        // `10 / 2` is int/int division, which lowers to the Pine integer-division
-        // helper (RC2b: `__idiv`) rather than a raw `/`. `%` still transpiles native.
-        expect(jsCode).toContain('__idiv');
+        // v6 preserves fractional int division; __idiv is gated to const-int
+        // divisions in Pine v4/v5 only. `%` still transpiles natively.
+        expect(jsCode).not.toContain('__idiv');
         expect(jsCode).toContain('%');
     });
 
@@ -435,9 +439,8 @@ plot(res)
         expect(jsCode).toMatch(/(\(.*\+.*\))\s*\*/);
 
         // 100 * (x - y) / z -> should have parens around subtraction. This is
-        // int/int division (RC2b), so the trailing `/ z` lowers into the
-        // `__idiv(100 * (x - y), z)` helper — the parenthesized subtraction is
-        // still preserved inside the first argument.
+        // The v6 division remains native; the assertion below only checks
+        // that the parenthesized subtraction survives lowering.
         expect(jsCode).toMatch(/100\s*\*\s*\(.*-.*\)/);
     });
 });

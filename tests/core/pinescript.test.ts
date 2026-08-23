@@ -2650,12 +2650,12 @@ describe('PineScript Language', () => {
         console.log('>>> TEST: Operator Precedence Complex');
         console.log('>>> result: ', context.result);
 
-        // RC2b (Pine int/int → int): `5 / 2` is integer division (= 2, not 2.5),
-        // so complex1 = 2 + 3*4 - 5/2 = 2 + 12 - 2 = 12; and complex2 =
-        // ((2+3)*(4-5))/2 = -5/2 = -2 (truncated toward zero, not -2.5).
+        // Version-less PineTS syntax is not Pine v4/v5, so `/` remains native
+        // fractional division. The version/qualifier gate is covered by the
+        // v4/v5/v6 tests in tests/transpiler/int-division.test.ts.
         const expected = {
-            complex1: [12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12],
-            complex2: [-2, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2],
+            complex1: [11.5, 11.5, 11.5, 11.5, 11.5, 11.5, 11.5, 11.5, 11.5, 11.5, 11.5, 11.5, 11.5, 11.5, 11.5, 11.5, 11.5, 11.5, 11.5, 11.5],
+            complex2: [-2.5, -2.5, -2.5, -2.5, -2.5, -2.5, -2.5, -2.5, -2.5, -2.5, -2.5, -2.5, -2.5, -2.5, -2.5, -2.5, -2.5, -2.5, -2.5, -2.5],
             complex3: [true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true],
             complex4: [true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true],
         };

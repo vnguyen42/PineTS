@@ -1,242 +1,480 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 /**
- * TypeInferencePass — Pine base-type inference (RC2b P0).
+ * TypeInferencePass — the version- and qualifier-aware part of Pine `/`.
  *
- * Runs BEFORE the main lowering pass, on the clean AST (operands are still bare
- * identifiers, `input.int(...)` calls, and literals — not yet `$.get(...)`).
+ * Pine v4/v5 only discard the fractional remainder when BOTH operands are
+ * `const int`. An `input`, `simple`, or `series` integer keeps its fractional
+ * remainder, and Pine v6 always keeps it. The transpiler therefore must not
+ * lower every `int / int` expression to `__idiv`.
  *
- * Purpose: replicate Pine's `int / int → int` semantics. JavaScript `/` is always
- * float division (`11 / 2 === 5.5`), but Pine truncates toward zero when both
- * operands are integers (`11 / 2 === 5`, `-11 / 2 === -5`). Int-ness is a
- * compile-time fact — a `float` series holding `4.0` is an ordinary JS number at
- * runtime — so a static pass is the only correct discriminator.
- *
- * When a `/` BinaryExpression has BOTH operands provably `int`, it is rewritten in
- * place to `$.pine.math.__idiv(left, right)`; the main pass then lowers the operand
- * subtrees inside the call args. Anything not provably int keeps native `/`, so
- * partial coverage never corrupts a genuine float division — the worst case is a
- * missed truncation.
- *
- * Scope note (P0): the ONLY consumer of type info is the `/` rewrite, so we track
- * a minimal lattice — `int` vs `notint` (float / string / bool / na / unknown).
- * `notint` simply means "not provably int", which is all the rewrite needs. A
- * fuller int/float/bool/string lattice (for str.tostring formatting, casts, etc.)
- * can be layered on later without changing this rewrite.
+ * This pass runs BEFORE the main lowering pass, on the clean AST (operands are
+ * still bare identifiers, input calls, and literals). It tracks base type and
+ * qualifier independently. Unknown information never authorizes a rewrite:
+ * native JavaScript `/` is the safe fallback when const-int proof is absent.
  */
-import * as walk from 'acorn-walk';
 import ScopeManager from './ScopeManager';
 import { ASTFactory } from '../utils/ASTFactory';
 
-type T = 'int' | 'notint';
+type BaseType = 'int' | 'float' | 'other' | 'unknown';
+type Qualifier = 'const' | 'input' | 'simple' | 'series' | 'unknown';
+
+interface InferredType {
+    base: BaseType;
+    qualifier: Qualifier;
+}
+
+interface DeclaredType {
+    base: BaseType;
+    qualifier?: Qualifier;
+}
+
+const UNKNOWN: InferredType = { base: 'unknown', qualifier: 'unknown' };
 
 /**
- * Built-in variables that are `int`-typed in Pine. Their divisions (`bar_index / 2`)
- * are integer division even though at runtime they are plain JS numbers.
+ * Built-in variables that are integer-valued but runtime/series-qualified.
+ * They must never be treated as const merely because their base type is int.
  */
-const INT_BUILTIN_VARS = new Set<string>([
-    'bar_index', 'last_bar_index',
-    'time', 'time_close', 'timenow',
-    'year', 'month', 'weekofyear', 'dayofmonth', 'dayofweek', 'hour', 'minute', 'second',
-]);
+const INT_BUILTIN_VARS: Record<string, true> = {
+    bar_index: true,
+    last_bar_index: true,
+    time: true,
+    time_close: true,
+    timenow: true,
+    year: true,
+    month: true,
+    weekofyear: true,
+    dayofmonth: true,
+    dayofweek: true,
+    hour: true,
+    minute: true,
+    second: true,
+};
 
-/**
- * Built-in calls that RETURN `int` (dotted callee name). CONSERVATIVE subset —
- * only functions whose result is unambiguously an int (counts, indices, bar
- * offsets). Anything absent defaults to `notint` (no truncation), so an omission
- * is a safe missed-truncation, never a wrong one.
- *
- * Deliberately EXCLUDED (fail-safe on uncertainty):
- * - `ta.pivothigh` / `ta.pivotlow` — return the pivot PRICE (float), not a bar
- *   count. (Listing them as int caused a real over-truncation regression.)
- * - `math.round` — overloaded (1-arg → int, 2-arg → float).
- * - `math.sign`, `str.pos`, `input.time` — return type uncertain; excluded until
- *   verified rather than risk truncating a float.
- */
-const INT_RETURNING_CALLS = new Set<string>([
-    'input.int',
-    'math.floor', 'math.ceil',
-    'array.size', 'matrix.rows', 'matrix.columns',
-    'str.length',
-    'timestamp',
-    'ta.barssince', 'ta.highestbars', 'ta.lowestbars',
-]);
+const QUALIFIER_RANK: Record<Qualifier, number> = {
+    const: 0,
+    input: 1,
+    simple: 2,
+    series: 3,
+    unknown: 4,
+};
+
+function type(base: BaseType, qualifier: Qualifier): InferredType {
+    return { base, qualifier };
+}
+
+function unknownType(): InferredType {
+    return { ...UNKNOWN };
+}
+
+function joinQualifier(left: Qualifier, right: Qualifier): Qualifier {
+    if (left === 'unknown' || right === 'unknown') return 'unknown';
+    return QUALIFIER_RANK[left] >= QUALIFIER_RANK[right] ? left : right;
+}
+
+function numericType(left: InferredType, right: InferredType): InferredType {
+    const qualifier = joinQualifier(left.qualifier, right.qualifier);
+    if (left.base === 'int' && right.base === 'int') return type('int', qualifier);
+    if (
+        (left.base === 'int' || left.base === 'float')
+        && (right.base === 'int' || right.base === 'float')
+    ) {
+        return type('float', qualifier);
+    }
+    return type('unknown', qualifier);
+}
 
 /**
  * An integer literal (`2`, `11`) — NOT a float literal (`2.0`, `.5`, `1e5`).
- * Relies on the raw literal text (preserved by pine2js codegen) to distinguish
- * `2` from `2.0`: an integer VALUE alone is ambiguous (`2.0` also has value 2).
+ * The raw literal text distinguishes `2` from `2.0`, whose JS values match.
  */
 function isIntLiteral(n: any): boolean {
     return (
-        n &&
-        n.type === 'Literal' &&
-        typeof n.value === 'number' &&
-        Number.isInteger(n.value) &&
-        !(typeof n.raw === 'string' && /[.eE]/.test(n.raw))
+        n
+        && n.type === 'Literal'
+        && typeof n.value === 'number'
+        && Number.isInteger(n.value)
+        && !(typeof n.raw === 'string' && /[.eE]/.test(n.raw))
     );
 }
 
-/** Dotted name of a call callee: `input.int` → "input.int", `foo` → "foo". */
+/** Dotted name of a callee: `input.int` → "input.int", `foo` → "foo". */
 function calleeName(callee: any): string | null {
     if (!callee) return null;
     if (callee.type === 'Identifier') return callee.name;
     if (
-        callee.type === 'MemberExpression' &&
-        !callee.computed &&
-        callee.object?.type === 'Identifier' &&
-        callee.property?.type === 'Identifier'
+        callee.type === 'MemberExpression'
+        && !callee.computed
+        && callee.object?.type === 'Identifier'
+        && callee.property?.type === 'Identifier'
     ) {
         return `${callee.object.name}.${callee.property.name}`;
     }
     return null;
 }
+const DECLARED_BASE_TYPES: Record<string, BaseType> = {
+    int: 'int',
+    float: 'float',
+    bool: 'other',
+    string: 'other',
+    color: 'other',
+};
 
-/** Scope stack of variable-name → inferred type. Pine rarely shadows, but function
- *  bodies get their own frame so a param never leaks a type to the global scope. */
+const DECLARED_QUALIFIERS: Record<string, Qualifier> = {
+    const: 'const',
+    input: 'input',
+    simple: 'simple',
+    series: 'series',
+};
+
+/**
+ * Parse the canonical annotation text emitted by pine2js. A bare base type
+ * (e.g. `int a = ...`) constrains only the base; its qualifier still comes
+ * from the initializer. An explicit qualifier (`series int`, `const int`,
+ * etc.) overrides the initializer qualifier.
+ */
+function parseDeclaredType(raw: unknown): DeclaredType | null {
+    if (typeof raw !== 'string') return null;
+    const words = raw.trim().split(/\s+/);
+    const base = DECLARED_BASE_TYPES[words[words.length - 1]];
+    if (base === undefined) return null;
+    const qualifier = words.length > 1 ? DECLARED_QUALIFIERS[words[0]] : undefined;
+    return { base, qualifier };
+}
+
+function markerParts(node: any): [string, DeclaredType] | null {
+    const value = node?.type === 'ExpressionStatement' ? node.expression?.value : undefined;
+    if (typeof value !== 'string') return null;
+    const match = value.match(/^__pineVarType@([A-Za-z_$][\w$]*)=(.+)$/);
+    if (!match) return null;
+    const declared = parseDeclaredType(match[2]);
+    return declared ? [match[1], declared] : null;
+}
+
+/** Scope stack of variable-name → inferred base type and qualifier. */
 class Env {
-    private stack: Map<string, T>[] = [new Map()];
-    push(): void { this.stack.push(new Map()); }
-    pop(): void { if (this.stack.length > 1) this.stack.pop(); }
-    /** Declaration: establish a variable's type in the current scope. */
-    set(name: string, t: T): void { this.stack[this.stack.length - 1].set(name, t); }
-    get(name: string): T | undefined {
+    private stack: Map<string, InferredType>[] = [new Map()];
+
+    push(): void {
+        this.stack.push(new Map());
+    }
+
+    pop(): void {
+        if (this.stack.length > 1) this.stack.pop();
+    }
+
+    set(name: string, inferred: InferredType): void {
+        this.stack[this.stack.length - 1].set(name, inferred);
+    }
+
+    get(name: string): InferredType | undefined {
         for (let i = this.stack.length - 1; i >= 0; i--) {
-            const v = this.stack[i].get(name);
-            if (v !== undefined) return v;
+            const value = this.stack[i].get(name);
+            if (value !== undefined) return value;
         }
         return undefined;
     }
+
     /**
-     * Reassignment (`x := ...`): JOIN with the existing type. A variable is `int`
-     * only if EVERY value it holds is `int`; once it takes a `notint` value (its
-     * `na`/float initializer, or any float assignment) it stays `notint` forever.
-     * This mirrors Pine's "type is fixed at declaration" — a `var float x = na`
-     * reassigned to a float pivot stays float — and fails safe: a mis-typed
-     * signature can never upgrade a float variable to int and truncate it.
+     * A reassignment is a runtime/series operation. Preserve the base type
+     * only when both the old and new values have the same known base type;
+     * in all cases the qualifier becomes series, so it can never authorize a
+     * const-int rewrite later.
      */
-    assign(name: string, t: T): void {
+    assign(name: string, inferred: InferredType): void {
         for (let i = this.stack.length - 1; i >= 0; i--) {
-            if (this.stack[i].has(name)) {
-                const cur = this.stack[i].get(name);
-                this.stack[i].set(name, cur === 'int' && t === 'int' ? 'int' : 'notint');
-                return;
-            }
+            if (!this.stack[i].has(name)) continue;
+            const current = this.stack[i].get(name)!;
+            const base = current.base === inferred.base && current.base !== 'unknown'
+                ? current.base
+                : inferred.base === 'int' || inferred.base === 'float'
+                    ? inferred.base
+                    : 'unknown';
+            this.stack[i].set(name, type(base, 'series'));
+            return;
         }
-        this.stack[this.stack.length - 1].set(name, t);
+        this.stack[this.stack.length - 1].set(name, type(inferred.base, 'series'));
     }
 }
 
-export function runTypeInferencePass(ast: any, _scopeManager: ScopeManager): void {
+export function runTypeInferencePass(
+    ast: any,
+    _scopeManager: ScopeManager,
+    pineVersion: number | null = null,
+): void {
     const env = new Env();
+    let controlDepth = 0;
+    // The codegen marker is the single source of truth for explicit Pine
+    // primitive annotations. It is consumed only when immediately adjacent to
+    // the matching declaration in the same statement list; this keeps nested
+    // scopes independent and prevents a free-standing user string from
+    // retyping an unrelated variable.
+    function stripAdjacentMarkers(node: any): void {
+        if (!node || typeof node !== 'object') return;
+        for (const key in node) {
+            if (key === 'type' || key === 'start' || key === 'end' || key === 'loc' || key === 'raw') continue;
+            const child = node[key];
+            if (Array.isArray(child)) {
+                for (let i = 0; i < child.length; i++) {
+                    const current = child[i];
+                    const next = child[i + 1];
+                    const marker = markerParts(next);
+                    if (current?.type === 'VariableDeclaration' && marker) {
+                        const declaration = (current.declarations || []).find(
+                            (candidate: any) =>
+                                candidate.id?.type === 'Identifier' && candidate.id.name === marker[0],
+                        );
+                        if (declaration) {
+                            declaration.__pineDeclaredType = marker[1];
+                            child.splice(i + 1, 1);
+                        }
+                    }
+                    stripAdjacentMarkers(current);
+                }
+            } else if (child && typeof child === 'object') {
+                stripAdjacentMarkers(child);
+            }
+        }
+    }
 
-    // Visit a node; for expressions, return its inferred type AND rewrite any
-    // provably-int `/` inside it. Every child is visited exactly once so no
-    // division is missed. Unknown/unhandled shapes fall back to generic child
-    // recursion and yield `notint` (safe: no rewrite).
-    function visit(node: any): T {
-        if (!node || typeof node !== 'object') return 'notint';
+    stripAdjacentMarkers(ast);
+
+    function visit(node: any): InferredType {
+        if (!node || typeof node !== 'object') return unknownType();
 
         switch (node.type) {
             case 'Literal':
-                if (typeof node.value === 'number') return isIntLiteral(node) ? 'int' : 'notint';
-                return 'notint';
+                if (typeof node.value === 'number') {
+                    return isIntLiteral(node) ? type('int', 'const') : type('float', 'const');
+                }
+                return type('other', 'const');
 
             case 'Identifier':
-                if (INT_BUILTIN_VARS.has(node.name)) return 'int';
-                return env.get(node.name) ?? 'notint';
+                if (INT_BUILTIN_VARS[node.name] === true) return type('int', 'series');
+                return env.get(node.name) ?? unknownType();
 
-            case 'UnaryExpression':
-                // Unary +/- preserve numeric type (`-11` is int); `!`/`~` are notint.
-                if (node.operator === '-' || node.operator === '+') return visit(node.argument);
-                visit(node.argument);
-                return 'notint';
+            case 'UnaryExpression': {
+                const argument = visit(node.argument);
+                if (node.operator === '-' || node.operator === '+') return argument;
+                return unknownType();
+            }
 
             case 'BinaryExpression': {
-                const lt = visit(node.left);
-                const rt = visit(node.right);
-                const bothInt = lt === 'int' && rt === 'int';
+                const left = visit(node.left);
+                const right = visit(node.right);
                 if (node.operator === '/') {
-                    if (bothInt) {
-                        // int / int → int (truncated toward zero). Rewrite in place;
-                        // the main pass lowers node.left / node.right in the args.
+                    const canUseIntegerDivision =
+                        (pineVersion === 4 || pineVersion === 5)
+                        && left.base === 'int'
+                        && right.base === 'int'
+                        && left.qualifier === 'const'
+                        && right.qualifier === 'const';
+                    if (canUseIntegerDivision) {
                         const call = ASTFactory.createMathIntDivCall(node.left, node.right);
                         Object.assign(node, call);
-                        return 'int';
+                        return type('int', 'const');
                     }
-                    return 'notint';
+                    return numericType(left, right);
                 }
-                // `+ - * %` preserve int when both operands are int (so a downstream
-                // `/` sees the propagated int-ness). Comparisons / others → notint.
                 if (node.operator === '+' || node.operator === '-' || node.operator === '*' || node.operator === '%') {
-                    return bothInt ? 'int' : 'notint';
+                    return numericType(left, right);
                 }
-                return 'notint';
+                return unknownType();
             }
 
             case 'ConditionalExpression': {
                 visit(node.test);
-                const c = visit(node.consequent);
-                const a = visit(node.alternate);
-                return c === 'int' && a === 'int' ? 'int' : 'notint';
+                const consequent = visit(node.consequent);
+                const alternate = visit(node.alternate);
+                const qualifier = joinQualifier(consequent.qualifier, alternate.qualifier);
+                if (consequent.base === 'int' && alternate.base === 'int') return type('int', qualifier);
+                if (
+                    (consequent.base === 'int' || consequent.base === 'float')
+                    && (alternate.base === 'int' || alternate.base === 'float')
+                ) {
+                    return type('float', qualifier);
+                }
+                return type('unknown', qualifier);
             }
 
             case 'LogicalExpression':
                 visit(node.left);
                 visit(node.right);
-                return 'notint';
+                return type('other', 'series');
 
             case 'CallExpression': {
-                // Visit callee's object subtree (may contain divisions) and every arg.
-                if (node.callee?.type === 'MemberExpression') visit(node.callee.object);
-                for (const arg of node.arguments || []) visit(arg);
+                // Visit the callee object (which may itself contain an
+                // expression) and all arguments before classifying the result.
+                if (node.callee?.type === 'MemberExpression') {
+                    visit(node.callee.object);
+                    if (node.callee.computed) visit(node.callee.property);
+                }
+                const args = (node.arguments || []).map((arg: any) => visit(arg));
                 const name = calleeName(node.callee);
-                return name && INT_RETURNING_CALLS.has(name) ? 'int' : 'notint';
+
+                if (name === 'input.int') return type('int', 'input');
+                if (name === 'input.float') return type('float', 'input');
+                if (name === 'input.any') {
+                    // `input.any` is necessarily input-qualified. Infer only
+                    // its base from a literal/default when possible; the
+                    // qualifier still prevents __idiv.
+                    const defaultType = args[0] ?? unknownType();
+                    return type(defaultType.base, 'input');
+                }
+                if (name === 'input.bool' || name === 'input.string' || name === 'input.source'
+                    || name === 'input.symbol' || name === 'input.timeframe' || name === 'input.session'
+                    || name === 'input.time' || name === 'input.color') {
+                    return type('other', 'input');
+                }
+
+                // Pine casts preserve the qualifier of their operand while
+                // changing the base type. Thus int(input.int(4)) is input
+                // int, not const int.
+                if (name === 'int') {
+                    const argument = args[0] ?? unknownType();
+                    return type('int', argument.qualifier);
+                }
+                if (name === 'float') {
+                    const argument = args[0] ?? unknownType();
+                    return type('float', argument.qualifier);
+                }
+
+                if (name === 'math.floor' || name === 'math.ceil') {
+                    const argument = args[0] ?? unknownType();
+                    return type('int', argument.qualifier);
+                }
+                if (name === 'timestamp') {
+                    const qualifier = args.reduce(
+                        (current: Qualifier, argument: InferredType) => joinQualifier(current, argument.qualifier),
+                        'const' as Qualifier,
+                    );
+                    return type('int', qualifier);
+                }
+                if (name === 'array.size' || name === 'matrix.rows' || name === 'matrix.columns'
+                    || name === 'str.length' || name === 'ta.barssince'
+                    || name === 'ta.highestbars' || name === 'ta.lowestbars') {
+                    return type('int', 'series');
+                }
+                return unknownType();
             }
 
-            case 'MemberExpression': {
-                // Computed index / object may contain divisions.
+            case 'MemberExpression':
                 visit(node.object);
                 if (node.computed) visit(node.property);
-                return 'notint';
-            }
+                return unknownType();
 
             case 'VariableDeclaration': {
-                for (const d of node.declarations || []) {
-                    const t = d.init ? visit(d.init) : 'notint';
-                    if (d.id?.type === 'Identifier') env.set(d.id.name, t);
+                for (const declaration of node.declarations || []) {
+                    const inferred = declaration.init ? visit(declaration.init) : unknownType();
+                    if (declaration.id?.type !== 'Identifier') continue;
+                    const annotation = declaration.__pineDeclaredType;
+                    const annotated = annotation
+                        ? type(annotation.base, annotation.qualifier ?? inferred.qualifier)
+                        : inferred;
+                    // `var` declarations persist across bars and are
+                    // series-qualified even when their initializer is a
+                    // literal. Declarations inside control flow are likewise
+                    // not compile-time constants.
+                    const explicitQualifier = annotation?.qualifier !== undefined;
+                    const stored = node.kind === 'var'
+                        || (controlDepth > 0 && !explicitQualifier)
+                        ? type(annotated.base, 'series')
+                        : annotated;
+                    env.set(declaration.id.name, stored);
                 }
-                return 'notint';
+                return unknownType();
             }
 
             case 'AssignmentExpression': {
-                const t = visit(node.right);
-                // `x := ...` reassignment: JOIN with the existing type (never
-                // upgrades a notint variable to int — see Env.assign).
-                if (node.left?.type === 'Identifier') env.assign(node.left.name, t);
-                else visit(node.left);
-                return t;
+                const right = visit(node.right);
+                if (node.left?.type === 'Identifier') {
+                    env.assign(node.left.name, right);
+                } else {
+                    visit(node.left);
+                }
+                return type(right.base, 'series');
             }
+
+            case 'UpdateExpression': {
+                const argument = visit(node.argument);
+                if (node.argument?.type === 'Identifier') {
+                    env.assign(node.argument.name, argument);
+                }
+                return type(argument.base, 'series');
+            }
+
+            case 'IfStatement':
+                visit(node.test);
+                controlDepth++;
+                visit(node.consequent);
+                if (node.alternate) visit(node.alternate);
+                controlDepth--;
+                return unknownType();
+
+            case 'ForStatement':
+                controlDepth++;
+                if (node.init) visit(node.init);
+                if (node.test) visit(node.test);
+                if (node.update) visit(node.update);
+                visit(node.body);
+                controlDepth--;
+                return unknownType();
+
+            case 'WhileStatement':
+            case 'DoWhileStatement':
+                controlDepth++;
+                if (node.test) visit(node.test);
+                visit(node.body);
+                controlDepth--;
+                return unknownType();
+
+            case 'ForInStatement':
+            case 'ForOfStatement':
+                controlDepth++;
+                if (node.left?.type === 'Identifier') {
+                    const current = env.get(node.left.name) ?? unknownType();
+                    env.assign(node.left.name, current);
+                } else {
+                    visit(node.left);
+                }
+                visit(node.right);
+                visit(node.body);
+                controlDepth--;
+                return unknownType();
+
+            case 'SwitchStatement':
+                visit(node.discriminant);
+                controlDepth++;
+                for (const switchCase of node.cases || []) {
+                    env.push();
+                    visit(switchCase);
+                    env.pop();
+                }
+                controlDepth--;
+                return unknownType();
+
+            case 'BlockStatement':
+                env.push();
+                recurseChildren(node);
+                env.pop();
+                return unknownType();
 
             case 'FunctionDeclaration':
             case 'FunctionExpression':
-            case 'ArrowFunctionExpression': {
+            case 'ArrowFunctionExpression':
                 env.push();
-                // Params default to notint (base param types are not yet threaded).
-                for (const p of node.params || []) {
-                    const pid = p.type === 'AssignmentPattern' ? p.left : p;
-                    if (pid?.type === 'Identifier') env.set(pid.name, 'notint');
+                for (const parameter of node.params || []) {
+                    const id = parameter.type === 'AssignmentPattern' ? parameter.left : parameter;
+                    if (id?.type === 'Identifier') env.set(id.name, unknownType());
+                    if (parameter.type === 'AssignmentPattern') visit(parameter.right);
                 }
                 visit(node.body);
                 env.pop();
-                return 'notint';
-            }
+                return unknownType();
 
             default:
-                // Generic recursion for statements / unhandled expressions so nested
-                // divisions are still processed. Yields notint (no rewrite here).
                 recurseChildren(node);
-                return 'notint';
+                return unknownType();
         }
     }
 
@@ -245,7 +483,7 @@ export function runTypeInferencePass(ast: any, _scopeManager: ScopeManager): voi
             if (key === 'type' || key === 'start' || key === 'end' || key === 'loc' || key === 'raw') continue;
             const child = node[key];
             if (Array.isArray(child)) {
-                for (const c of child) if (c && typeof c.type === 'string') visit(c);
+                for (const item of child) if (item && typeof item.type === 'string') visit(item);
             } else if (child && typeof child.type === 'string') {
                 visit(child);
             }

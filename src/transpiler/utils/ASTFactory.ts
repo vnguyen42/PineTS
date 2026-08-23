@@ -160,9 +160,9 @@ export const ASTFactory = {
         return this.createCallExpression(fn, [left, right]);
     },
 
-    // Create $.pine.math.__idiv(left, right) — Pine integer division (int/int→int,
-    // truncated toward zero). Emitted by TypeInferencePass ONLY when both operands
-    // are provably int; float operands keep native `/`.
+    // Create $.pine.math.__idiv(left, right) for Pine v4/v5 const-int
+    // division. TypeInferencePass owns the version/qualifier gate; all
+    // unsupported or unproven divisions remain native `/`.
     createMathIntDivCall(left: any, right: any): any {
         const pineObj = this.createMemberExpression(this.createContextIdentifier(), this.createIdentifier('pine'), false);
         const mathObj = this.createMemberExpression(pineObj, this.createIdentifier('math'), false);
