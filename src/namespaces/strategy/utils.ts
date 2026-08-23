@@ -554,11 +554,7 @@ export function processStrategyOrders(context: any, phase: 'open' | 'close' = 'o
         }
 
         if (shouldFill) {
-            // Pre-fill risk check: block if any active risk rule violates.
-            if (isOrderBlockedByRisk(strategy, order)) {
-                order.status = 'cancelled';
-                continue;
-            }
+            // Risk rules run below, after any fill-time quantity re-sizing.
 
             // Apply slippage against the trade direction (longs fill higher,
             // shorts fill lower). slippage is in ticks of syminfo.mintick.
@@ -622,6 +618,14 @@ export function processStrategyOrders(context: any, phase: 'open' | 'close' = 'o
                         order._base_qty = baseQty;
                         order.qty = isReversal ? Math.abs(oldSize) + baseQty : baseQty;
                     }
+                }
+                // Risk rules are evaluated at the fill, after dynamic
+                // percent_of_equity sizing. max_position_size truncates only
+                // the leg that increases the absolute position; a reducing
+                // order remains at its requested quantity.
+                if (isOrderBlockedByRisk(strategy, order)) {
+                    order.status = 'cancelled';
+                    continue;
                 }
 
                 const newOpenQty = isReversal ? Math.max(0, order.qty - Math.abs(oldSize)) : order.qty;
@@ -818,7 +822,8 @@ export function wouldExceedPyramiding(strategy: StrategyState, direction: number
  * Consulted rules (independent; first violation wins):
  *   - risk_halted (latched by any catastrophic rule)
  *   - allow_entry_in: 'long' blocks short orders; 'short' blocks long
- *   - max_position_size: post-fill |position_size| would exceed N
+ *   - max_position_size: evaluated at fill; an increasing leg is truncated
+ *     to the remaining cap, while a purely reducing order is unchanged
  */
 export function isOrderBlockedByRisk(strategy: StrategyState, order: Order): boolean {
     if (strategy.risk_halted) return true;
@@ -830,8 +835,25 @@ export function isOrderBlockedByRisk(strategy: StrategyState, order: Order): boo
         if (rules.allow_entry_in === 'short' && orderDir === 1) return true;
     }
     if (rules.max_position_size !== undefined) {
-        const postSize = strategy.position_size + orderDir * order.qty;
-        if (Math.abs(postSize) > rules.max_position_size) return true;
+        const positionSize = strategy.position_size;
+        const positionDirection = Math.sign(positionSize);
+        const isReducing = positionDirection !== 0 && positionDirection !== orderDir;
+        const reductionQty = isReducing ? Math.min(order.qty, Math.abs(positionSize)) : 0;
+        const increasingQty = order.qty - reductionQty;
+
+        // An order that only reduces the current position is not subject to
+        // max_position_size. If it reverses, only its new opposite-side leg
+        // consumes the cap.
+        if (increasingQty <= 0) return false;
+
+        const retainedSize = isReducing
+            ? Math.abs(positionSize) - reductionQty
+            : Math.abs(positionSize);
+        const remaining = rules.max_position_size - retainedSize;
+        if (remaining <= 0) return true;
+        if (increasingQty > remaining) {
+            order.qty = reductionQty + remaining;
+        }
     }
     return false;
 }
