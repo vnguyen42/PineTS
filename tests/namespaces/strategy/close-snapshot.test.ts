@@ -3,6 +3,7 @@ import { Context } from '../../../src/Context.class';
 import { processExitOrders, initializeStrategy } from '../../../src/namespaces/strategy/utils';
 import { close_all } from '../../../src/namespaces/strategy/methods/close_all';
 import { Series } from '../../../src/Series';
+import { NAHelper } from '../../../src/namespaces/Core';
 
 /**
  * Regression for strategy.close_all() snapshot binding.
@@ -119,5 +120,86 @@ describe('strategy.close_all — snapshot binding to call-time position', () => 
         // No open trades.
         close_all(context)();
         expect(s.pending_orders.length).toBe(0);
+    });
+
+    it.each([
+        ['false', false],
+        ['na', NaN],
+        ['NAHelper', new NAHelper()],
+    ])('does not mutate state when when=%s', (_label, when) => {
+        const context = makeContext();
+        const s = context.strategy;
+        setBar(context, 0, 50000);
+        s.opentrades = [makeTrade('trade_1', 'Long', 5, 50000, 0)];
+        s.position_size = 5;
+        s.position_avg_price = 50000;
+        const conditionalExit = {
+            id: 'bracket',
+            direction: -1,
+            qty: 5,
+            type: 'market',
+            bar: 0,
+            time: 0,
+            status: 'pending',
+            category: 'exit',
+            from_entry: 'Long',
+            profit: 100,
+        };
+        s.pending_orders = [conditionalExit];
+        const pendingOrders = s.pending_orders;
+        const openTrades = s.opentrades;
+
+        close_all(context)({ when });
+
+        expect(s.pending_orders).toBe(pendingOrders);
+        expect(s.pending_orders).toEqual([conditionalExit]);
+        expect(s.opentrades).toBe(openTrades);
+        expect(s.position_size).toBe(5);
+        expect(s.position_avg_price).toBe(50000);
+    });
+
+    it.each([
+        ['named', [{ when: true }]],
+        ['v4 positional', [true]],
+    ])('queues a close when when=true (%s)', (_label, args) => {
+        const context = makeContext();
+        const s = context.strategy;
+        setBar(context, 0, 50000);
+        s.opentrades = [makeTrade('trade_1', 'Long', 5, 50000, 0)];
+        s.position_size = 5;
+        s.position_avg_price = 50000;
+
+        close_all(context)(...args);
+
+        expect(s.pending_orders).toHaveLength(1);
+        expect(s.pending_orders[0].id).toBe('close_all');
+        expect(s.pending_orders[0]._intended_trade_ids).toEqual(['trade_1']);
+    });
+    it('preserves a named comment after a v4 positional when', () => {
+        const context = makeContext();
+        const s = context.strategy;
+        setBar(context, 0, 50000);
+        s.opentrades = [makeTrade('trade_1', 'Long', 5, 50000, 0)];
+        s.position_size = 5;
+        s.position_avg_price = 50000;
+
+        close_all(context)(true, { comment: 'corpus-2127' });
+
+        expect(s.pending_orders).toHaveLength(1);
+        expect(s.pending_orders[0].comment).toBe('corpus-2127');
+    });
+
+    it('treats a v5 positional string as comment, not when', () => {
+        const context = makeContext();
+        const s = context.strategy;
+        setBar(context, 0, 50000);
+        s.opentrades = [makeTrade('trade_1', 'Long', 5, 50000, 0)];
+        s.position_size = 5;
+        s.position_avg_price = 50000;
+
+        close_all(context)('commentaire');
+
+        expect(s.pending_orders).toHaveLength(1);
+        expect(s.pending_orders[0].comment).toBe('commentaire');
     });
 });

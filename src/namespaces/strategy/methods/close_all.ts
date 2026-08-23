@@ -9,14 +9,19 @@ import { parseArgsForPineParams } from '../../utils';
  * Close ALL open positions at market, regardless of which entry opened them.
  *
  * Pine signature:
- *   strategy.close_all(comment, alert_message, immediately, disable_alert) → void
+ *   v4: strategy.close_all(when, comment, alert_message) → void
+ *   v5: strategy.close_all(comment, alert_message, immediately, disable_alert) → void
+ *
+ * `when` remains accepted as the trailing compatibility slot used by the
+ * strategy method parser and by transpiled named-argument calls.
  */
-const CLOSE_ALL_SIGNATURES = [['comment', 'alert_message', 'immediately', 'disable_alert']];
+const CLOSE_ALL_SIGNATURES = [['comment', 'alert_message', 'immediately', 'disable_alert', 'when']];
 const CLOSE_ALL_ARGS_TYPES = {
     comment: 'string',
     alert_message: 'string',
     immediately: 'boolean',
     disable_alert: 'boolean',
+    when: 'series',
 };
 
 export function close_all(context: any) {
@@ -24,7 +29,40 @@ export function close_all(context: any) {
         if (!context.strategy) {
             throw new Error('strategy.close_all() called before strategy() declaration');
         }
-        const parsed = parseArgsForPineParams<any>(args, CLOSE_ALL_SIGNATURES, CLOSE_ALL_ARGS_TYPES);
+
+        // Pine v4 also allows `when` as the first positional argument. The
+        // canonical signature keeps `when` trailing so named and v5 calls
+        // retain their existing positional slots; normalize the legacy form
+        // before parsing the remaining arguments.
+        const first = args[0];
+        const hasPositionalWhen = args.length > 0 && (
+            first === undefined
+            || first === null
+            || first instanceof Series
+            || typeof first === 'boolean'
+            || typeof first === 'number'
+            || typeof first === 'function'
+            || (typeof first === 'object' && first !== null && '__value' in first)
+        );
+        const parsed = parseArgsForPineParams<any>(
+            hasPositionalWhen ? args.slice(1) : args,
+            CLOSE_ALL_SIGNATURES,
+            CLOSE_ALL_ARGS_TYPES,
+        );
+        if (hasPositionalWhen) parsed.when = first;
+
+        const extractValue = (val: any) => {
+            if (val === undefined || val === null) return val;
+            if (typeof val === 'string' || typeof val === 'number' || typeof val === 'boolean') return val;
+            if (typeof val === 'function') return val();
+            if (val instanceof Series) return val.get(0);
+            if (Array.isArray(val)) return val[val.length - 1];
+            if (typeof val === 'object' && '__value' in val) return val.__value;
+            if (typeof val === 'object' && val.get !== undefined) return val.get(0);
+            return val;
+        };
+        const whenValue = Object.prototype.hasOwnProperty.call(parsed, 'when') ? extractValue(parsed.when) : true;
+        if (!whenValue) return;
 
         // TV semantic: strategy.close_all() called with no open positions is
         // a no-op. Without this guard, the queued order survives to the next
