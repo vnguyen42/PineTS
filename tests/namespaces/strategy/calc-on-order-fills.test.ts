@@ -16,19 +16,22 @@ import { Order } from '../../../src/namespaces/strategy/types';
  * calculation behavior" → calc_on_order_fills): when the parameter is true,
  * the strategy performs an additional execution on each tick where the
  * broker emulator fills an order. On historical bars the emulator assumes 4
- * ticks per bar (open, then high & low in the inferred order, then close),
- * and orders placed during a recalculation fill on the NEXT tick of the
- * SAME bar — enabling same-bar round trips. Without the parameter (default
- * false), orders placed on bar N fill from bar N+1 and a strategy can never
- * enter and exit within one bar.
+ * ticks per bar (open, then high & low in the inferred order, then close).
+ * Orders placed during a recalculation normally fill on the NEXT tick of the
+ * SAME bar — enabling same-bar round trips. The measured exception is a pure
+ * market exit emitted by that recalculation: it is drained at the current
+ * fill tick. Same-bar market entries and price-based exits retain their
+ * next-tick/path semantics. Without the parameter (default false), orders
+ * placed on bar N fill from bar N+1 and a strategy can never enter and exit
+ * within one bar.
  *
  * The engine mirrors this with the per-bar COF loop in PineTS.class.ts
- * (process orders → re-run the script after any fill → repeat, max 4 ticks)
- * plus the same-bar guards lifted in processStrategyOrders /
- * processExitOrders and the fill-time sizing of percent_of_equity default
- * quantities (TV: "position sizes will be calculated as a percentage of the
- * available equity when the trade opens" — Strategy properties help
- * article).
+ * (process orders → re-run the script after any fill → drain same-tick market
+ * exits → repeat, max 4 ticks) plus the same-bar guards lifted in
+ * processStrategyOrders / processExitOrders and the fill-time sizing of
+ * percent_of_equity default quantities (TV: "position sizes will be
+ * calculated as a percentage of the available equity when the trade opens" —
+ * Strategy properties help article).
  */
 
 function makeContext(config: Record<string, unknown> = {}) {
@@ -818,7 +821,23 @@ if bar_index == 0
     strategy.entry('L', strategy.long)
 if strategy.position_size > 0
     strategy.exit('X', 'L', limit = ep * 1.02)`;
+    const MARKET_CLOSE_SOURCE = `
+//@version=5
+strategy('COF market close', calc_on_order_fills=true, default_qty_type=strategy.fixed, default_qty_value=1)
+if bar_index == 0
+    strategy.entry('L', strategy.long)
+if strategy.position_size > 0
+    strategy.close('L')`;
 
+    const MARKET_ENTRY_SOURCE = `
+//@version=5
+strategy('COF market-entry cadence', calc_on_order_fills=true, pyramiding=2, default_qty_type=strategy.fixed, default_qty_value=1)
+if bar_index == 0
+    strategy.entry('L1', strategy.long)
+if strategy.position_size > 0 and strategy.opentrades == 1
+    strategy.entry('L2', strategy.long)
+if strategy.position_size > 0
+    strategy.exit('TP1', 'L1', limit=102)`;
     it('same-bar round trip appears with calc_on_order_fills=true and not with false', async () => {
         const run = async (cof: boolean) => {
             const source = cof ? SOURCE : SOURCE.replace('calc_on_order_fills=true, ', '');
@@ -841,5 +860,30 @@ if strategy.position_size > 0
         expect(plainTrade.entry_time).toBe(86_400_000);
         expect(plainTrade.exit_time).toBe(172_800_000); // exit on the NEXT bar
         expect(plainTrade.exit_price).toBe(100.98);
+    });
+
+    it('drains a recalculated pure market close at the triggering fill tick', async () => {
+        const engine = new PineTS(new FixedProvider() as any, 'BTCUSDT', 'D');
+        const context = await engine.run(MARKET_CLOSE_SOURCE);
+        const strategy = context.strategy as any;
+
+        expect(strategy.closedtrades).toHaveLength(1);
+        expect(strategy.closedtrades[0].entry_price).toBe(100);
+        // Bar 1 follows open → low → high; the old next-tick behavior closed
+        // this trade at 95 instead of at the entry fill's open price.
+        expect(strategy.closedtrades[0].exit_price).toBe(100);
+    });
+
+    it('keeps a recalculated market entry on the next path tick while its bracket uses the crossed level', async () => {
+        const engine = new PineTS(new FixedProvider() as any, 'BTCUSDT', 'D');
+        const context = await engine.run(MARKET_ENTRY_SOURCE);
+        const strategy = context.strategy as any;
+        const l2 = strategy.opentrades.find((trade: any) => trade.entry_id === 'L2');
+        const l1 = strategy.closedtrades.find((trade: any) => trade.entry_id === 'L1');
+
+        expect(l2).toBeDefined();
+        expect(l2.entry_price).toBe(95);
+        expect(l1).toBeDefined();
+        expect(l1.exit_price).toBe(102);
     });
 });

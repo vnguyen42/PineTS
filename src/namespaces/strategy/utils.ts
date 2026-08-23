@@ -1597,23 +1597,31 @@ interface ExitFillEvent {
 /**
  * Process exit-category orders each bar (after entry-order fills, before the
  * user script runs). Handles:
- *   - Market exits from strategy.close() / strategy.close_all() (fill at
+ *   - Market exits from strategy.close() / strategy.close_all() (fill at the
  *     current bar's open if placed previously, or at the current close in
  *     the explicit process_orders_on_close phase).
  *   - Conditional exits from strategy.exit() — TP / SL / trailing-stop
  *     triggers evaluated against current bar's high/low. Trailing-stop
  *     peak (trade.trail_peak) is updated each bar even when not triggered.
+ *
+ * In the COF post-fill drain, `marketExitsOnly` restricts processing to pure
+ * market exits emitted by the recalculation; those exits fill at the current
+ * assumed tick before the path advances.
  */
-export function processExitOrders(context: any, phase: 'open' | 'intrabar' | 'close' = 'intrabar'): number {
+export function processExitOrders(
+    context: any,
+    phase: 'open' | 'intrabar' | 'close' = 'intrabar',
+    marketExitsOnly = false,
+): number {
     if (!context.strategy) return 0;
     const strategy: StrategyState = context.strategy;
     if (strategy.pending_orders.length === 0) return 0;
 
     // calc_on_order_fills=true intrabar sequencing (see CofBarState): market
-    // closes placed during a same-bar recalculation fill on the next assumed
-    // intrabar tick at that tick's OHLC value. The fill count drives the
-
-    // execution loop's recalc decision.
+    // closes placed during a same-bar recalculation normally fill on the next
+    // assumed intrabar tick. The explicit post-fill drain is the measured
+    // exception for pure market exits: it fills them at the current tick.
+    // The return value drives the execution loop's recalc decision.
     const cof = strategy.config.calc_on_order_fills === true;
     const cofState = cof ? (strategy._cof ?? null) : null;
     const processOnClose = strategy.config.process_orders_on_close === true;
@@ -1704,6 +1712,15 @@ export function processExitOrders(context: any, phase: 'open' | 'intrabar' | 'cl
     for (const [orderSequence, order] of strategy.pending_orders.entries()) {
         if (order.status !== 'pending') continue;
         if ((order.category ?? 'entry') !== 'exit') continue;
+        const isPureMarketExit =
+            order.type === 'market' &&
+            order.profit === undefined &&
+            order.loss === undefined &&
+            order.limit === undefined &&
+            order.stop === undefined &&
+            order.trail_price === undefined &&
+            order.trail_points === undefined;
+        if (marketExitsOnly && !isPureMarketExit) continue;
 
         // Gather matching open trades (from_entry filter; '' = all).
         // For market closes from strategy.close_all() / strategy.close(id),
@@ -1744,15 +1761,7 @@ export function processExitOrders(context: any, phase: 'open' | 'intrabar' | 'cl
         const matchingDir = Math.sign(matching[0].size); // direction of the position to close
 
         // ---- Market exits from close() / close_all() ----
-        if (
-            order.type === 'market' &&
-            order.profit === undefined &&
-            order.loss === undefined &&
-            order.limit === undefined &&
-            order.stop === undefined &&
-            order.trail_price === undefined &&
-            order.trail_points === undefined
-        ) {
+        if (isPureMarketExit) {
             // Market closes fill in the intrabar phase (after entries) —
             // their interplay with reversal entries is governed by the
             // _intended_trade_ids snapshot above.

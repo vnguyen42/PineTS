@@ -1199,11 +1199,12 @@ export class PineTS {
                     // sequencing. Each historical bar is assumed to have 4
                     // ticks (open, then high & low in the order inferred from
                     // the bar's OHLC, then close). The strategy executes once
-                    // at the bar's close as usual, PLUS after every order
-                    // fill: the recalculation happens at the fill price, and
-                    // orders placed during it are processed in the SAME bar
-                    // (they fill on the next assumed tick). A same-bar fill
-                    // can therefore chain entries and exits (round trips).
+                    // at the bar's close as usual, plus after every order fill.
+                    // Orders placed during a fill recalculation normally fill
+                    // on the next assumed tick. The measured exception is a
+                    // pure market exit emitted by that recalculation: it is
+                    // drained at the current tick. Same-bar market entries and
+                    // conditional exits retain their next-tick/path behavior.
                     // The loop visits all four path points. A fill triggers a
                     // recalculation; a point with no fill simply advances the
                     // path without executing user code.
@@ -1235,21 +1236,30 @@ export class PineTS {
                         if (adverseFirst) processMarginCall(context, 'extreme');
                         fills += processExitOrders(context, 'intrabar');
                         if (!adverseFirst) processMarginCall(context, 'extreme');
-                        const recalculate = fills > 0;
+
+                        if (fills > 0) {
+                            // Re-execute at the fill's current assumed path
+                            // point. Drain only pure market exits emitted by
+                            // that recalculation before advancing `pass`.
+                            // Repeating the drain handles a chain of partial
+                            // closes while no-op/cancelled orders return zero.
+                            let marketExitFills: number;
+                            do {
+                                const plotLengths: Array<[unknown[], number]> = [];
+                                for (const key of Object.keys(context.plots ?? {})) {
+                                    const data = Object.getOwnPropertyDescriptor(context.plots[key], 'data')?.value;
+                                    if (Array.isArray(data)) plotLengths.push([data, data.length]);
+                                }
+                                await transpiledFn(context);
+                                for (const [data, len] of plotLengths) {
+                                    if (data.length > len) data.length = len;
+                                }
+                                marketExitFills = processExitOrders(context, 'intrabar', true);
+                            } while (marketExitFills > 0);
+                        }
+
                         strategy._cof.pass += 1;
                         if (strategy._cof.pass >= strategy._cof.ticks.length) break;
-                        if (!recalculate) continue;
-                        // Re-execute after a fill, then evaluate any refreshed
-                        // orders at the NEXT assumed path point.
-                        const plotLengths: Array<[unknown[], number]> = [];
-                        for (const key of Object.keys(context.plots ?? {})) {
-                            const data = Object.getOwnPropertyDescriptor(context.plots[key], 'data')?.value;
-                            if (Array.isArray(data)) plotLengths.push([data, data.length]);
-                        }
-                        await transpiledFn(context);
-                        for (const [data, len] of plotLengths) {
-                            if (data.length > len) data.length = len;
-                        }
                     }
                     strategy._cof = null;
                     // Latch max_drawdown / max_runup ONCE at the end of the

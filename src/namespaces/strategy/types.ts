@@ -231,8 +231,11 @@ export interface Order {
 // order the broker emulator infers from the bar's OHLC (open → high → low →
 // close when the open is closer to the high, open → low → high → close
 // otherwise). Each COF pass consumes one tick: orders placed during the
-// recalculation after a fill fill on the NEXT tick of the same bar, and a
-// same-bar market fill prices at the current tick's OHLC value.
+// recalculation after a fill normally fill on the NEXT tick of the same bar.
+// The measured exception is a pure, position-reducing market exit created by
+// that recalculation: it is drained at the current tick before `pass` advances.
+// Same-bar market entries and price-based orders retain their next-tick/path
+// semantics.
 export interface CofBarState {
     pass: number; // current tick index (0..3)
     ticks: number[]; // [open, tick2, tick3, close]
