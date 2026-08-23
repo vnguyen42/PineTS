@@ -172,3 +172,54 @@ describe('regression guards — branch outcomes and non-na correctness (green be
         expect([0, 1]).toContain(val(ctx, 'rel_series'));
     });
 });
+
+describe('boolean/integer equality coercion', () => {
+    it('matches the measured 48-cell bool/number matrix in both operand orders', async () => {
+        const operands = [
+            { name: 'true', expression: 'boolTrue', eq: [0, 1, 0, 0], neq: [1, 0, 1, 1] },
+            { name: 'false', expression: 'boolFalse', eq: [1, 0, 0, 0], neq: [0, 1, 1, 1] },
+            { name: 'boolNa', expression: 'boolNa', eq: [2, 2, 2, 2], neq: [2, 2, 2, 2] },
+        ] as const;
+        const numbers = [
+            { name: 'zero', expression: '0' },
+            { name: 'one', expression: '1' },
+            { name: 'two', expression: '2' },
+            { name: 'numNa', expression: 'numNa' },
+        ] as const;
+        const sourceLines = [
+            '//@version=5',
+            'indicator("t")',
+            'boolTrue = true',
+            'boolFalse = false',
+            'var bool boolNa = na',
+            'var float numNa = na',
+        ];
+        const expectations: Array<[string, number]> = [];
+
+        for (const left of operands) {
+            for (const [index, right] of numbers.entries()) {
+                for (const [kind, operator, expected] of [
+                    ['eq', '==', left.eq[index]],
+                    ['neq', '!=', left.neq[index]],
+                ] as const) {
+                    for (const [order, lhs, rhs] of [
+                        ['forward', left.expression, right.expression],
+                        ['reverse', right.expression, left.expression],
+                    ] as const) {
+                        const title = `${kind}_${order}_${left.name}_${right.name}`;
+                        sourceLines.push(
+                            `plot(na(${lhs} ${operator} ${rhs}) ? 2 : ((${lhs} ${operator} ${rhs}) ? 1 : 0), "${title}")`,
+                        );
+                        expectations.push([title, expected]);
+                    }
+                }
+            }
+        }
+
+        expect(expectations).toHaveLength(48);
+        const ctx = await runPine(sourceLines.join('\n'));
+        for (const [title, expected] of expectations) {
+            expect(val(ctx, title)).toBe(expected);
+        }
+    });
+});

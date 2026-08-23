@@ -29,14 +29,25 @@ export function __neq(context: any) {
         const primA = valA != null && typeof valA === 'object' ? valA.valueOf() : valA;
         const primB = valB != null && typeof valB === 'object' ? valB.valueOf() : valB;
 
-        if (typeof primA === 'number' && typeof primB === 'number') {
+        // Pine compares booleans with finite numbers after casting the
+        // boolean to its integer representation (false=0, true=1). Keep a
+        // NaN/Infinity number on the strict fallback path: this preserves
+        // the existing number/NaN behavior and the reference's mixed-na
+        // behavior.
+        const canCoerceBoolNumber =
+            (typeof primA === 'boolean' && typeof primB === 'number' && Number.isFinite(primB)) ||
+            (typeof primB === 'boolean' && typeof primA === 'number' && Number.isFinite(primA));
+        const normalizedA = canCoerceBoolNumber && typeof primA === 'boolean' ? (primA ? 1 : 0) : primA;
+        const normalizedB = canCoerceBoolNumber && typeof primB === 'boolean' ? (primB ? 1 : 0) : primB;
+
+        if (typeof normalizedA === 'number' && typeof normalizedB === 'number') {
             // Pine Script: any comparison with `na` evaluates to `na`.
-            if (isNaN(primA) || isNaN(primB)) return NaN;
+            if (isNaN(normalizedA) || isNaN(normalizedB)) return NaN;
 
             // TradingView treats values equal within an absolute 1e-10 tolerance.
-            return Math.abs(primA - primB) >= 1e-10;
+            return Math.abs(normalizedA - normalizedB) >= 1e-10;
         }
 
-        return primA !== primB;
+        return normalizedA !== normalizedB;
     };
 }
