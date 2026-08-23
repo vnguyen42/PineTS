@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright (C) 2026 LuxAlgo
 
-import { calculateOrderQty, parseDirection } from '../utils';
+import { calculateOrderQty, normalizeOrderLevel, parseDirection } from '../utils';
 import { Order } from '../types';
 import { Series } from '../../../Series';
 import { parseArgsForPineParams } from '../../utils';
@@ -72,8 +72,10 @@ export function order(context: any) {
         const idValue       = extractValue(parsed.id);
         const directionVal  = extractValue(parsed.direction);
         const qtyValue      = extractValue(parsed.qty);
-        const limitValue    = extractValue(parsed.limit);
-        const stopValue     = extractValue(parsed.stop);
+        const hasLimitLevel = Object.prototype.hasOwnProperty.call(parsed, 'limit') && parsed.limit !== undefined;
+        const hasStopLevel  = Object.prototype.hasOwnProperty.call(parsed, 'stop') && parsed.stop !== undefined;
+        const limitValue    = normalizeOrderLevel(extractValue(parsed.limit), hasStopLevel);
+        const stopValue     = normalizeOrderLevel(extractValue(parsed.stop), hasLimitLevel);
         const ocaName       = extractValue(parsed.oca_name);
         const ocaType       = extractValue(parsed.oca_type);
         const commentValue  = extractValue(parsed.comment);

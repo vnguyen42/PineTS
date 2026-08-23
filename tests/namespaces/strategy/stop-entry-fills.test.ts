@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { Context } from '../../../src/Context.class';
+import { NAHelper } from '../../../src/namespaces/Core';
 import { initializeStrategy, processStrategyOrders } from '../../../src/namespaces/strategy/utils';
 import { entry } from '../../../src/namespaces/strategy/methods/entry';
 import { order } from '../../../src/namespaces/strategy/methods/order';
@@ -264,4 +265,140 @@ describe('strategy stop-entries — TV fill semantics (VIN-95)', () => {
         entry(context)('L', 'long', { stop: 98 });
         expect(context.strategy.pending_orders[0].qty).toBe(Math.floor((1000000 * 50 / 100) / 98 * 1e5) / 1e5);
     });
+    const naLevelCases = [
+        {
+            name: 'market when both levels are na',
+            limit: Number.NaN,
+            stop: Number.NaN,
+            type: 'market',
+            expectedLimit: undefined,
+            expectedStop: undefined,
+            sizingPrice: 100,
+        },
+        {
+            name: 'pure stop when limit is na',
+            limit: Number.NaN,
+            stop: 95,
+            type: 'stop',
+            expectedLimit: undefined,
+            expectedStop: 95,
+            sizingPrice: 95,
+        },
+        {
+            name: 'pure limit when stop is na',
+            limit: 105,
+            stop: Number.NaN,
+            type: 'limit',
+            expectedLimit: 105,
+            expectedStop: undefined,
+            sizingPrice: 105,
+        },
+        {
+            name: 'stop-limit when both levels are real',
+            limit: 105,
+            stop: 95,
+            type: 'stop-limit',
+            expectedLimit: 105,
+            expectedStop: 95,
+            sizingPrice: 95,
+        },
+    ] as const;
+
+    it.each(naLevelCases)('normalizes entry levels: $name', (testCase) => {
+        const context = makeContext({ default_qty_type: 'cash', default_qty_value: 1000 });
+        entry(context)('entry', 'long', { limit: testCase.limit, stop: testCase.stop });
+
+        const pending = context.strategy.pending_orders[0];
+        expect(pending.type).toBe(testCase.type);
+        expect(pending.limit).toBe(testCase.expectedLimit);
+        expect(pending.stop).toBe(testCase.expectedStop);
+        expect(pending.qty).toBe(Math.floor((1000 / testCase.sizingPrice) * 1e6) / 1e6);
+        expect(pending._stop_marketable).toBe(testCase.type === 'stop' && testCase.sizingPrice < 100);
+    });
+
+    it.each(naLevelCases)('normalizes strategy.order levels: $name', (testCase) => {
+        const context = makeContext({ default_qty_type: 'cash', default_qty_value: 1000 });
+        order(context)({ id: 'order', direction: 'long', limit: testCase.limit, stop: testCase.stop });
+
+        const pending = context.strategy.pending_orders[0];
+        expect(pending.type).toBe(testCase.type);
+        expect(pending.limit).toBe(testCase.expectedLimit);
+        expect(pending.stop).toBe(testCase.expectedStop);
+        expect(pending.qty).toBe(Math.floor((1000 / testCase.sizingPrice) * 1e6) / 1e6);
+        expect(pending._stop_marketable).toBe(testCase.type === 'stop' && testCase.sizingPrice < 100);
+    });
+
+    const loneNaCases = [
+        { name: 'stop', levels: { stop: Number.NaN }, type: 'stop', field: 'stop' },
+        { name: 'limit', levels: { limit: Number.NaN }, type: 'limit', field: 'limit' },
+    ] as const;
+
+    it.each(loneNaCases)('keeps a lone na $name entry non-executable', (testCase) => {
+        const context = makeContext();
+        entry(context)('lone-na', 'long', testCase.levels);
+
+        const pending = context.strategy.pending_orders[0];
+        expect(pending.type).toBe(testCase.type);
+        expect(Number.isNaN(pending[testCase.field])).toBe(true);
+        setBar(context, 1, 101, 102, 100, 101);
+        expect(processStrategyOrders(context)).toBe(0);
+        expect(context.strategy.position_size).toBe(0);
+    });
+
+    it.each(loneNaCases)('keeps a lone na strategy.order $name non-executable', (testCase) => {
+        const context = makeContext();
+        order(context)({ id: 'lone-na', direction: 'long', ...testCase.levels });
+
+        const pending = context.strategy.pending_orders[0];
+        expect(pending.type).toBe(testCase.type);
+        expect(Number.isNaN(pending[testCase.field])).toBe(true);
+        setBar(context, 1, 101, 102, 100, 101);
+        expect(processStrategyOrders(context)).toBe(0);
+        expect(context.strategy.position_size).toBe(0);
+    });
+
+    it('fills an entry with limit=na and stop=na as a market order', () => {
+        const context = makeContext();
+        entry(context)('market', 'long', { limit: Number.NaN, stop: Number.NaN });
+        setBar(context, 1, 101, 102, 100, 101);
+
+        expect(processStrategyOrders(context)).toBe(1);
+        expect(context.strategy.position_size).toBe(1);
+    });
+
+    it('fills strategy.order with limit=na and stop=na as a market order', () => {
+        const context = makeContext();
+        order(context)({ id: 'market', direction: 'long', limit: Number.NaN, stop: Number.NaN });
+        setBar(context, 1, 101, 102, 100, 101);
+
+        expect(processStrategyOrders(context)).toBe(1);
+        expect(context.strategy.position_size).toBe(1);
+    });
+
+    it('treats an undefined sibling as omitted for a lone na entry', () => {
+        const context = makeContext();
+        entry(context)('undefined-sibling', 'long', { limit: Number.NaN, stop: undefined });
+
+        const pending = context.strategy.pending_orders[0];
+        expect(pending.type).toBe('limit');
+        expect(Number.isNaN(pending.limit)).toBe(true);
+        setBar(context, 1, 101, 102, 100, 101);
+        expect(processStrategyOrders(context)).toBe(0);
+        expect(context.strategy.position_size).toBe(0);
+    });
+
+    it('normalizes explicit NAHelper levels for strategy.order', () => {
+        const context = makeContext();
+        const na = new NAHelper();
+        order(context)({ id: 'na-helper', direction: 'long', limit: na, stop: na });
+
+        const pending = context.strategy.pending_orders[0];
+        expect(pending.type).toBe('market');
+        expect(pending.limit).toBeUndefined();
+        expect(pending.stop).toBeUndefined();
+        setBar(context, 1, 101, 102, 100, 101);
+        expect(processStrategyOrders(context)).toBe(1);
+        expect(context.strategy.position_size).toBe(1);
+    });
+
 });

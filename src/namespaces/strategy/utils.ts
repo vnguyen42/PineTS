@@ -85,6 +85,21 @@ export function roundToMintick(price: number, referencePrice: number, mintick: n
     const EPS = 1e-9;
     return price > referencePrice ? Math.ceil(ticks - EPS) * mintick : Math.floor(ticks + EPS) * mintick;
 }
+/**
+ * Pine's `na` price literal reaches the strategy runtime as `NaN`.
+ * Normalize it only when the sibling price level is also part of the call.
+ * A lone `stop=na`/`limit=na` keeps the legacy non-executable order shape;
+ * explicit `limit=na, stop=na` becomes a market order.
+ */
+export function normalizeOrderLevel<T>(value: T, pairedLevelProvided: boolean): T | undefined {
+    if (!pairedLevelProvided) return value;
+    if (typeof value === 'number' && Number.isNaN(value)) return undefined;
+    if (typeof value === 'object' && value !== null && '__value' in value) {
+        const pineValue = value.__value;
+        if (typeof pineValue === 'number' && Number.isNaN(pineValue)) return undefined;
+    }
+    return value;
+}
 
 interface IntrabarPathPosition {
     pathSegment: number;
