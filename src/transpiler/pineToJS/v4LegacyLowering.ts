@@ -70,7 +70,7 @@
 // `cond ? a : b` behavior, which is the documented v4→v5 migration path for
 // `iff`). Corpus usage (comparison conditions) does not exercise the na case.
 
-import { CallExpression, Identifier, MemberExpression, Program } from './ast';
+import { CallExpression, Identifier, MemberExpression, Program, UnaryExpression } from './ast';
 
 interface NamespaceTarget {
     ns: string;
@@ -495,6 +495,62 @@ function rewriteLegacyCalls(node: unknown, userFunctions: ReadonlySet<string>, r
         }
     }
 }
+
+/**
+ * Pine v4 treats a comparison against the bare `na` value as an absence test.
+ * Keep this rewrite in the v4-only pass: v5/v6 preserve their existing
+ * comparison/`na` propagation behavior.
+ *
+ * `na == na` is intentionally left untouched. It is outside the corpus and
+ * without a checked v4 oracle we must not assert a semantic result for the
+ * literal-on-both-sides case.
+ */
+function rewriteV4NaComparisons(node: unknown, userVariables: ReadonlySet<string>): void {
+    if (!isPineNode(node)) return;
+
+    if (
+        node.type === 'BinaryExpression' &&
+        'operator' in node &&
+        (node.operator === '==' || node.operator === '!=') &&
+        'left' in node &&
+        'right' in node
+    ) {
+        const leftIsNa = isBuiltinNa(node.left, userVariables);
+        const rightIsNa = isBuiltinNa(node.right, userVariables);
+        if (leftIsNa !== rightIsNa) {
+            const operand = leftIsNa ? node.right : node.left;
+            const naCall = new CallExpression(new Identifier('na'), [operand]);
+            const replacement = node.operator === '!=' ? new UnaryExpression('!', naCall) : naCall;
+            Object.assign(node, replacement);
+            deleteChildField(node, 'left');
+            deleteChildField(node, 'right');
+            if (replacement.type === 'CallExpression') deleteChildField(node, 'operator');
+        }
+    }
+
+    for (const key of Object.keys(node)) {
+        if (key === 'type') continue;
+        const val = childField(node, key);
+        if (Array.isArray(val)) {
+            for (const child of val) {
+                if (isPineNode(child)) rewriteV4NaComparisons(child, userVariables);
+            }
+        } else if (isPineNode(val)) {
+            rewriteV4NaComparisons(val, userVariables);
+        }
+    }
+}
+
+function isBuiltinNa(node: unknown, userVariables: ReadonlySet<string>): boolean {
+    return (
+        isPineNode(node) &&
+        node.type === 'Identifier' &&
+        'name' in node &&
+        node.name === 'na' &&
+        !userVariables.has('na')
+    );
+}
+
 function canRewriteValue(parent: unknown, key: string | number): boolean {
     if (!isPineNode(parent)) return typeof key === 'number';
     if (parent.type === 'CallExpression' && key === 'callee') return false;
@@ -562,6 +618,7 @@ export function lowerV4LegacyBuiltins(ast: Program): void {
     collectFunctionParams(ast, functionParams);
     for (let pass = 0; pass < 3; pass++) inferFunctionParamKinds(ast, functionParams, rsiBindings);
     rewriteLegacyCalls(ast, userFunctions, rsiBindings);
+    rewriteV4NaComparisons(ast, userVariables);
     rewriteLegacyValues(ast, userVariables);
 }
 

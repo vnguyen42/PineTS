@@ -38,6 +38,45 @@ describe('V4 legacy builtin lowering (call position → v5 namespaces)', () => {
         expect(code).toContain('math.round(close, 2)');
     });
 
+    it('lowers v4 comparisons with builtin na to na() absence tests', () => {
+        const code = codeOf(`
+x = close
+eqRight = x == na
+eqLeft = na == x
+neqRight = x != na
+neqLeft = na != x
+eqParen = x == (na)
+neqParen = (na) != (x)
+plot(eqRight)
+`);
+        expect(code).toContain('na(x)');
+        expect(code).toContain('!na(x)');
+        expect(code).not.toContain('x == na');
+        expect(code).not.toContain('na == x');
+        expect(code).not.toContain('x != na');
+        expect(code).not.toContain('na != x');
+    });
+
+    it('does not lower a user variable named na or the literal-na pair', () => {
+        const code = codeOf(`
+literalPair = na == na
+na = close
+shadowed = close == na
+plot(shadowed)
+`);
+        expect(code).toContain('na == na');
+        expect(code).toContain('close == na');
+        expect(code).not.toContain('na(close)');
+    });
+
+    it('gates na comparison lowering to v4', () => {
+        const result = pineToJS('//@version=5\nx = close == na\ny = na != close\nplot(x)');
+        expect(result.success).toBe(true);
+        expect(result.code).toContain('close == na');
+        expect(result.code).toContain('na != close');
+        expect(result.code).not.toContain('na(close)');
+    });
+
     it('maps str.* formatting', () => {
         const code = codeOf('a = tostring(close, "#.##")\nb = tonumber("1.5")\nplot(close)');
         expect(code).toContain('str.tostring(close, \'#.##\')');
@@ -217,6 +256,34 @@ plot(z, "z")
         const context = await pineTS.run(source);
         const values = (name: string) => context.plots[name].data.map((point: { value: unknown }) => point.value);
         expect(values('y')).toEqual(values('z'));
+    });
+
+    it('makes v4 x == na plot exactly match the manual v5 na(x) twin', async () => {
+        const v4Source = v4(`
+x = close[1]
+y = x == na ? 1 : 0
+plot(y, "y")
+`);
+        const v5Source = `//@version=5
+x = close[1]
+y = na(x) ? 1 : 0
+plot(y, "y")
+`;
+        const run = async (source: string) => {
+            const engine = new PineTS(Provider.Mock, 'BTCUSDC', 'W', null, new Date('2019-01-01').getTime(), new Date('2019-02-01').getTime());
+            return engine.run(source);
+        };
+        const [v4Context, v5Context] = await Promise.all([run(v4Source), run(v5Source)]);
+        expect(v4Context.plots.y.data).toEqual(v5Context.plots.y.data);
+        expect(v4Context.plots.y.data[0].value).toBe(1);
+    });
+
+    it('keeps v5 x == na on the existing NaN propagation path', async () => {
+        const engine = new PineTS(Provider.Mock, 'BTCUSDC', 'W', null, new Date('2019-01-01').getTime(), new Date('2019-02-01').getTime());
+        const context = await engine.run('//@version=5\nx = close == na\nplot(x, "x")');
+        const values = context.plots.x.data.map((point: { value: unknown }) => point.value);
+        expect(values.length).toBeGreaterThan(0);
+        expect(values.every((value: unknown) => typeof value === 'number' && Number.isNaN(value))).toBe(true);
     });
 
     it('does not inject iff into v5; the historical runtime error remains', async () => {
