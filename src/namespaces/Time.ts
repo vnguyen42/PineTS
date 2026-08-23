@@ -330,17 +330,47 @@ const TIME_COMPONENT_ARGS_TYPES = {
 export class TimeComponentHelper {
     private context: any;
     private extractor: (parts: DateParts) => number;
+    private readonly history = new Series([]);
 
     constructor(context: any, extractor: (parts: DateParts) => number) {
         this.context = context;
         this.extractor = extractor;
     }
 
+    /**
+     * Return the component as a context-local series.
+     *
+     * `context.data.openTime` is populated in bar order, so lazily extending
+     * this series also covers bars where the builtin was not referenced. This
+     * is important for a later `dayofmonth[1]`/`hour[1]`: history is a
+     * property of the builtin, not of the bars on which the script happened
+     * to read it.
+     */
     get __value() {
-        const currentTime = Series.from(this.context.data.openTime).get(0);
-        if (isNaN(currentTime)) return NaN;
+        const openTimes = Series.from(this.context.data.openTime).data;
         const timezone = this.context.pine?.syminfo?.timezone || 'UTC';
-        const parts = getDatePartsInTimezone(currentTime, timezone);
+
+        if (this.history.data.length > openTimes.length) {
+            this.history.data.length = openTimes.length;
+        }
+
+        for (let i = this.history.data.length; i < openTimes.length; i++) {
+            this.history.data.push(this.extract(openTimes[i], timezone));
+        }
+
+        // A streaming update may replace the current candle without changing
+        // the series length; refresh that last value in place.
+        if (openTimes.length > 0) {
+            const last = openTimes.length - 1;
+            this.history.data[last] = this.extract(openTimes[last], timezone);
+        }
+
+        return this.history;
+    }
+
+    private extract(timestamp: number, timezone: string): number {
+        if (isNaN(timestamp)) return NaN;
+        const parts = getDatePartsInTimezone(timestamp, timezone);
         return this.extractor(parts);
     }
 
@@ -351,9 +381,9 @@ export class TimeComponentHelper {
     any(...args: any[]) {
         const unwrapped = args.map((a) => (a instanceof Series ? a.get(0) : a));
 
-        // No args → same as bare identifier
+        // No args → same scalar value as the bare identifier.
         if (unwrapped.length === 0) {
-            return this.__value;
+            return this.__value.get(0);
         }
 
         const parsed = parseArgsForPineParams<any>(unwrapped, TIME_COMPONENT_SIGNATURES, TIME_COMPONENT_ARGS_TYPES);

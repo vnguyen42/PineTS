@@ -2,11 +2,75 @@ import { Series } from '../Series';
 
 export class Barstate {
     private _live: boolean = false;
+    private readonly history: Record<string, Series> = {};
 
     constructor(private context: any) {}
+
     public setLive() {
         this._live = true;
     }
+
+    /**
+     * Return a context-local series for a historical barstate flag.
+     *
+     * The transpiler uses this only for `barstate.<flag>[n]`; the ordinary
+     * getters below intentionally remain scalar so bare `barstate.isfirst`
+     * keeps its existing semantics.
+     */
+    public __series(name: string): Series {
+        let series = this.history[name];
+        if (!series) {
+            series = new Series([]);
+            this.history[name] = series;
+        }
+
+        const targetLength = Math.max(0, this.context.idx + 1);
+        if (series.data.length > targetLength) {
+            series.data.length = targetLength;
+        }
+        for (let index = series.data.length; index < targetLength; index++) {
+            series.data.push(this.valueAt(name, index));
+        }
+        if (targetLength > 0) {
+            series.data[targetLength - 1] = this.valueAt(name, targetLength - 1);
+        }
+        return series;
+    }
+    private valueAt(name: string, index: number): boolean {
+        switch (name) {
+            case 'isnew':
+                return !this._live;
+            case 'islast':
+                return index === this.context.length - 1;
+            case 'isfirst':
+                return index === 0;
+            case 'ishistory':
+                return index < this.context.length - 1;
+            case 'isrealtime':
+                return index === this.context.length - 1;
+            case 'isconfirmed': {
+                const closeTime = this.context.marketData?.[index]?.closeTime ??
+                    this.context.data.closeTime?.data?.[index];
+                return typeof closeTime === 'number' && closeTime <= Date.now();
+            }
+            case 'islastconfirmedhistory': {
+                const totalBars = this.context.length;
+                if (index === totalBars - 1) {
+                    const closeTime = this.context.marketData?.[index]?.closeTime ??
+                        this.context.data.closeTime?.data?.[index];
+                    return typeof closeTime === 'number' && closeTime <= Date.now();
+                }
+                if (index === totalBars - 2) {
+                    const lastCloseTime = this.context.marketData?.[totalBars - 1]?.closeTime;
+                    return typeof lastCloseTime === 'number' && lastCloseTime > Date.now();
+                }
+                return false;
+            }
+            default:
+                return false;
+        }
+    }
+
     public get isnew() {
         return !this._live;
     }

@@ -63,6 +63,99 @@ const NAMED_ARGS_PARAM_ORDER: Record<string, string[]> = {
 
 
 /**
+ * Singleton values that Pine exposes as scalar-looking identifiers but whose
+ * history operator still has series semantics. Their runtime helpers expose
+ * `.__value` as a Series, so the existing direct namespace lowering can read
+ * them with `$.get(...)`.
+ */
+const HISTORICAL_SINGLETON_NAMES: Record<string, true> = {
+    time: true,
+    time_close: true,
+    dayofmonth: true,
+    dayofweek: true,
+    hour: true,
+    minute: true,
+    month: true,
+    second: true,
+    weekofyear: true,
+    year: true,
+};
+
+const BARSTATE_HISTORY_FLAGS: Record<string, true> = {
+    isnew: true,
+    islast: true,
+    isfirst: true,
+    ishistory: true,
+    isrealtime: true,
+    isconfirmed: true,
+    islastconfirmedhistory: true,
+};
+
+function getSingletonHistoryKind(node: any): { kind: 'time' | 'barstate'; name: string } | undefined {
+    if (!node?.computed || node.property?.type === 'PrivateIdentifier') return undefined;
+
+    if (
+        node.object?.type === 'Identifier' &&
+        typeof node.object.name === 'string' &&
+        HISTORICAL_SINGLETON_NAMES[node.object.name]
+    ) {
+        return { kind: 'time', name: node.object.name };
+    }
+
+    if (
+        node.object?.type === 'MemberExpression' &&
+        !node.object.computed &&
+        node.object.object?.type === 'Identifier' &&
+        node.object.object.name === 'barstate' &&
+        node.object.property?.type === 'Identifier' &&
+        BARSTATE_HISTORY_FLAGS[node.object.property.name]
+    ) {
+        return { kind: 'barstate', name: node.object.property.name };
+    }
+
+    return undefined;
+}
+
+function createSingletonSeries(historyKind: { kind: 'time' | 'barstate'; name: string }): any {
+    if (historyKind.kind === 'barstate') {
+        const barstate = ASTFactory.createIdentifier('barstate');
+        barstate._skipTransformation = true;
+        const accessor = ASTFactory.createMemberExpression(
+            barstate,
+            ASTFactory.createIdentifier('__series'),
+        );
+        const series = ASTFactory.createCallExpression(accessor, [ASTFactory.createLiteral(historyKind.name)]);
+        series._transformed = true;
+        return series;
+    }
+
+    const singleton = ASTFactory.createIdentifier(historyKind.name);
+    singleton._skipTransformation = true;
+    return ASTFactory.createMemberExpression(
+        singleton,
+        ASTFactory.createIdentifier('__value'),
+    );
+}
+
+function lowerSingletonHistory(node: any, scopeManager: ScopeManager): boolean {
+    const historyKind = getSingletonHistoryKind(node);
+    if (!historyKind || node._historyTransformed) return false;
+
+    if (!node._indexTransformed) {
+        transformArrayIndex(node, scopeManager);
+        node._indexTransformed = true;
+    }
+
+    const getCall: any = ASTFactory.createGetCall(createSingletonSeries(historyKind), node.property);
+    getCall._transformed = true;
+    getCall._historyTransformed = true;
+    Object.assign(node, getCall);
+    delete node.object;
+    delete node.property;
+    delete node.computed;
+    return true;
+}
+/**
  * Build the third argument to a `*.param(value, idx, name)` call. The
  * statically-allocated `pN` string is unique across the script, but
  * `Context.param` stores the resulting series in `context.params[name]` —
@@ -440,6 +533,9 @@ export function transformIdentifier(node: any, scopeManager: ScopeManager): void
 export function transformMemberExpression(memberNode: any, originalParamName: string, scopeManager: ScopeManager): void {
     // Skip transformation for Math object properties
     if (memberNode.object && memberNode.object.type === 'Identifier' && memberNode.object.name === 'Math') {
+        return;
+    }
+    if (memberNode.computed && lowerSingletonHistory(memberNode, scopeManager)) {
         return;
     }
 
@@ -837,6 +933,10 @@ function transformOperand(node: any, scopeManager: ScopeManager, namespace: stri
             return getParamFromLogicalExpression(node, scopeManager, namespace);
         }
         case 'MemberExpression': {
+            if (node.computed && lowerSingletonHistory(node, scopeManager)) {
+                return node;
+            }
+
             // For non-computed property access on NAMESPACES_LIKE identifiers (e.g. label.style_label_down),
             // leave as-is — these are namespace constant accesses, not series values.
             const isNamespacePropAccess = !node.computed &&
@@ -1152,7 +1252,16 @@ function getParamFromUnaryExpression(node: any, scopeManager: ScopeManager, name
 }
 
 export function transformFunctionArgument(arg: any, namespace: string, scopeManager: ScopeManager): any {
-    // Handle binary expressions (arithmetic operations)
+    const historyKind = arg?.type === 'MemberExpression' && arg.computed
+        ? getSingletonHistoryKind(arg)
+        : undefined;
+    if (historyKind) {
+        // Keep the history offset as a Series offset for function parameters.
+        // A scalar $.get(...) would make `fn(singleton[1])` lose its series
+        // shape before the callee can apply its own history operator.
+        arg.object = createSingletonSeries(historyKind);
+    }
+
 
     switch (arg?.type) {
         case 'BinaryExpression':
