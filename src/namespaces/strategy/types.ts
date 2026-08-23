@@ -138,6 +138,11 @@ export interface Order {
     // refresh. Later ticks require a fresh crossing and cannot re-trigger it.
     _cof_stop_limit_evaluated?: boolean;
 
+    // Internal marker (VIN-95): a pure stop order already beyond the signal
+    // bar's close at submission (buy stop < close / sell stop > close) is a
+    // triggered order. It keeps its LEVEL for sizing (VIN-89) but fills at
+    // the next admissible open.
+    _stop_marketable?: boolean;
     // Exit-specific fields (only set when category === 'exit').
     // strategy.exit() parameters: profit (TP in ticks), loss (SL in ticks),
     // limit/stop (price-based TP/SL), trail_price/trail_offset/trail_points

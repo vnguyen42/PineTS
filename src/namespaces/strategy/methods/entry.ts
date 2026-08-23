@@ -203,6 +203,17 @@ export function entry(context: any) {
         const limitValueRounded = limitValue !== undefined ? roundToMintick(limitValue, currentPrice, mintick) : undefined;
         const stopValueRounded  = stopValue  !== undefined ? roundToMintick(stopValue,  currentPrice, mintick) : undefined;
 
+        // A stop already beyond the signal bar's close is marketable at
+        // submission (VIN-95): it keeps its level for sizing — the qty was
+        // computed above from `stopValue` — but behaves as a triggered stop
+        // and fills at the next admissible open. Equality remains a stop
+        // crossing on the next bar, with 1-ulp tolerance reserved for
+        // trigger-vs-feed comparisons.
+        const stopMarketable = orderType === 'stop'
+            && stopValueRounded !== undefined
+            && ((dir === 1 && stopValueRounded < currentPrice - 1e-12 * Math.max(1, Math.abs(currentPrice)))
+                || (dir === -1 && stopValueRounded > currentPrice + 1e-12 * Math.max(1, Math.abs(currentPrice))));
+
         const currentTime = Series.from(context.data.openTime).get(0);
 
         const orderObj: Order = {
@@ -220,6 +231,7 @@ export function entry(context: any) {
             oca_type: ocaType as 'cancel' | 'reduce' | 'none' | undefined,
             comment: commentValue,
             _isReversalEntry: isReversal,
+            _stop_marketable: stopMarketable,
             // Ordered base size (before the reversal close-qty addition).
             // executeOrder uses it to split a reversal OVERSHOOT into its
             // own lot when a deferred close-margin-call shrank the

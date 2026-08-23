@@ -459,9 +459,25 @@ export function processStrategyOrders(context: any, phase: 'open' | 'close' = 'o
                                 shouldFill = true;
                                 fillPrice = cofState.pass === 0 ? tickPrice : order.stop;
                             }
-                        } else if (highPrice >= order.stop) {
-                            shouldFill = true;
-                            fillPrice = order.stop;
+                        } else {
+                            // TV stop-entry semantics (VIN-95): a buy-stop
+                            // already crossed at the bar's open fills at the
+                            // open (gap-through); otherwise a stop reached
+                            // intrabar fills at the stop level — equality
+                            // inclusive. The rounded trigger (2538×0.001 →
+                            // 2.5380000000000003) and the feed price (2.538)
+                            // can differ by 1 ulp, so an exact touch compares
+                            // with a magnitude-relative tolerance (C1-1665:
+                            // high == stop == 2.538). An order already
+                            // marketable at submission behaves as a triggered
+                            // market order and fills at the next admissible
+                            // open regardless of the gap (C4-2097).
+                            const stopEps = 1e-12 * Math.max(1, Math.abs(order.stop));
+                            const gapAtOpen = openPrice >= order.stop - stopEps;
+                            if (order._stop_marketable || highPrice >= order.stop - stopEps) {
+                                shouldFill = true;
+                                fillPrice = (order._stop_marketable || gapAtOpen) ? openPrice : order.stop;
+                            }
                         }
                     } else if (tickPrice !== undefined) {
                         const crossed = cofState.pass === 0
@@ -471,9 +487,14 @@ export function processStrategyOrders(context: any, phase: 'open' | 'close' = 'o
                             shouldFill = true;
                             fillPrice = cofState.pass === 0 ? tickPrice : order.stop;
                         }
-                    } else if (lowPrice <= order.stop) {
-                        shouldFill = true;
-                        fillPrice = order.stop;
+                    } else {
+                        // Mirror for sell-stops (see the LONG branch above).
+                        const stopEps = 1e-12 * Math.max(1, Math.abs(order.stop));
+                        const gapAtOpen = openPrice <= order.stop + stopEps;
+                        if (order._stop_marketable || lowPrice <= order.stop + stopEps) {
+                            shouldFill = true;
+                            fillPrice = (order._stop_marketable || gapAtOpen) ? openPrice : order.stop;
+                        }
                     }
                 }
                 break;
