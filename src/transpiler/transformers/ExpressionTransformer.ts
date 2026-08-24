@@ -28,8 +28,9 @@ const UNDEFINED_ARG = {
  * is `source` inside the closure).
  */
 const NAMED_ARGS_PARAM_ORDER: Record<string, string[]> = {
-    // ta.* — 18 functions, 14 corpus scripts
+    // ta.* — 19 functions, 15 corpus scripts
     'ta.atr': ['length'],
+    'ta.change': ['source', 'length'],
     'ta.sma': ['source', 'length'],
     'ta.ema': ['source', 'length'],
     'ta.wma': ['source', 'length'],
@@ -483,6 +484,20 @@ export function transformIdentifier(node: any, scopeManager: ScopeManager): void
             return;
         }
 
+        // Function parameters and generated local-series bindings must win
+        // over same-named globals. Pine parameters shadow globals for the
+        // whole function body; generated pN/temp_N names refer to their
+        // hoisted bindings (VIN-94).
+        if (scopeManager.isLocalSeriesVar(node.name)) {
+            // If it's not an array access, we need to wrap it in $.get(node, 0) to get the value
+            if (!hasArrayAccess) {
+                const memberExpr = ASTFactory.createIdentifier(node.name);
+                const accessExpr = ASTFactory.createGetCall(memberExpr, 0);
+                Object.assign(node, accessExpr);
+            }
+            return;
+        }
+
         const isContextBoundVar = scopeManager.isContextBound(node.name) && !scopeManager.isRootParam(node.name);
 
         if (isContextBoundVar) {
@@ -494,18 +509,6 @@ export function transformIdentifier(node: any, scopeManager: ScopeManager): void
                 // Return early if it's not a function arg or switch test that needs unwrapping
                 return;
             }
-        }
-
-        // For local series variables used elsewhere (e.g. in plot() or binary ops), we MIGHT need to wrap them
-        // But we definitely shouldn't rename them to $.let...
-        if (scopeManager.isLocalSeriesVar(node.name)) {
-            // If it's not an array access, we need to wrap it in $.get(node, 0) to get the value
-            if (!hasArrayAccess) {
-                const memberExpr = ASTFactory.createIdentifier(node.name);
-                const accessExpr = ASTFactory.createGetCall(memberExpr, 0);
-                Object.assign(node, accessExpr);
-            }
-            return;
         }
 
         const [scopedName, kind] = scopeManager.getVariable(node.name);
@@ -897,15 +900,15 @@ function transformIdentifierForParam(node: any, scopeManager: ScopeManager): any
             return node;
         }
 
-        // Check if there's a user-defined variable with this name before treating as local series
-        // This handles the case where internal parameter names (p1, p2, etc.) collide with user variables
-        const [scopedName, kind] = scopeManager.getVariable(node.name);
-        const isUserVariable = scopedName !== node.name; // If renamed, it's a user variable
-
-        // If it's a local series variable (hoisted parameter) AND NOT a user variable, return as is
-        if (scopeManager.isLocalSeriesVar(node.name) && !isUserVariable) {
+        // Function parameters and generated local-series bindings always
+        // resolve to their local JavaScript binding, even when a global user
+        // variable has the same name (Pine parameter shadowing, VIN-94).
+        if (scopeManager.isLocalSeriesVar(node.name)) {
             return node;
         }
+
+        const [scopedName, kind] = scopeManager.getVariable(node.name);
+        const isUserVariable = scopedName !== node.name; // If renamed, it's a user variable
 
         // If it's a user variable, transform it
         if (isUserVariable) {
