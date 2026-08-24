@@ -1312,7 +1312,14 @@ export function transformReturnStatement(node: any, scopeManager: ScopeManager):
                 // transformMemberExpression so the call-result history ref is
                 // lowered to `$.get($.param(...), N)` (a scalar). Otherwise the
                 // return path leaves a raw subscript on a scalar (→ NaN).
-                if (node.argument.computed && node.argument.object.type === 'CallExpression') {
+                // The nested case `(close[N])[M]` (object is itself a computed
+                // member) must reach the same handler — transformMemberExpression
+                // materializes the inner series access per bar (VIN-121).
+                if (
+                    node.argument.computed &&
+                    (node.argument.object.type === 'CallExpression' ||
+                     (node.argument.object.type === 'MemberExpression' && node.argument.object.computed))
+                ) {
                     transformMemberExpression(node.argument, '', scopeManager);
                 }
                 // For member expressions, check if the object is context-bound

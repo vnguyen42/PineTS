@@ -866,6 +866,48 @@ export function transformMemberExpression(memberNode: any, originalParamName: st
             return;
         }
     }
+
+    // Pine history-of-history: `EXPR[N][M]` where the INNER `EXPR[N]` is itself
+    // a series access. In Pine, `[]` is ALWAYS the history operator —
+    // `(close[ta.barssince(cond)])[1]` reads the `close[N]` series M bars ago.
+    // The walker visits the OUTER member before the inner has been lowered to
+    // `$.get(...)`, so at this point the inner is still a MemberExpression.
+    // Transform it first, then materialize it as a per-bar series with the same
+    // `$.param` machinery as call-result history and read M bars back. Without
+    // this, the outer `[M]` is left as a raw JS subscript on the `$.get(...)`
+    // scalar (→ undefined/NaN, VIN-121/2475) or folded into `$.init`'s ignored
+    // lookbehind (the declaration path detects a still-MemberExpression init).
+    if (
+        memberNode.computed &&
+        memberNode.object &&
+        memberNode.object.type === 'MemberExpression' &&
+        memberNode.object.computed &&
+        !memberNode._historyTransformed
+    ) {
+        transformMemberExpression(memberNode.object, '', scopeManager);
+        const inner = memberNode.object;
+        if (inner.type === 'CallExpression') {
+            const paramId = scopeManager.generateParamId();
+            const paramCall = {
+                type: 'CallExpression',
+                callee: ASTFactory.createMemberExpression(
+                    ASTFactory.createContextIdentifier(),
+                    ASTFactory.createIdentifier('param'),
+                ),
+                arguments: [inner, UNDEFINED_ARG, makeParamNameArg(scopeManager, paramId)],
+                _transformed: true,
+                _isParamCall: true,
+            };
+            const getCall = ASTFactory.createGetCall(paramCall, memberNode.property);
+            getCall._transformed = true;
+            getCall._historyTransformed = true;
+            Object.assign(memberNode, getCall);
+            delete memberNode.object;
+            delete memberNode.property;
+            delete memberNode.computed;
+            return;
+        }
+    }
 }
 
 // Helper for transformFunctionArgument
