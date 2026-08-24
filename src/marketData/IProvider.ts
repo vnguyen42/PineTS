@@ -90,4 +90,16 @@ export interface IProvider {
     getMarketData(tickerId: string, timeframe: string, limit?: number, sDate?: number, eDate?: number): Promise<Kline[]>;
     getSymbolInfo(tickerId: string): Promise<ISymbolInfo>;
     configure(config: any): void;
+    /**
+     * VIN-113 (optional): daily FX close series for account ↔ symbol currency
+     * conversion, keyed by `<symbolCurrency><accountCurrency>` (e.g.
+     * `"USDTUSD"`), each a sorted array of `[dayUtcMs, close]`. When absent,
+     * cash sizing and convert_to_* keep their pre-VIN-113 behavior.
+     */
+    getCurrencyRates?(): Record<string, Array<[number, number]>> | undefined;
+    /**
+     * VIN-113 (optional): instrument quantity step used to truncate computed
+     * cash quantities (e.g. 0.001 for CAKEUSDT). Absent → generic precision.
+     */
+    getQtyStep?(): number | undefined;
 }

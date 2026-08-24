@@ -150,7 +150,11 @@ plot(ta.vwap(hlc3), title="vwaph")
 `;
         const jsCode = transpile(source).toString();
         expect(jsCode).toContain('ta.vwap($.data.hlc3, "_ta0")');
-        expect(jsCode).toContain('ta.vwap(p2, "_ta1")');
+        // The explicit `ta.vwap(close)` keeps its own source argument
+        // (param-wrapped), not the bare-member hlc3 default. VIN-118 wraps
+        // the bare member's result in a param as well, so the exact param id
+        // of the close argument is an implementation detail — assert shape.
+        expect(jsCode).toMatch(/ta\.vwap\(p\d+, "_ta1"\)/);
         const operandCode = transpile(`//@version=5
 indicator("vwap operand")
 signal = close > ta.vwap

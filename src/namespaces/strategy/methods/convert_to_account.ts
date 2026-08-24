@@ -1,26 +1,21 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright (C) 2026 LuxAlgo
 
+import { convertSymbolToAccount, currentBarTimeMs } from '../currency';
+
 /**
  * Convert a value from the symbol's currency to the account currency.
  *
- * Pine semantics:
- *   - same currency string → return the value unchanged (identity)
- *   - different currency strings → return `na` (NaN), since no FX
- *     rate is available. String equality is used, not economic
- *     equivalence — so nominally pegged pairs like USDC vs USD still
- *     return NaN when their currency strings differ.
- *
- * When `syminfo.currency` is undefined we fall back to identity rather
- * than NaN, so synthetic / array-fed datasets without a syminfo block
- * don't get poisoned.
+ * Pre-VIN-113 behavior (preserved when no FX rate series is provided):
+ * identity passthrough when account and symbol currencies are the same
+ * string, NaN when they differ. With a `currencyRates` series provided by
+ * the host, the value is actually converted at the previous daily FX close
+ * (see currency.ts). String equality is used, not economic equivalence — so
+ * nominally pegged pairs like USDC vs USD still fall back when their
+ * currency strings differ.
  */
 export function convert_to_account(context: any) {
     return (value: number) => {
-        const s = context.strategy;
-        const symCur = context.pine?.syminfo?.currency;
-        const acctCur = s?.account_currency ?? 'USD';
-        if (symCur && symCur !== acctCur) return NaN;
-        return value;
+        return convertSymbolToAccount(context, value, currentBarTimeMs(context), 'na');
     };
 }

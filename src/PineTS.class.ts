@@ -1100,6 +1100,15 @@ export class PineTS {
         });
 
         context.pine.syminfo = this._syminfo;
+        // VIN-113: optional host-provided FX rate series and quantity step
+        // (from the provider). The strategy sizing/conversion helpers read
+        // them off context.pine; absent → pre-VIN-113 behavior.
+        const rates = (this.source as IProvider | undefined)?.getCurrencyRates?.();
+        if (rates) context.pine.currencyRates = rates;
+        const qtyStep = (this.source as IProvider | undefined)?.getQtyStep?.();
+        if (typeof qtyStep === 'number' && qtyStep > 0 && Number.isFinite(qtyStep)) {
+            context.pine.qtyStep = qtyStep;
+        }
         // THE CHART TYPE IS THE TICKER (single source of truth): a non-standard chart is
         // addressed by an extended ticker — `new PineTS(source, "SYM;heikinashi", …)` — so
         // the provider fetches the underlying standard feed while the constructor

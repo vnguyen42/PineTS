@@ -1545,9 +1545,32 @@ export function transformFunctionArgument(arg: any, namespace: string, scopeMana
             const variableDecl = ASTFactory.createVariableDeclaration(tempVarName, callExpr);
             scopeManager.addOuterHoistedStatement(variableDecl);
 
-            // Replace the argument with a reference to the hoisted variable
+            // Replace the argument with a reference to the hoisted variable.
+            // The bare scalar MUST still be wrapped in the namespace param
+            // machinery (same as any other expression argument below): a raw
+            // number loses its per-bar history once passed to a
+            // history-reading builtin — Series.from(number).get(1) is NaN, so
+            // `ta.crossover(ma, ta.vwap)` never fired while the equivalent
+            // `above = ma > ta.vwap; above and not above[1]` fired hundreds of
+            // times (VIN-118, corpus id 1861). The param buffer is the only
+            // place the per-bar values accumulate for lookback.
             Object.assign(arg, ASTFactory.createIdentifier(tempVarName));
-            return arg;
+            const paramMemberExpr = ASTFactory.createMemberExpression(ASTFactory.createIdentifier(nsName), ASTFactory.createIdentifier('param'));
+            const paramId = scopeManager.generateParamId();
+            const paramCall = {
+                type: 'CallExpression',
+                callee: paramMemberExpr,
+                arguments: [arg, UNDEFINED_ARG, makeParamNameArg(scopeManager, paramId)],
+                _transformed: true,
+                _isParamCall: true,
+            };
+            if (!scopeManager.shouldSuppressHoisting()) {
+                scopeManager.addLocalSeriesVar(paramId);
+                const paramDecl = ASTFactory.createVariableDeclaration(paramId, paramCall);
+                scopeManager.addHoistedStatement(paramDecl);
+                return ASTFactory.createIdentifier(paramId);
+            }
+            return paramCall;
         }
 
         // Handle property access like trade.entry

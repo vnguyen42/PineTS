@@ -4,6 +4,7 @@
 import { Order, StrategyState, Trade } from './types';
 import { Series } from '../../Series';
 import { defaultStrategyMargin } from './defaults';
+import { convertAccountToSymbol, currentBarTimeMs } from './currency';
 
 /**
  * Parse strategy() function arguments
@@ -295,8 +296,27 @@ export function calculateOrderQty(context: any, specifiedQty: number | undefined
             break;
 
         case 'cash':
-            // Calculate how many units we can buy with the cash amount
-            rawQty = qtyValue / fillPrice;
+            // VIN-113: the cash amount is expressed in the ACCOUNT currency
+            // (strategy.currency). TV converts it to the symbol currency at
+            // the previous daily FX rate before dividing by the sizing price
+            // (cash sizing on 1918/1999 CAKEUSDT reproduced 524/524 with
+            // qty = floor3((50000/R(t))/close)). Without a rate series
+            // provided by the host the amount passes through unconverted,
+            // preserving the pre-VIN-113 corpus behavior.
+            // ACTED CHOICE (VIN-113 review): unlike percent_of_equity (VIN-89),
+            // no commission reserve is applied to the cash denominator — the
+            // only cash captures (1918/1999) have commission_value=0, which
+            // makes both hypotheses indistinguishable. Revisit with a TV
+            // capture combining cash sizing and a non-zero percent commission.
+            rawQty = convertAccountToSymbol(context, qtyValue, currentBarTimeMs(context), 'identity') / fillPrice;
+            // TV truncates the resulting quantity at the instrument's qty
+            // step (0.001 on CAKEUSDT — the 1044 TV quantities have ≤3
+            // decimals). The step is per-instrument and only applied when
+            // the provider supplies it; otherwise the generic six-decimal
+            // truncation below applies (corpus unchanged).
+            if (typeof context.pine?.qtyStep === 'number' && context.pine.qtyStep > 0 && Number.isFinite(context.pine.qtyStep)) {
+                return Math.floor(rawQty / context.pine.qtyStep) * context.pine.qtyStep;
+            }
             break;
 
         case 'percent_of_equity': {
