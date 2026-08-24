@@ -232,7 +232,7 @@ export class PineTS {
     ) {
         this._isHeikinAshi = splitTickerModifier(String(tickerId ?? '')).modifier === 'heikinashi';
         this._providerTickerId = stripTickerModifier(String(tickerId ?? ''));
-        this._readyPromise = new Promise((resolve) => {
+        this._readyPromise = new Promise((resolve, reject) => {
             this.loadMarketData(source, this._providerTickerId, timeframe, limit, sDate, eDate).then((data) => {
                 const marketData = this._isHeikinAshi ? transformHeikinAshi(data) : data;
 
@@ -286,6 +286,10 @@ export class PineTS {
                     this._ready = true;
                     resolve(true);
                 }
+            }).catch((error) => {
+                // A provider failure must reject ready() instead of leaving
+                // every caller pending forever (notably request.security()).
+                reject(error);
             });
         });
     }

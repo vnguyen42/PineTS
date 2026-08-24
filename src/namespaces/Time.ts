@@ -2,55 +2,73 @@
 
 import { Series } from '../Series';
 import { parseArgsForPineParams } from './utils';
+import { normalizeTimeframe, parseCalendarMultiplier, isCalendarForm } from './request/utils/TIMEFRAMES';
+
+export { normalizeTimeframe };
 
 // ── Timeframe alignment utilities ───────────────────────────────────
 
 /**
- * Normalize a Pine Script timeframe string to a canonical form.
- * e.g. "1D" → "D", "60" → "60", "1W" → "W", "" → ""
- */
-export function normalizeTimeframe(tf: string): string {
-    if (!tf) return '';
-    const s = tf.trim().toUpperCase();
-    if (s === '1D' || s === 'D') return 'D';
-    if (s === '1W' || s === 'W') return 'W';
-    if (s === '1M' || s === 'M') return 'M';
-    // Strip leading "1" from minute timeframes only if it's just "1" (1 minute)
-    return s;
-}
-
-/**
  * Compute the opening timestamp of the higher-timeframe bar that contains the given timestamp.
  *
+ * Calendar timeframes honor the multiplier (TradingView "Timeframes" docs):
+ * '2D'/'3W'/'12M' bucket N calendar units together, 'D'/'W'/'M' are N=1.
+ *
+ * ⚠ ANCRE DES BUCKETS — hypothèse documentée, NON vérifiée par oracle : la
+ * LONGUEUR d'une période N-unités est documentée par TV, mais l'ANCRE de
+ * phase n'a aucun oracle — aucune capture TV n'exerce les multi-unités.
+ * Implémentation retenue (décision actée) :
+ *   - 'ND' : buckets de N jours ancrés à l'epoch UTC (dayIndex = floor(t/86400000),
+ *            bucketStart = floor(dayIndex/N)*N) ;
+ *   - 'NW' : buckets de N semaines ISO ancrés lundi (semaineIndex ancrée sur le
+ *            lundi epoch 1970-01-05, semaineIndex = floor((dayIndex-4)/7)) ;
+ *   - 'NM' : buckets de N mois calendaire (monthIndex = year*12+month,
+ *            bucketStart = floor(monthIndex/N)*N).
+ * À épingler par une capture TV dédiée si un script réel en dépend pour
+ * trader (référence : le seul consommateur corpus 2123 a son con1 mort par
+ * le bug séparé des args nommés ta.change — aucun script vivant ne dépend
+ * encore de l'ancre). N=1 reproduit EXACTEMENT le comportement antérieur
+ * ('D'/'W'/'M' et '1D'/'1W'/'1M' — zéro régression, les témoins en dépendent).
+ *
  * For intraday TFs (minutes): floor to the nearest multiple of the TF duration within the day.
- * For daily: floor to UTC day start (00:00 UTC).
- * For weekly: floor to Monday 00:00 UTC.
- * For monthly: floor to 1st of month 00:00 UTC.
  */
 export function alignToTimeframe(timestamp: number, tf: string): number {
     const MS_MIN = 60_000;
     const MS_DAY = 86_400_000;
 
-    // Parse timeframe to minutes
-    const tfMinutes = parseTimeframeMinutes(tf);
+    // Calendar multiplier+unit — single source of truth for the calendar parse
+    // and its bounds (TIMEFRAMES.ts, shared with request.security). 'D'/'W'/'M'
+    // carry no multiplier (N=1); non-calendar timeframes ('240', '30S') fall
+    // through to the minute path. Out-of-bounds calendar forms ('370D', '0D')
+    // yield NaN — callers validate first (time() throws, timeframe.change()
+    // returns false).
+    if (isCalendarForm(tf) && parseCalendarMultiplier(tf) === null) return NaN;
+    const cal = parseCalendarMultiplier(tf);
+    const unit = cal === null ? tf.slice(-1).toUpperCase() : cal.unit;
+    const n = cal === null ? 1 : cal.n;
 
-    if (tf === 'M') {
-        // Monthly: floor to 1st of month 00:00 UTC
+    if (unit === 'M') {
+        // Buckets of N calendar months: monthIndex = year*12+month, floor(monthIndex/N)*N
         const d = new Date(timestamp);
-        return Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), 1);
+        const monthIndex = d.getUTCFullYear() * 12 + d.getUTCMonth();
+        const bucketMonth = Math.floor(monthIndex / n) * n;
+        return Date.UTC(Math.floor(bucketMonth / 12), bucketMonth % 12, 1);
     }
 
-    if (tf === 'W') {
-        // Weekly: floor to Monday 00:00 UTC
-        const d = new Date(timestamp);
-        const day = d.getUTCDay(); // 0=Sun, 1=Mon, ...
-        const daysToMonday = day === 0 ? 6 : day - 1;
-        return Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate() - daysToMonday);
+    if (unit === 'W') {
+        // Buckets of N ISO weeks anchored on Monday epoch 1970-01-05 (dayIndex 4)
+        const dayIndex = Math.floor(timestamp / MS_DAY);
+        const weekIndex = Math.floor((dayIndex - 4) / 7);
+        const bucketWeek = Math.floor(weekIndex / n) * n;
+        return (4 + bucketWeek * 7) * MS_DAY;
     }
 
-    if (tf === 'D' || tfMinutes >= 1440) {
-        // Daily: floor to 00:00 UTC
-        return Math.floor(timestamp / MS_DAY) * MS_DAY;
+    const tfMinutes = parseMinuteTimeframe(tf);
+    if (unit === 'D' || tfMinutes >= 1440) {
+        // Buckets of N days anchored to the UTC epoch: dayIndex = floor(t/86400000),
+        // bucketStart = floor(dayIndex/N)*N
+        const dayIndex = Math.floor(timestamp / MS_DAY);
+        return Math.floor(dayIndex / n) * n * MS_DAY;
     }
 
     // Intraday: floor to the nearest multiple of the TF duration
@@ -63,13 +81,13 @@ export function alignToTimeframe(timestamp: number, tf: string): number {
 }
 
 /**
- * Parse a Pine Script timeframe string to minutes.
- * "5" → 5, "60" → 60, "240" → 240, "D" → 1440, "W" → 10080, "M" → 43200
+ * Minute duration of a NON-calendar timeframe: plain minute integers ("5",
+ * "60", "240", "1440") and loose forms ("30S" → 30 — seconds are not
+ * separately served; kept as the pre-existing fallback). Calendar forms
+ * ('D'/'W'/'M'/'2D'/'3W'/'12M') are parsed by parseCalendarMultiplier();
+ * this fallback is only reached when the calendar parse returned null.
  */
-function parseTimeframeMinutes(tf: string): number {
-    if (tf === 'D') return 1440;
-    if (tf === 'W') return 10080;
-    if (tf === 'M') return 43200;
+function parseMinuteTimeframe(tf: string): number {
     const n = parseInt(tf, 10);
     return isNaN(n) ? 1440 : n;
 }
@@ -257,6 +275,13 @@ export class TimeHelper {
         if (!normalizedTF || normalizedTF === normalizedChartTF) {
             htfBarTime = currentTime;
         } else {
+            // M1: calendar-form timeframes with an out-of-bounds multiplier
+            // ('370D', '0D', '53W', '13M') are invalid — same rejection as
+            // request.security ('Invalid timeframe'). Non-calendar forms
+            // ('240', '30S') keep their alignment path.
+            if (isCalendarForm(normalizedTF) && parseCalendarMultiplier(normalizedTF) === null) {
+                throw new Error('Invalid timeframe');
+            }
             // Compute the opening timestamp of the higher-timeframe bar that contains this bar
             htfBarTime = alignToTimeframe(currentTime, normalizedTF);
         }
