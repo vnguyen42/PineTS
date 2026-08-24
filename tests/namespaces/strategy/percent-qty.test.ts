@@ -7,6 +7,7 @@ import {
     processStrategyOrders,
 } from '../../../src/namespaces/strategy/utils';
 import { entry } from '../../../src/namespaces/strategy/methods/entry';
+import { order } from '../../../src/namespaces/strategy/methods/order';
 
 type StrategyContext = Context & { strategy: NonNullable<Context['strategy']> };
 
@@ -138,5 +139,72 @@ describe('strategy percent_of_equity quantity sizing with calc_on_order_fills', 
 
         expect(processStrategyOrders(context)).toBe(1);
         expect(context.strategy.opentrades[0].size).toBe(8.33166);
+    });
+});
+
+describe('strategy qty=0 orders are never submitted (VIN-103)', () => {
+    it('minimal repro: percent_of_equity sizing that truncates to 0 leaves NO pending order and NO zero-size lot', () => {
+        const context = makeContext({
+            initial_capital: 100,
+            calc_on_order_fills: true,
+            default_qty_type: 'percent_of_equity',
+            default_qty_value: 0.000001,
+        });
+        // equity 100 × 0.000001% = 1e-6 → qty = 1e-6 / 100 ≈ 1e-8 →
+        // five-decimal truncation → 0.
+        entry(context)('L', 'long');
+        expect(context.strategy.pending_orders).toHaveLength(0);
+
+        // No pending order survives to the fill phase either.
+        context.idx = 1;
+        context.data.open = new Series([100, 100]);
+        context.data.high = new Series([101, 101]);
+        context.data.low = new Series([99, 99]);
+        context.data.close = new Series([100, 100]);
+        context.data.openTime = new Series([0, 86_400_000]);
+        expect(processStrategyOrders(context)).toBe(0);
+        expect(context.strategy.opentrades).toHaveLength(0);
+        expect(context.strategy.position_size).toBe(0);
+    });
+
+    it('an explicit qty=0 entry is refused the same way (strategy.entry and strategy.order)', () => {
+        const context = makeContext();
+        entry(context)('L', 'long', { qty: 0 });
+        expect(context.strategy.pending_orders).toHaveLength(0);
+
+        const orderContext = makeContext();
+        orderContext.strategy.pending_orders = [];
+        order(orderContext)('O', 'long', { qty: 0 });
+        expect(orderContext.strategy.pending_orders).toHaveLength(0);
+    });
+
+    it('a COF percent_of_equity RESIZE that shrinks the fill qty to 0 cancels the order instead of opening a zero-size lot', () => {
+        const context = makeContext({
+            initial_capital: 10000,
+            calc_on_order_fills: true,
+            default_qty_type: 'percent_of_equity',
+            default_qty_value: 10,
+        });
+        // Placement-time qty > 0 (equity 10000 at close 100).
+        entry(context)('L', 'long');
+        expect(context.strategy.pending_orders[0].qty).toBe(10);
+
+        // By fill time the account has collapsed (realized losses) so the
+        // five-decimal equity sizing truncates to 0: equity = 10000 +
+        // netprofit(-9999.995) = 0.005 → baseQty = floor5(0.005×10% / 100)
+        // = 0. TV books no such fill; the order must be cancelled, not
+        // opened as a size-0 lot.
+        context.idx = 1;
+        context.data.open = new Series([100, 100]);
+        context.data.high = new Series([101, 101]);
+        context.data.low = new Series([99, 99]);
+        context.data.close = new Series([100, 100]);
+        context.data.openTime = new Series([0, 86_400_000]);
+        context.strategy.netprofit = -9999.995;
+
+        expect(processStrategyOrders(context)).toBe(0);
+        expect(context.strategy.opentrades).toHaveLength(0);
+        expect(context.strategy.position_size).toBe(0);
+        expect(context.strategy.pending_orders).toHaveLength(0);
     });
 });

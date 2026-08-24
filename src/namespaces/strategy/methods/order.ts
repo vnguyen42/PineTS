@@ -95,6 +95,12 @@ export function order(context: any) {
               : currentPrice;
         const calculatedQty = calculateOrderQty(context, qtyValue, dir, sizingPrice);
 
+        // VIN-103: TV never submits an order whose calculated quantity is
+        // not strictly positive (fixed/cash/percent_of_equity sizing can
+        // truncate to 0). Drop the order entirely — no pending order, no
+        // fill, no zero-size lot. `!(x > 0)` also refuses NaN.
+        if (!(calculatedQty > 0)) return;
+
         // Determine order type from which price levels are set.
         let orderType: 'market' | 'limit' | 'stop' | 'stop-limit' = 'market';
         if (limitValue !== undefined && stopValue !== undefined) {

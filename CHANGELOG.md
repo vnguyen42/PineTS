@@ -1,5 +1,20 @@
 # Change Log
 
+## [Unreleased] - 2026-08-24 - Strategy Broker Emulator Fidelity Batch (VIN-100/103/110 + Series unwrap)
+
+### Fixed
+
+- **`strategy()` Series parameters are unwrapped to their CURRENT value at EVERY config merge**: the unwrap previously ran once at `initializeStrategy` (bar 0), but the `strategy()` declaration re-executes on every bar and the re-merge in `any()` re-polled `config` with a LIVE Series wrapper (a per-bar-recalculated variable such as `default_qty_value=v`). The merge path now goes through the same `unwrapSeriesConfig` helper as initialization, so config stays numeric on every bar — `calculateOrderQty(Series)` → NaN → `qty > 0` refused silently flattened 1833 to zero trades, and `commission_value` → `Number(Series)` → NaN made 2133/2135 P&L NaN (TV backtests those scripts with 166/195 trades respectively).
+- **`roundToMintick` snaps to the NEAREST grid tick when the price sits within a magnitude-relative epsilon of the grid (VIN-100)**: absorbs upstream float noise (`0.1 − 9×0.01 → 0.01`, 1-ulp errors) without collapsing genuine sub-noise fractions to `0`/`-0` — the snap epsilon is `1e-12×max(1,|price|)` applied BEFORE rounding, and real fractions still round AWAY from the reference price.
+- **Orders whose calculated quantity is not strictly positive are never submitted (VIN-103)**: `fixed`/`cash`/`percent_of_equity` sizing can truncate to 0 (1820: 9 size-0 FLAT lots TV never opens over 627 trades); a qty-0 reversal would additionally mis-close the position. `strategy.entry` and `strategy.order` now drop the order entirely (`!(qty > 0)` also refuses NaN) — no pending order, no fill, no zero-size lot.
+- **Same-tick REVERSAL MARKET entries created by a `calc_on_order_fills` recalculation fill at the triggering tick (VIN-110)**: TV's measured ledger (1539) shows the close then the opposite open, both at the triggering fill price. The reversal is measured against the position at the tick's start (before the same-tick market-exit drain flattens it); at fill the engine re-derives against the CURRENT position — close what remains, open the requested base size. Fresh/pyramiding market entries and price-based orders keep their next-tick/path semantics; one fill per logical reversal order id per pass (anti-loop) plus a `MAX_SAME_TICK_DRAIN` cap against pathological re-emitting scripts.
+
+### Changed
+
+- `MAX_SAME_TICK_DRAIN = 100` extracted to a module-level constant in `src/PineTS.class.ts` (was an inline literal inside the drain loop).
+
+---
+
 ## [Unreleased] - 2026-08-22 - Heikin-Ashi Transform (VIN-92)
 
 ### Changed (BREAKING)

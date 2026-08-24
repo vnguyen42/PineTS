@@ -887,3 +887,119 @@ if strategy.position_size > 0
         expect(l1.exit_price).toBe(102);
     });
 });
+
+describe('strategy calc_on_order_fills — reversal entries same-tick (VIN-110)', () => {
+    // Bar 1: open 100, high 110, low 95, close 105 → open closer to low →
+    // assumed ticks [100, 95, 110, 105]. The entry fills at the open (100);
+    // the recalculation emits the reversal. WITHOUT the fix the reversal
+    // entry advances to the NEXT tick and opens at 95 (the low); WITH it the
+    // close leg and the open leg both fill at the triggering open price 100
+    // (TV 1539 ledger: close then opposite open at the same price).
+    const candles = [
+        { openTime: 0, open: 98, high: 99, low: 97, close: 99, volume: 1000, closeTime: 86_399_999 },
+        { openTime: 86_400_000, open: 100, high: 110, low: 95, close: 105, volume: 1000, closeTime: 172_799_999 },
+        { openTime: 172_800_000, open: 102, high: 103, low: 101, close: 102, volume: 1000, closeTime: 259_199_999 },
+    ];
+
+    class ReversalProvider {
+        configure() {}
+        async getMarketData() {
+            return candles;
+        }
+        async getSymbolInfo() {
+            return {
+                ticker: 'BTCUSDT', tickerid: 'TEST:BTCUSDT', main_tickerid: 'TEST:BTCUSDT',
+                prefix: 'TEST', root: 'BTC', description: 'BTC / USDT', type: 'crypto',
+                basecurrency: 'BTC', currency: 'USDT', timezone: 'Etc/UTC',
+                mintick: 0.01, pricescale: 100, minmove: 1, pointvalue: 1, mincontract: 0.00001,
+                session: '24x7', volumetype: 'base',
+            };
+        }
+    }
+
+    const REVERSAL_AFTER_CLOSE_SOURCE = `
+//@version=5
+strategy('COF reversal after close', calc_on_order_fills=true, default_qty_type=strategy.fixed, default_qty_value=1)
+if bar_index == 0
+    strategy.entry('L', strategy.long)
+if bar_index == 1 and strategy.position_size > 0
+    strategy.close('L')
+    strategy.entry('S', strategy.short)`;
+
+    const REVERSAL_ALONE_SOURCE = `
+//@version=5
+strategy('COF reversal alone', calc_on_order_fills=true, default_qty_type=strategy.fixed, default_qty_value=1)
+if bar_index == 0
+    strategy.entry('L', strategy.long)
+if bar_index == 1 and strategy.position_size > 0
+    strategy.entry('S', strategy.short)`;
+
+    const PYRAMID_SAME_SIDE_SOURCE = `
+//@version=5
+strategy('COF pyramid next-tick', calc_on_order_fills=true, pyramiding=2, default_qty_type=strategy.fixed, default_qty_value=1)
+if bar_index == 0
+    strategy.entry('L1', strategy.long)
+if bar_index == 1 and strategy.position_size > 0
+    strategy.entry('L2', strategy.long)`;
+
+    it('① drains a reversal entry created AFTER an explicit close at the SAME triggering price', async () => {
+        const engine = new PineTS(new ReversalProvider() as any, 'BTCUSDT', 'D');
+        const context = await engine.run(REVERSAL_AFTER_CLOSE_SOURCE);
+        const strategy = context.strategy as any;
+
+        expect(strategy.closedtrades).toHaveLength(1);
+        expect(strategy.opentrades).toHaveLength(1);
+
+        const closed = strategy.closedtrades[0];
+        // Close leg fills at the triggering open price, same bar.
+        expect(closed.entry_id).toBe('L');
+        expect(closed.entry_price).toBe(100);
+        expect(closed.exit_price).toBe(100);
+        expect(closed.entry_time).toBe(86_400_000);
+        expect(closed.exit_time).toBe(86_400_000);
+
+        const opened = strategy.opentrades[0];
+        // Open leg fills at the SAME price (not the next tick's low 95).
+        expect(opened.entry_id).toBe('S');
+        expect(opened.entry_price).toBe(100);
+        expect(opened.entry_time).toBe(86_400_000);
+        // The stale close-qty baked into the reversal at placement must not
+        // inflate the open leg (TV: close 1, open 1 — not 2).
+        expect(opened.size).toBe(-1);
+    });
+
+    it('② drains a reversal entry triggered by an opposite entry alone at the SAME price', async () => {
+        const engine = new PineTS(new ReversalProvider() as any, 'BTCUSDT', 'D');
+        const context = await engine.run(REVERSAL_ALONE_SOURCE);
+        const strategy = context.strategy as any;
+
+        expect(strategy.closedtrades).toHaveLength(1);
+        expect(strategy.opentrades).toHaveLength(1);
+
+        const closed = strategy.closedtrades[0];
+        expect(closed.entry_id).toBe('L');
+        expect(closed.entry_price).toBe(100);
+        expect(closed.exit_price).toBe(100);
+
+        const opened = strategy.opentrades[0];
+        expect(opened.entry_id).toBe('S');
+        expect(opened.entry_price).toBe(100);
+        expect(opened.size).toBe(-1);
+    });
+
+    it('③ keeps a same-side pyramid entry on the NEXT OHLC point (1502 population B)', async () => {
+        const engine = new PineTS(new ReversalProvider() as any, 'BTCUSDT', 'D');
+        const context = await engine.run(PYRAMID_SAME_SIDE_SOURCE);
+        const strategy = context.strategy as any;
+
+        const l1 = strategy.opentrades.find((trade: any) => trade.entry_id === 'L1');
+        const l2 = strategy.opentrades.find((trade: any) => trade.entry_id === 'L2');
+        expect(l1).toBeDefined();
+        expect(l1.entry_price).toBe(100);
+        expect(l2).toBeDefined();
+        // Same-side market entry created by the recalculation advances to the
+        // next assumed tick (the low 95) — never drained at the trigger.
+        expect(l2.entry_price).toBe(95);
+        expect(l2.entry_time).toBe(86_400_000);
+    });
+});

@@ -80,10 +80,16 @@ export function roundToMintick(price: number, referencePrice: number, mintick: n
     if (!mintick || mintick <= 0 || !Number.isFinite(price)) return price;
     if (price === referencePrice) return price;
     const ticks = price / mintick;
-    // Small epsilon guards against float-imprecision flipping an
-    // already-on-grid value to the next tick.
-    const EPS = 1e-9;
-    return price > referencePrice ? Math.ceil(ticks - EPS) * mintick : Math.floor(ticks + EPS) * mintick;
+    // Snap to the NEAREST tick when the price sits within a
+    // magnitude-relative epsilon of the grid (absorbs upstream float noise
+    // such as 0.1 - 9×0.01 → 0.01, or 0.07 with 1-ulp error). The epsilon
+    // scales with the price magnitude, never with the quotient: a genuine
+    // sub-noise fraction must round AWAY from the reference price instead of
+    // collapsing to 0/-0 (5e-10 with mintick 1 above reference 0 → 1, not -0).
+    const nearestTicks = Math.round(ticks);
+    const snapEps = 1e-12 * Math.max(1, Math.abs(price));
+    if (Math.abs(price - nearestTicks * mintick) <= snapEps) return nearestTicks * mintick;
+    return price > referencePrice ? Math.ceil(ticks) * mintick : Math.floor(ticks) * mintick;
 }
 /**
  * Pine's `na` price literal reaches the strategy runtime as `NaN`.
@@ -314,8 +320,14 @@ export function calculateOrderQty(context: any, specifiedQty: number | undefined
 
 /**
  * Process pending orders and execute them
+ *
+ * `reversalEntriesOnly` (VIN-110): the COF same-tick drain mode, symmetric
+ * to `marketExitsOnly` in processExitOrders. Only REVERSAL MARKET entries
+ * created by the current-bar recalculation (`_cof_reversal_same_tick`) fill,
+ * at the current assumed intrabar tick. Fresh/pyramiding market entries and
+ * price-based orders keep their next-tick/path semantics.
  */
-export function processStrategyOrders(context: any, phase: 'open' | 'close' = 'open'): number {
+export function processStrategyOrders(context: any, phase: 'open' | 'close' = 'open', reversalEntriesOnly = false): number {
     if (!context.strategy) return 0;
 
     const strategy: StrategyState = context.strategy;
@@ -384,13 +396,35 @@ export function processStrategyOrders(context: any, phase: 'open' | 'close' = 'o
         // Skip exit-category orders — processExitOrders handles them.
         if ((order.category ?? 'entry') === 'exit') continue;
 
-        // Orders placed on bar N can only fill on bar N+1 or later.
-        // Skip current-bar orders outside the COF intrabar path, except for
-        // current-bar MARKET orders in the explicit process-on-close phase.
-        const currentBarOrder = order.bar >= context.idx;
-        const sameBarEligible = (cof && !closePhase) || (closePhase && order.type === 'market');
-        if (currentBarOrder && !sameBarEligible) {
-            continue;
+        // VIN-110 same-tick drain: only reversal MARKET entries created by
+        // the current-bar recalculation fill at the current tick. One fill
+        // per logical order id per pass — the recalculation re-emits the
+        // same reversal on every drain iteration (TV books it once; without
+        // the guard the drain would oscillate the position forever).
+        if (reversalEntriesOnly) {
+            if (
+                cofState === null
+                || order.bar !== context.idx
+                || order.type !== 'market'
+                || !order._cof_reversal_same_tick
+            ) {
+                continue;
+            }
+            if (cofState.drainedEntryPass !== cofState.pass) {
+                cofState.drainedEntryPass = cofState.pass;
+                cofState.drainedEntryIds = new Set();
+            }
+            if (cofState.drainedEntryIds!.has(order.id)) continue;
+        } else {
+            // Orders placed on bar N can only fill on bar N+1 or later.
+            // Skip current-bar orders outside the COF intrabar path, except
+            // for current-bar MARKET orders in the explicit process-on-close
+            // phase.
+            const currentBarOrder = order.bar >= context.idx;
+            const sameBarEligible = (cof && !closePhase) || (closePhase && order.type === 'market');
+            if (currentBarOrder && !sameBarEligible) {
+                continue;
+            }
         }
 
         let shouldFill = false;
@@ -622,6 +656,26 @@ export function processStrategyOrders(context: any, phase: 'open' | 'close' = 'o
                         order.qty = isReversal ? Math.abs(oldSize) + baseQty : baseQty;
                     }
                 }
+                // VIN-110: a same-tick reversal entry was sized at placement
+                // against the position BEFORE the same-tick market-exit
+                // drain. TV re-derives the reversal at fill against the
+                // CURRENT position: close what remains, open the requested
+                // base size. Without this, a close drained first leaves its
+                // stale close-qty in the open leg (TV 1539: close 1, open 1 —
+                // not 2).
+                if (order._cof_reversal_same_tick && order._base_qty !== undefined) {
+                    const reversing = oldSign !== 0 && oldSign !== direction;
+                    order.qty = reversing ? Math.abs(oldSize) + order._base_qty : order._base_qty;
+                }
+                // VIN-103: never open a zero-size lot. A COF percent_of_equity
+                // resize can shrink the fill qty to 0 (equity moved between
+                // placement and fill); TV does not book such fills. Orders
+                // whose placement qty was <= 0 were already refused at
+                // submission (entry/order).
+                if (!(order.qty > 0)) {
+                    order.status = 'cancelled';
+                    continue;
+                }
                 // Risk rules are evaluated at the fill, after dynamic
                 // percent_of_equity sizing. max_position_size truncates only
                 // the leg that increases the absolute position; a reducing
@@ -693,6 +747,13 @@ export function processStrategyOrders(context: any, phase: 'open' | 'close' = 'o
             order.fill_bar = context.idx;
             order.fill_time = currentTime;
             fills += 1;
+            // VIN-110 anti-loop: the recalculation re-emits the same reversal
+            // order id on every drain iteration; only the FIRST fill of each
+            // logical id counts for the current pass.
+            if (reversalEntriesOnly && cofState) {
+                cofState.drainedEntryIds ??= new Set();
+                cofState.drainedEntryIds.add(order.id);
+            }
         }
     }
 
@@ -2817,6 +2878,31 @@ function updateStrategyMetrics(context: any): void {
 }
 
 /**
+ * Normalize a strategy config object: unwrap Pine Series values to their
+ * CURRENT value. strategy() declaration parameters are Pine series — a
+ * variable passed by name (e.g. `default_qty_value=v` with `v` reassigned
+ * each bar) arrives as a Series wrapper. Numeric config must drive the
+ * engine numerically — without this, equity becomes "[object Object]00"
+ * (string concat), percent_of_equity sizing collapses to NaN (2059:
+ * zero-size trades) and `commission_value` → Number(Series) yields NaN P&L
+ * (2133/2135). Function-valued config (default_qty_type/value) is left
+ * intact — the sizing paths already call those per evaluation.
+ *
+ * Applied at EVERY merge into config — initializeStrategy (bar 0) and the
+ * per-bar re-merge in any() — so the unwrapped value is the Series' value
+ * at the CURRENT merge bar (a live, per-bar-recalculated variable keeps
+ * config numeric instead of re-polling it with a fresh Series object).
+ */
+export function unwrapSeriesConfig<T extends object>(config: T): T {
+    const record = config as Record<string, unknown>;
+    for (const key of Object.keys(record)) {
+        const value = record[key];
+        if (value instanceof Series) record[key] = value.get(0);
+    }
+    return config;
+}
+
+/**
  * Initialize strategy state
  */
 export function initializeStrategy(context: any, config: any): void {
@@ -2860,7 +2946,13 @@ export function initializeStrategy(context: any, config: any): void {
     };
 
     // Layer order: spec defaults ← source call args ← user .prop overrides (latest wins).
-    const finalConfig = { ...defaults, ...config, ...(context._propOverrides ?? {}) };
+    // strategy() declaration parameters are Pine series: a variable passed by
+    // name (e.g. `initial_capital=capital` with `capital = 1000.0`) arrives
+    // as a Series wrapper. unwrapSeriesConfig replaces each Series with its
+    // CURRENT value so numeric config drives the engine numerically — without
+    // this, equity becomes "[object Object]00" (string concat) and
+    // percent_of_equity sizing collapses to NaN (2059: zero-size trades).
+    const finalConfig = unwrapSeriesConfig({ ...defaults, ...config, ...(context._propOverrides ?? {}) });
     const initialCapital = finalConfig.initial_capital;
 
     context.strategy = {

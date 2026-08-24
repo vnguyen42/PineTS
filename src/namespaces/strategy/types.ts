@@ -175,6 +175,19 @@ export interface Order {
     // cancelling stale same-direction adds.
     _isReversalEntry?: boolean;
 
+    // Internal (VIN-110): sticky creation-time marker for a REVERSAL MARKET
+    // entry emitted by a COF recalculation. It is evaluated against the
+    // position at CREATION (before the same-tick market-exit drain flattens
+    // it) and sticks to the order for the current tick: the engine's
+    // same-tick drain fills marked orders at the triggering fill price.
+    // Fresh/pyramiding entries and price-based orders never carry it — they
+    // advance to the next OHLC point (1502 same-bar groups). At fill, the
+    // order qty is re-derived against the CURRENT position (close what
+    // remains, open the requested base size), so a close drained first in
+    // the same tick cannot leave a stale close-qty in the open leg (TV
+    // 1539: close 1, open 1 — not 2).
+    _cof_reversal_same_tick?: boolean;
+
     // Internal: cadence-detection for strategy.exit. TV's broker
     // emulator uses Pine's lazy series-eval semantic for exit
     // parameters — the variable behind limit/stop is re-read each bar.
@@ -232,13 +245,33 @@ export interface Order {
 // close when the open is closer to the high, open → low → high → close
 // otherwise). Each COF pass consumes one tick: orders placed during the
 // recalculation after a fill normally fill on the NEXT tick of the same bar.
-// The measured exception is a pure, position-reducing market exit created by
-// that recalculation: it is drained at the current tick before `pass` advances.
-// Same-bar market entries and price-based orders retain their next-tick/path
-// semantics.
+// Two measured exceptions are drained at the CURRENT tick before `pass`
+// advances:
+//   1. a pure, position-reducing market exit created by the recalculation
+//      (VIN-107); and
+//   2. a REVERSAL market entry created by that recalculation (VIN-110) —
+//      marked `_cof_reversal_same_tick`, filled at the triggering fill price,
+//      one fill per logical order id per pass (anti-loop: the script re-emits
+//      the same reversal on every recalculation; TV books it once).
+// Same-bar fresh/pyramiding market entries and price-based orders retain
+// their next-tick/path semantics (1502 same-bar groups prove it).
 export interface CofBarState {
     pass: number; // current tick index (0..3)
     ticks: number[]; // [open, tick2, tick3, close]
+    // Position sign at the START of the current pass (before its fills).
+    // VIN-110: a recalc-created market entry is a REVERSAL when its
+    // direction opposes the position that was open on this tick — the
+    // same-tick market-exit drain may have flattened it to 0 by the time
+    // the entry is created (1539: close drains first, then the opposite
+    // entry fills at the same trigger price). Fresh same-direction
+    // re-entries (2205/1502) keep the next-tick path.
+    tickStartSign?: number;
+    // Anti-loop guard for the same-tick reversal-entry drain: order ids
+    // already filled by the drain at the current pass (lazily reset when
+    // `pass` advances). A filled reversal must not be re-drained when the
+    // recalculation re-emits the same logical order.
+    drainedEntryIds?: Set<string>;
+    drainedEntryPass?: number;
 }
 
 /**

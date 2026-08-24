@@ -18,6 +18,11 @@ const TIMEFRAME_DURATION_MS: Record<string, number> = {
     '1W': 604_800_000, 'W': 604_800_000,
     '1M': 30 * 86_400_000, 'M': 30 * 86_400_000,
 };
+// Hard cap on COF same-tick drain iterations: each recalculation may re-emit
+// the same orders; the anti-loop is one fill per logical reversal order id per
+// pass (CofBarState.drainedEntryIds), this constant bounds pathological
+// re-emitting scripts on top of it.
+const MAX_SAME_TICK_DRAIN = 100;
 function getTimeframeDurationMs(timeframe: string | undefined): number {
     if (!timeframe) return 86_400_000; // default to 1D when timeframe is unknown
     return TIMEFRAME_DURATION_MS[timeframe] ?? TIMEFRAME_DURATION_MS[timeframe.toUpperCase()] ?? 86_400_000;
@@ -1221,6 +1226,13 @@ export class PineTS {
                             : [openPrice, lowPrice, highPrice, closePrice],
                     };
                     for (;;) {
+                        // VIN-110: snapshot the position sign at the start of
+                        // this assumed tick, before its fills. A recalc-created
+                        // market entry whose direction opposes it (even after
+                        // the same-tick drain flattened the position) is a
+                        // same-tick reversal (1539); same-direction re-entries
+                        // keep the next-tick path (2205/1502).
+                        strategy._cof.tickStartSign = Math.sign(strategy.position_size);
                         let fills = processStrategyOrders(context);
                         // Margin checkpoints along the intra-bar path (TV
                         // broker emulator): first at the OPEN right after
@@ -1239,11 +1251,21 @@ export class PineTS {
 
                         if (fills > 0) {
                             // Re-execute at the fill's current assumed path
-                            // point. Drain only pure market exits emitted by
-                            // that recalculation before advancing `pass`.
-                            // Repeating the drain handles a chain of partial
-                            // closes while no-op/cancelled orders return zero.
-                            let marketExitFills: number;
+                            // point. Drain the orders that recalculation
+                            // emits before advancing `pass`, in TV's measured
+                            // order: pure market exits first (VIN-107), then
+                            // REVERSAL market entries (VIN-110) — the 1539
+                            // ledger shows the close then the opposite open,
+                            // both at the triggering fill price. Repeating
+                            // the drain handles a chain (partial closes, then
+                            // a reversal, then a close of the reversal...)
+                            // while no-op/cancelled orders return zero. One
+                            // fill per logical reversal order id per pass
+                            // (anti-loop, see CofBarState) plus the module-level
+                            // MAX_SAME_TICK_DRAIN cap against pathological
+                            // re-emitting scripts.
+                            let sameTickFills: number;
+                            let drainIterations = 0;
                             do {
                                 const plotLengths: Array<[unknown[], number]> = [];
                                 for (const key of Object.keys(context.plots ?? {})) {
@@ -1254,8 +1276,10 @@ export class PineTS {
                                 for (const [data, len] of plotLengths) {
                                     if (data.length > len) data.length = len;
                                 }
-                                marketExitFills = processExitOrders(context, 'intrabar', true);
-                            } while (marketExitFills > 0);
+                                sameTickFills = processExitOrders(context, 'intrabar', true);
+                                sameTickFills += processStrategyOrders(context, 'open', true);
+                                drainIterations += 1;
+                            } while (sameTickFills > 0 && drainIterations < MAX_SAME_TICK_DRAIN);
                         }
 
                         strategy._cof.pass += 1;

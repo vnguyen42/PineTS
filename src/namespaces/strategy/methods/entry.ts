@@ -176,6 +176,14 @@ export function entry(context: any) {
               : currentPrice;
         const baseQty = calculateOrderQty(context, qtyValue, dir, sizingPrice);
 
+        // VIN-103: TV never submits an order whose calculated quantity is
+        // not strictly positive. percent_of_equity / cash / fixed sizing can
+        // truncate to 0 (1820: the fork books 9 size-0 FLAT lots that TV
+        // never opens over 627 trades); a qty-0 reversal would additionally
+        // mis-close the position. Drop the order entirely — no pending
+        // order, no fill, no zero-size lot. `!(x > 0)` also refuses NaN.
+        if (!(baseQty > 0)) return;
+
         // Flag orders whose qty came from the strategy() default under
         // percent_of_equity (no explicit qty argument). With
         // calc_on_order_fills=true the engine re-sizes them at FILL time
@@ -218,6 +226,26 @@ export function entry(context: any) {
 
         const currentTime = Series.from(context.data.openTime).get(0);
 
+        // VIN-110: sticky creation-time marker — a REVERSAL MARKET entry
+        // emitted by a COF recalculation. "Reversal" is measured against the
+        // position that was open on THIS tick: the current position when
+        // non-zero, else the position at the pass's start (the same-tick
+        // market-exit drain may have flattened it to 0 before the entry was
+        // created — 1539: close drains first, then the opposite entry fills
+        // at the same trigger price). Fresh and same-direction re-entries
+        // (2205 round-trips, 1502 adds) never carry it — they advance to the
+        // next OHLC point. The engine's same-tick drain fills marked orders
+        // at the triggering price.
+        const cofSameTickReversal = context.strategy._cof != null
+            && orderType === 'market'
+            && (() => {
+                const pos = context.strategy.position_size;
+                const referenceSign = pos !== 0
+                    ? Math.sign(pos)
+                    : (context.strategy._cof.tickStartSign ?? 0);
+                return referenceSign !== 0 && Math.sign(dir) !== referenceSign;
+            })();
+
         const orderObj: Order = {
             id: idValue,
             direction: dir,
@@ -234,6 +262,7 @@ export function entry(context: any) {
             comment: commentValue,
             _isReversalEntry: isReversal,
             _stop_marketable: stopMarketable,
+            _cof_reversal_same_tick: cofSameTickReversal,
             // Ordered base size (before the reversal close-qty addition).
             // executeOrder uses it to split a reversal OVERSHOOT into its
             // own lot when a deferred close-margin-call shrank the
