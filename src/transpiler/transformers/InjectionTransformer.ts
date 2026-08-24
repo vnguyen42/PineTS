@@ -10,8 +10,9 @@ import { CONTEXT_DATA_VARS, CONTEXT_PINE_VARS } from '../settings';
  * This ensures that users don't have to manually destructure context.data or context.pine
  * @param ast The AST to transform
  * @param pineVersion Detected Pine version; v4-only helpers are gated here
+ * @param versionlessFallback True when the source used the version-less Pine retry
  */
-export function injectImplicitImports(ast: any, pineVersion: number | null = null): void {
+export function injectImplicitImports(ast: any, pineVersion: number | null = null, versionlessFallback = false): void {
     // 1. Identify the main function body
     let mainBody: any[] | null = null;
     let contextParamName = CONTEXT_NAME; // Default to '$' or 'context'
@@ -125,10 +126,12 @@ export function injectImplicitImports(ast: any, pineVersion: number | null = nul
 
     // 3. Define implicit variables
     const contextDataVars = CONTEXT_DATA_VARS;
-    // `iff` is a v4-only runtime helper. Keep it out of v5/v6/version-less
-    // implicit imports so those sources retain their historical ReferenceError.
+    // `iff` is a v4-only runtime helper. Version-less Pine sources that
+    // required the Pine retry use the same legacy helper path; direct
+    // version-less PineTS/JS and explicit v5/v6 sources retain the existing
+    // ReferenceError behavior.
     const contextPineVars =
-        pineVersion === 4 ? CONTEXT_PINE_VARS : CONTEXT_PINE_VARS.filter((name) => name !== 'iff' && name !== 'v4_rsi');
+        pineVersion === 4 || versionlessFallback ? CONTEXT_PINE_VARS : CONTEXT_PINE_VARS.filter((name) => name !== 'iff' && name !== 'v4_rsi');
     // 4. Identify missing variables
     const missingDataVars = contextDataVars.filter((v) => !declaredVars.has(v));
     const missingPineVars = contextPineVars.filter((v) => !declaredVars.has(v));

@@ -12,10 +12,10 @@
 // injection) treats them exactly like a v5 namespaced call.
 //
 // Scope discipline:
-//   - Runs ONLY when `pineToJS` detects `//@version=4` (see pineToJS.index.ts).
-//     v5/v6/version-less sources never reach it — zero behavior change there.
+//   - Runs for explicit `//@version=4` and version-less sources that reach
+//     `pineToJS` through the forced-v5 retry path. v5/v6 sources keep their
+//     existing byte-identical output.
 //   - Call-position only. A v4-legal `rsi = rsi(close, 14)` keeps its
-//     variable binding untouched while the call is rewritten — Pine v4 has
 //     separate function/variable namespaces, so the callee must resolve the
 //     builtin, not the variable (that is the "e is not a function" family
 //     of the corpus probe: the main transpiler used to bind the bare callee
@@ -46,6 +46,9 @@
 //   str.*         : tostring 337/25, tonumber 1/1
 //   request.*     : security 241/41
 //   ticker.*      : heikinashi 35/12
+// Version-less retry path ONLY (absent from the explicit-v4 corpus counts,
+// so they must not change versioned output): `swma` in call position,
+// bare `tickerid`, and the bare color constants.
 //   runtime iff   : iff 102/28 — NOT rewritten here. v4 `iff(cond, a, b)`
 //                   evaluates BOTH branches; the runtime helper added to
 //                   `context.pine.iff` (Core.iff) receives already-evaluated
@@ -149,14 +152,47 @@ const LEGACY_CALL_TARGETS: Record<string, NamespaceTarget> = {
     heikinashi: { ns: 'ticker', name: 'heikinashi' },
     security: { ns: 'request', name: 'security' },
 };
-// V4 built-ins also used as bare values in this corpus. They are lowered to
-// zero/one-argument v5 calls only when no user variable declares the same
-// name. Counts from the 190-source token scan: tr 26/20, obv 4/2, vwap 3/2.
-// [HYPOTHÈSE] v4's bare `vwap` default source is hlc3 in the v4→v5 migration.
+// V4 built-ins also used as bare values in this corpus. Callable values are
+// lowered to zero/one-argument v5 calls only when no user variable declares
+// the same name. Counts from the 190-source token scan: tr 26/20, obv 4/2,
+// vwap 3/2. [HYPOTHÈSE] v4's bare `vwap` default source is hlc3 in the
+// v4→v5 migration.
 const LEGACY_VALUE_TARGETS: Record<string, NamespaceTarget> = {
     tr: { ns: 'ta', name: 'tr' },
     obv: { ns: 'ta', name: 'obv' },
     vwap: { ns: 'ta', name: 'vwap' },
+};
+// Builtins needed ONLY by the version-less forced-v5 retry path: `swma` is
+// absent from the explicit-v4 corpus counts above, and bare `tickerid` is
+// only exercised by header-less corpus scripts. They are deliberately
+// separate from the explicit-v4 maps (which must stay byte-identical to the
+// V4-1 baseline for versioned sources) — the `versionless` flag selects
+// them, mirroring the color-constant separation below.
+const VERSIONLESS_CALL_TARGETS: Record<string, NamespaceTarget> = {
+    swma: { ns: 'ta', name: 'swma' },
+};
+// Bare color constants and `tickerid` are needed by the version-less retry
+// path. They are deliberately separate from the explicit-v4 maps so
+// versioned output stays byte-identical to the V4-1 baseline.
+const VERSIONLESS_VALUE_MEMBER_TARGETS: Record<string, NamespaceTarget> = {
+    aqua: { ns: 'color', name: 'aqua' },
+    black: { ns: 'color', name: 'black' },
+    blue: { ns: 'color', name: 'blue' },
+    fuchsia: { ns: 'color', name: 'fuchsia' },
+    gray: { ns: 'color', name: 'gray' },
+    green: { ns: 'color', name: 'green' },
+    lime: { ns: 'color', name: 'lime' },
+    maroon: { ns: 'color', name: 'maroon' },
+    navy: { ns: 'color', name: 'navy' },
+    olive: { ns: 'color', name: 'olive' },
+    orange: { ns: 'color', name: 'orange' },
+    purple: { ns: 'color', name: 'purple' },
+    red: { ns: 'color', name: 'red' },
+    silver: { ns: 'color', name: 'silver' },
+    teal: { ns: 'color', name: 'teal' },
+    tickerid: { ns: 'syminfo', name: 'tickerid' },
+    white: { ns: 'color', name: 'white' },
+    yellow: { ns: 'color', name: 'yellow' },
 };
 
 // `tr` has a call-position target too; bare-value lowering supplies the
@@ -448,9 +484,10 @@ function rewriteV4OffsetCall(call: CallExpression): void {
 
 /**
  * Rewrite bare legacy builtin callees in call position into namespaced
- * member calls, skipping user-function-shadowed names.
+ * member calls, skipping user-function-shadowed names. `versionless`
+ * additionally selects the retry-only targets (swma).
  */
-function rewriteLegacyCalls(node: unknown, userFunctions: ReadonlySet<string>, rsiBindings: ReadonlyMap<string, RsiArgKind>): void {
+function rewriteLegacyCalls(node: unknown, userFunctions: ReadonlySet<string>, rsiBindings: ReadonlyMap<string, RsiArgKind>, versionless = false): void {
     if (!isPineNode(node)) return;
 
     if (node.type === 'CallExpression') {
@@ -474,7 +511,7 @@ function rewriteLegacyCalls(node: unknown, userFunctions: ReadonlySet<string>, r
                 } else if (name === 'offset') {
                     rewriteV4OffsetCall(call);
                 } else {
-                    const target = LEGACY_CALL_TARGETS[name];
+                    const target = LEGACY_CALL_TARGETS[name] ?? (versionless ? VERSIONLESS_CALL_TARGETS[name] : undefined);
                     if (target) {
                         call.callee = new MemberExpression(new Identifier(target.ns), new Identifier(target.name), false);
                     }
@@ -488,10 +525,10 @@ function rewriteLegacyCalls(node: unknown, userFunctions: ReadonlySet<string>, r
         const val = childField(node, key);
         if (Array.isArray(val)) {
             for (const child of val) {
-                if (isPineNode(child)) rewriteLegacyCalls(child, userFunctions, rsiBindings);
+                if (isPineNode(child)) rewriteLegacyCalls(child, userFunctions, rsiBindings, versionless);
             }
         } else if (isPineNode(val)) {
-            rewriteLegacyCalls(val, userFunctions, rsiBindings);
+            rewriteLegacyCalls(val, userFunctions, rsiBindings, versionless);
         }
     }
 }
@@ -570,19 +607,35 @@ function replaceChild(parent: unknown, key: string | number, replacement: unknow
 }
 
 /**
- * Lower v4 built-ins used as values (`tr`, `obv`, `vwap`). The runtime only
- * exposes their v5 callable forms, so emit a call while preserving user
- * variable shadowing and declaration/property positions.
+ * Lower v4 built-ins used as values (`tr`, `obv`, `vwap`; plus `tickerid`
+ * and bare color constants on the version-less retry path). The runtime
+ * exposes callable forms for the first three and namespace members for
+ * `tickerid`/colors; preserve user variable shadowing and
+ * declaration/property positions in all cases.
  */
-function rewriteLegacyValues(node: unknown, userVariables: ReadonlySet<string>, parent: unknown = null, key: string | number = ''): void {
+function rewriteLegacyValues(
+    node: unknown,
+    userVariables: ReadonlySet<string>,
+    parent: unknown = null,
+    key: string | number = '',
+    versionless = false,
+): void {
     if (!isPineNode(node)) return;
 
     if (node.type === 'Identifier' && 'name' in node && typeof node.name === 'string' && canRewriteValue(parent, key)) {
-        const target = LEGACY_VALUE_TARGETS[node.name];
-        if (target && !userVariables.has(node.name)) {
-            const args = node.name === 'vwap' ? [new Identifier('hlc3')] : [];
-            replaceChild(parent, key, new CallExpression(new MemberExpression(new Identifier(target.ns), new Identifier(target.name), false), args));
-            return;
+        const name = node.name;
+        if (!userVariables.has(name)) {
+            const callTarget = LEGACY_VALUE_TARGETS[name];
+            const memberTarget = versionless ? VERSIONLESS_VALUE_MEMBER_TARGETS[name] : undefined;
+            if (callTarget) {
+                const args = name === 'vwap' ? [new Identifier('hlc3')] : [];
+                replaceChild(parent, key, new CallExpression(new MemberExpression(new Identifier(callTarget.ns), new Identifier(callTarget.name), false), args));
+                return;
+            }
+            if (memberTarget) {
+                replaceChild(parent, key, new MemberExpression(new Identifier(memberTarget.ns), new Identifier(memberTarget.name), false));
+                return;
+            }
         }
     }
 
@@ -594,20 +647,18 @@ function rewriteLegacyValues(node: unknown, userVariables: ReadonlySet<string>, 
         const val = childField(node, childKey);
         if (Array.isArray(val)) {
             for (let index = 0; index < val.length; index++) {
-                if (isPineNode(val[index])) rewriteLegacyValues(val[index], userVariables, val, index);
+                if (isPineNode(val[index])) rewriteLegacyValues(val[index], userVariables, val, index, versionless);
             }
         } else if (isPineNode(val)) {
-            rewriteLegacyValues(val, userVariables, node, childKey);
+            rewriteLegacyValues(val, userVariables, node, childKey, versionless);
         }
     }
 }
-
 /**
  * Lower Pine Script v4 legacy flat builtins to v5 namespaces. In-place AST
  * rewrite; call-position and corpus-exercised value-position identifiers only.
  */
-
-export function lowerV4LegacyBuiltins(ast: Program): void {
+export function lowerV4LegacyBuiltins(ast: Program, versionless = false): void {
     const userFunctions = new Set<string>();
     const userVariables = new Set<string>();
     const rsiBindings = new Map<string, RsiArgKind>();
@@ -617,9 +668,9 @@ export function lowerV4LegacyBuiltins(ast: Program): void {
     collectRsiBindings(ast, rsiBindings);
     collectFunctionParams(ast, functionParams);
     for (let pass = 0; pass < 3; pass++) inferFunctionParamKinds(ast, functionParams, rsiBindings);
-    rewriteLegacyCalls(ast, userFunctions, rsiBindings);
+    rewriteLegacyCalls(ast, userFunctions, rsiBindings, versionless);
     rewriteV4NaComparisons(ast, userVariables);
-    rewriteLegacyValues(ast, userVariables);
+    rewriteLegacyValues(ast, userVariables, null, '', versionless);
 }
 
 // Exported for tests/audits (name → namespace.member).

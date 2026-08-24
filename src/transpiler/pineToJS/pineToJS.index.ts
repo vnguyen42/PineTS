@@ -40,7 +40,8 @@ export function pineToJS(sourceCode: string, options: any = {}) {
     // version — used by the transpile() fallback for corpus sources whose
     // header was lost (TradingView itself assumes v1 for version-less
     // scripts, which this engine refuses; v5 is the closest supported one).
-    const version = options.forceVersion ?? extractPineScriptVersion(sourceCode);
+    const declaredVersion = extractPineScriptVersion(sourceCode);
+    const version = options.forceVersion ?? declaredVersion;
     if (version === null) {
         return {
             success: false,
@@ -70,15 +71,30 @@ export function pineToJS(sourceCode: string, options: any = {}) {
         const parser = new Parser(tokens, version);
         const ast = parser.parse();
 
-        // Step 2b: v4-only lowering — rewrite legacy flat builtins in call
+        // Step 2b: v4 legacy lowering — rewrite flat builtins in call
         // position into their v5 namespaced equivalents (ta.*, math.*, …),
         // then the v4 `input(...)` forms into the typed input.* methods
         // (type= consumed, defval-lexical inference, explicit error on
         // unsupported families).
-        // STRICTLY gated on version === 4: v5/v6/forced-v5 sources never
-        // reach these passes, so their behavior is byte-identical.
+        // Apply the builtin pass to explicit v4 and version-less sources.
+        // Version-less sources arrive here through the forced-v5 parser retry;
+        // the downstream transpiler keeps their semantic version separate so
+        // the __idiv gate remains independent and native division is preserved.
+        //
+        // ACTED DECISION (VIN-114 review): `rewriteV4NaComparisons` (bare
+        // `x == na` → `na(x)` absence test) intentionally stays enabled on
+        // the version-less fallback path. TradingView v5+ refuses `== na` at
+        // compile time, so a header-less source using it can only be v4 —
+        // the na(x) interpretation is the only faithful one. This CHANGES
+        // fallback behavior vs. pre-VIN-114 (which emitted the always-false
+        // `math.__eq(x, na)`, faithful to no Pine version) — intended.
+        if (version === 4 || declaredVersion === null) {
+            lowerV4LegacyBuiltins(ast, declaredVersion === null);
+        }
+        // Input's v4 type-selector migration remains restricted to explicit
+        // v4 declarations; version-less sources use the existing input.any
+        // compatibility path.
         if (version === 4) {
-            lowerV4LegacyBuiltins(ast);
             lowerV4InputCalls(ast);
         }
 

@@ -201,6 +201,7 @@ export function runTypeInferencePass(
     ast: any,
     _scopeManager: ScopeManager,
     pineVersion: number | null = null,
+    versionlessFallback = false,
 ): void {
     const env = new Env();
     let controlDepth = 0;
@@ -264,7 +265,8 @@ export function runTypeInferencePass(
                 const right = visit(node.right);
                 if (node.operator === '/') {
                     const canUseIntegerDivision =
-                        (pineVersion === 4 || pineVersion === 5)
+                        !versionlessFallback
+                        && (pineVersion === 4 || pineVersion === 5)
                         && left.base === 'int'
                         && right.base === 'int'
                         && left.qualifier === 'const'

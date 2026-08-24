@@ -237,6 +237,47 @@ plot(formula, "formula")
         expect(code).not.toContain('ta.rsi');
     });
 
+    it('lowers legacy builtins in the version-less forced-v5 retry path', () => {
+        const result = pineToJS([
+            'strategy("version-less")',
+            'lowestValue = lowest(low, 3)',
+            'rsiValue = rsi(close, 14)',
+            'atrValue = atr(14)',
+            'symbolValue = tickerid',
+            'plot(lowestValue)',
+        ].join('\n'), { forceVersion: 5 });
+        expect(result.success).toBe(true);
+        expect(result.code).toContain('ta.lowest(low, 3)');
+        expect(result.code).toContain('ta.rsi(close, 14)');
+        expect(result.code).toContain('ta.atr(14)');
+        expect(result.code).toContain('syminfo.tickerid');
+    });
+
+    it('explicit v4 sources keep swma() and bare tickerid untouched (versioned-output contract)', () => {
+        // swma/tickerid are retry-path-only targets (absent from the
+        // explicit-v4 corpus counts): versioned output must stay
+        // byte-identical to the pre-VIN-114 baseline.
+        const swmaCode = codeOf('a = swma(close)\nplot(a)');
+        expect(swmaCode).toContain('swma(close)');
+        expect(swmaCode).not.toContain('ta.swma');
+
+        const tickeridCode = codeOf('a = tickerid\nplot(a)');
+        expect(tickeridCode).toContain('tickerid');
+        expect(tickeridCode).not.toContain('syminfo.tickerid');
+    });
+
+    it('version-less retry lowers swma() and bare tickerid', () => {
+        const result = pineToJS([
+            'strategy("version-less")',
+            'a = swma(close)',
+            'b = tickerid',
+            'plot(a)',
+        ].join('\n'), { forceVersion: 5 });
+        expect(result.success).toBe(true);
+        expect(result.code).toContain('ta.swma(close)');
+        expect(result.code).toContain('syminfo.tickerid');
+    });
+
     it('version 4 is accepted (no Unsupported version error)', () => {
         const result = pineToJS(v4('a = sma(close, 10)\nplot(a)'));
         expect(result.success).toBe(true);

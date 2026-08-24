@@ -83,6 +83,10 @@ export interface ParsedTranspilerSource {
     code: string;
     ast: acorn.Program;
     pineVersion: number | null;
+    // True only when a version-less source required the Pine v5 parser retry.
+    // This is distinct from `pineVersion`: the retry's legacy helpers are
+    // enabled, while version-less division must remain native.
+    versionlessFallback: boolean;
 }
 
 /**
@@ -100,7 +104,7 @@ export function parseSourceForTranspilation(source: string | Function, debug = f
             sourceType: 'module',
             locations: debug,
         });
-        return { code, ast, pineVersion };
+        return { code, ast, pineVersion, versionlessFallback: false };
     } catch (jsParseError) {
         if (typeof source !== 'string' || extractPineScriptVersion(source) !== null) throw jsParseError;
 
@@ -108,14 +112,17 @@ export function parseSourceForTranspilation(source: string | Function, debug = f
         if (!pineResult.success) {
             throw new Error(`Failed to transpile Pine Script (assumed version 5): ${pineResult.error}`);
         }
-        pineVersion = 5;
+        // The parser retry assumes v5 syntax, while runtime compatibility
+        // uses the v4 builtin/argument model. Keep the explicit fallback
+        // marker so type inference can leave version-less division native.
+        pineVersion = 4;
         code = wrapInContextFunction(pineResult.code);
         const ast = acorn.parse(code, {
             ecmaVersion: 'latest',
             sourceType: 'module',
             locations: debug,
         });
-        return { code, ast, pineVersion };
+        return { code, ast, pineVersion, versionlessFallback: true };
     }
 }
 
@@ -126,7 +133,7 @@ export function transpile(source: string | Function, options: { debug: boolean; 
     }
 
     const { debug } = options;
-    const { code, ast, pineVersion } = parseSourceForTranspilation(source, debug);
+    const { code, ast, pineVersion, versionlessFallback } = parseSourceForTranspilation(source, debug);
     const sourceLines = debug ? code.split('\n') : [];
 
     // Pre-process: Transform all nested arrow functions
@@ -136,7 +143,7 @@ export function transpile(source: string | Function, options: { debug: boolean; 
     normalizeNativeImports(ast);
 
     // Pre-process: Inject implicit imports for missing context variables
-    injectImplicitImports(ast, pineVersion);
+    injectImplicitImports(ast, pineVersion, versionlessFallback);
 
     const scopeManager = new ScopeManager();
 
@@ -170,11 +177,12 @@ export function transpile(source: string | Function, options: { debug: boolean; 
     renameFunctionArityVariants(ast, scopeManager);
 
     // Type inference: Pine v4/v5 truncate only division of two provably-const
-    // integer expressions. v6 and version-less PineTS sources keep native `/`.
+    // integer expressions. v6 and version-less sources keep native `/`; the
+    // version-less fallback carries v4 runtime compatibility separately.
     // The pass runs on the clean pre-lowering AST (operands still bare
     // identifiers / `input.int(...)` / literals); the main pass then lowers
     // operand subtrees inside any emitted helper call.
-    runTypeInferencePass(ast, scopeManager, pineVersion);
+    runTypeInferencePass(ast, scopeManager, pineVersion, versionlessFallback);
 
     // Second pass: transform the code
     runTransformationPass(ast, scopeManager, originalParamName, options, sourceLines);
@@ -265,7 +273,7 @@ export function transpile(source: string | Function, options: { debug: boolean; 
     // tooling that needs to exercise the legacy full-script slow path,
     // e.g. correctness comparisons).
     const slicingDisabled = (typeof process !== 'undefined') && process?.env?.PINETS_DISABLE_LTF_SLICING === '1';
-    const slices = slicingDisabled ? {} : buildLtfSlices(ast);
+    const slices = slicingDisabled ? {} : buildLtfSlices(ast, pineVersion);
 
     const _wraperFunction = new Function('', `var _r = ${transformedCode}\n; return _r;`);
     const mainFn = _wraperFunction(this);

@@ -405,4 +405,59 @@ plot(b.size(), "b")
         expect(first).not.toMatch(/glb1_midStmt/);
         expect(second).toMatch(/glb1_midStmt/);
     });
+
+    // ─────────────────────────────────────────────────────────────────────
+    // VIN-114: version-less fallback slices carry the main _pineVersion
+    // ─────────────────────────────────────────────────────────────────────
+    // A header-less source that requires the forced-v5 retry compiles with
+    // main `_pineVersion` = 4 (v4 runtime compatibility). The slice runs in
+    // its OWN secondary context via runPretranspiled, which derives
+    // `context.pineVersion` from the slice's `_pineVersion`. Without
+    // propagation, the secondary ran under the null default and a non-pure
+    // slice crashed on the v4 strategy.entry form:
+    //   Error: strategy.entry: direction is required  (entry.ts:87)
+    it('version-less fallback slices carry _pineVersion=4 and run a v4 strategy.entry in the secondary', async () => {
+        const code = `
+strategy("ltf")
+strategy.entry("e", long=true)
+d = 1
+d := d
+ltf = request.security_lower_tf(syminfo.tickerid, "D", ta.sma(close, 3))
+plot(ltf.size(), "sz")
+`;
+        const fn = transpile(code) as any;
+        expect(fn._pineVersion).toBe(4);
+        const slices = fn._ltfSlices ?? {};
+        expect(Object.keys(slices).length).toBeGreaterThanOrEqual(1);
+        for (const k of Object.keys(slices)) {
+            expect((slices[k] as any)._pineVersion).toBe(4);
+        }
+        // Runtime: the secondary (slice) executes the v4 entry form under
+        // pineVersion=4 — no "direction is required" crash.
+        const pineTS = new PineTS(Provider.Mock, 'BTCUSDC', 'W', null, chartStart, chartEnd);
+        const ctx: any = await pineTS.run(code);
+        expect(ctx.strategy).toBeDefined();
+    });
+
+    it('version-less fallback slice keeps native const division (no __idiv gate on slices)', () => {
+        // Slices are cut from the already type-inferred AST, so the
+        // version-lessFallback native-division decision is baked into their
+        // nodes; no per-slice versionlessFallback marker is needed.
+        const code = `
+strategy("ltf")
+x = 5 / 2
+d = 1
+d := d
+ltf = request.security_lower_tf(syminfo.tickerid, "D", ta.sma(close, 3))
+plot(ltf.size(), "sz")
+`;
+        const fn = transpile(code) as any;
+        const slices = fn._ltfSlices ?? {};
+        expect(Object.keys(slices).length).toBeGreaterThanOrEqual(1);
+        for (const k of Object.keys(slices)) {
+            const src = (slices[k] as Function).toString();
+            expect(src).not.toMatch(/__idiv/);
+            expect(src).toMatch(/\/ 2/);
+        }
+    });
 });

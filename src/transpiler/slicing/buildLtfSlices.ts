@@ -638,7 +638,22 @@ function buildSliceFunction(wrapperFn: any, slicedStmts: any[]): Function {
     return new Function('', wrapped)();
 }
 
-export function buildLtfSlices(ast: any): Record<string, Function> {
+/**
+ * Build the per-call-site slice functions for LTF/HTF requests.
+ *
+ * Every slice is executed later in its own secondary context via
+ * `runPretranspiled`, which reads `transpiledFn._pineVersion` to set
+ * `context.pineVersion`. Without propagation, a version-less fallback
+ * source (main `_pineVersion` = 4) would run its slices under the
+ * default null version, disabling the v4 strategy.entry `long=` /
+ * positional-bool translation and crashing on
+ * "strategy.entry: direction is required". The slice build carries the
+ * propagation itself so call-sites cannot forget it; slices are cut from
+ * the already type-inferred AST, so the `versionlessFallback` compile-time
+ * gate (native const division) is baked into their nodes and needs no
+ * per-slice marker.
+ */
+export function buildLtfSlices(ast: any, pineVersion: number | null): Record<string, Function> {
     const slices: Record<string, Function> = {};
 
     if (!ast || ast.type !== 'Program' || !Array.isArray(ast.body) || ast.body.length === 0) {
@@ -677,6 +692,11 @@ export function buildLtfSlices(ast: any): Record<string, Function> {
         if (!stmts || stmts.length === 0) continue;
 
         const sliceFn = buildSliceFunction(wrapperFn, stmts);
+        // Carry the main function's Pine version onto the slice: the
+        // secondary context (`runPretranspiled`) derives its
+        // `context.pineVersion` from this marker, and version-less
+        // fallback slices must run under v4 runtime semantics.
+        (sliceFn as any)._pineVersion = pineVersion;
         slices[exprName] = sliceFn;
     }
 

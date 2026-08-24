@@ -111,6 +111,44 @@ describe('Pine integer division (__idiv) — version and qualifier gate', () => 
         it('version-less PineTS syntax keeps native division', () => {
             expect(transpile('x = 7 / 2').toString()).not.toContain(IDIV);
         });
+        it('version-less Pine retry keeps native division', () => {
+            const source = 'strategy("retry")\nx = 7 / 2\nx := x\nplot(x)';
+            const code = transpile(source).toString();
+            expect(code).not.toContain(IDIV);
+        });
+
+        it('version-less retry end-to-end: legacy builtin lowered AND const division native', async () => {
+            // One header-less source forced through the REAL retry path
+            // (parseSourceForTranspilation → acorn JS-parse failure → Pine
+            // forced-v5 retry), combining a v4 legacy builtin with a
+            // const-int division. The retry's legacy lowering must emit
+            // ta.rsi while the version-lessFallback division gate keeps
+            // `5 / 2` native — and the whole thing must run.
+            const source = [
+                'strategy("retry")',
+                'r = rsi(close, 14)',
+                'x = 5 / 2',
+                'x := x',
+                'plotchar(r, "r")',
+                'plotchar(x, "x")',
+            ].join('\n');
+            const code = transpile(source).toString();
+            // `ta.rsi(` survives the full pipeline (args get callsite-ID
+            // wrapping via ta.param, so match the member expression only).
+            expect(code).toContain('ta.rsi(');
+            expect(code).not.toContain(IDIV);
+
+            const pineTS = new PineTS(
+                Provider.Mock,
+                'BTCUSDC',
+                '1h',
+                null,
+                new Date('2024-01-01').getTime(),
+                new Date('2024-01-10').getTime(),
+            );
+            const { plots } = await pineTS.run(source);
+            expect(plots.x.data[0].value).toBe(2.5);
+        });
 
         it.each([4, 5, 6])('v%s float / int stays native', (version) => {
             expect(tj(version, 'x = 2.5 / 2')).not.toContain(IDIV);
