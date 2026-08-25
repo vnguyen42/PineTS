@@ -296,33 +296,81 @@ export class TimeHelper {
     }
 
     /**
-     * Basic session check: parses "HHMM-HHMM" format and tests if
-     * the timestamp falls within the session window.
+     * Session check: parses "HHMM-HHMM" ranges and tests if the timestamp
+     * falls within at least one of them. Comma-separated multi-session
+     * strings are supported ("0400-0700,0900-1300"), as are overnight ranges
+     * ("1800-0930"). An optional weekday suffix ("0930-1600:12345") restricts
+     * the range to the listed days, using the TradingView convention where
+     * 1=Sunday, 2=Monday, …, 7=Saturday (an omitted suffix means "1234567").
+     * For overnight ranges the day constraint applies to the session's DAY OF
+     * END: a bar at/after the start time belongs to the NEXT day's session
+     * (TV documents "1700-1700:23456" as "The Monday session starts Sunday at
+     * 17:00 and ends Monday at 17:00"). "0000-0000" covers the whole day
+     * (TV: "0000-0000:23456" = a 24h session Monday to Friday). A session
+     * string that yields no recognizable range is NOT treated as a permanent
+     * session — it matches nothing (hors session).
      */
     private _isInSession(timestamp: number, session: string, timezone: string): boolean {
-        // Parse session format "HHMM-HHMM" (e.g. "0930-1600")
-        const match = session.match(/^(\d{2})(\d{2})-(\d{2})(\d{2})$/);
-        if (!match) return true; // If session format is unrecognized, pass through
-
-        const startHour = parseInt(match[1], 10);
-        const startMin = parseInt(match[2], 10);
-        const endHour = parseInt(match[3], 10);
-        const endMin = parseInt(match[4], 10);
-
         // Get hour/minute in the target timezone using the shared utility
         const parts = getDatePartsInTimezone(timestamp, timezone);
-        const hour = parts.hour;
-        const minute = parts.minute;
+        const barTime = parts.hour * 60 + parts.minute;
 
-        const barTime = hour * 60 + minute;
-        const sessionStart = startHour * 60 + startMin;
-        const sessionEnd = endHour * 60 + endMin;
+        for (const rawRange of session.split(',')) {
+            const trimmed = rawRange.trim();
+            // Optional weekday suffix: "<time_period>:<days>", days 1-7 (Sun..Sat).
+            // Invalid day sets (e.g. containing "0") make the range unrecognizable.
+            const [timePart, daysPart] = trimmed.split(':');
+            const days = daysPart === undefined ? '1234567' : /^[1-7]+$/.test(daysPart) ? daysPart : null;
+            if (days === null) continue;
 
-        if (sessionStart <= sessionEnd) {
-            return barTime >= sessionStart && barTime < sessionEnd;
+            const match = timePart.match(/^(\d{2})(\d{2})-(\d{2})(\d{2})$/);
+            if (!match) continue;
+
+            const startHour = parseInt(match[1], 10);
+            const startMin = parseInt(match[2], 10);
+            const endHour = parseInt(match[3], 10);
+            const endMin = parseInt(match[4], 10);
+
+            const sessionStart = startHour * 60 + startMin;
+            const sessionEnd = endHour * 60 + endMin;
+
+            if (sessionStart === sessionEnd) {
+                // Equal bounds are a 24-hour session: "0000-0000" (whole day on
+                // the bar's own day), or an overnight wrap like "1700-1700"
+                // (TV: "1700-1700:23456" — Monday session starts Sunday 17:00).
+                const day = parts.dayOfWeek + 1; // JS 0=Sun..6=Sat → Pine 1=Sun..7=Sat
+                if (sessionStart === 0) {
+                    // "0000-0000": the whole day of the bar itself.
+                    if (days.indexOf(String(day)) !== -1) return true;
+                } else {
+                    // Overnight 24h: bar at/after start → NEXT day's session
+                    // (e.g. Sunday 17:00 is Monday's session); before start →
+                    // the current day's session (e.g. Monday 16:59 is Monday's).
+                    // Saturday rolls over to Sunday (Pine 7 → 1).
+                    const sessionDay = barTime >= sessionStart ? (day === 7 ? 1 : day + 1) : day;
+                    if (days.indexOf(String(sessionDay)) !== -1) return true;
+                }
+            } else if (sessionStart < sessionEnd) {
+                // Intraday range: the session day is the bar's own day.
+                if (barTime >= sessionStart && barTime < sessionEnd) {
+                    const day = parts.dayOfWeek + 1; // JS 0=Sun..6=Sat → Pine 1=Sun..7=Sat
+                    if (days.indexOf(String(day)) !== -1) return true;
+                }
+            } else {
+                // Overnight range (e.g. "1800-0930"): the session day is the
+                // day of END — a bar at/after start belongs to the NEXT day's
+                // session, a bar before end belongs to the current day's.
+                const day = parts.dayOfWeek + 1; // JS 0=Sun..6=Sat → Pine 1=Sun..7=Sat
+                // A bar at/after start belongs to the NEXT day's session
+                // (Saturday rolls over to Sunday: Pine 7 → 1).
+                const sessionDay = barTime >= sessionStart ? (day === 7 ? 1 : day + 1) : day;
+                if (barTime >= sessionStart || barTime < sessionEnd) {
+                    if (days.indexOf(String(sessionDay)) !== -1) return true;
+                }
+            }
         }
-        // Overnight session (e.g. "1800-0930")
-        return barTime >= sessionStart || barTime < sessionEnd;
+
+        return false;
     }
 }
 
