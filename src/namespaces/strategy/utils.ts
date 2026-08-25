@@ -1029,7 +1029,12 @@ export function wouldExceedPyramiding(strategy: StrategyState, direction: number
  *
  * Consulted rules (independent; first violation wins):
  *   - risk_halted (latched by any catastrophic rule)
- *   - allow_entry_in: 'long' blocks short orders; 'short' blocks long
+ *   - allow_entry_in: 'long' blocks short orders; 'short' blocks long.
+ *     A prohibited-direction order never opens a prohibited residual: when
+ *     it would only close/reduce an existing opposite (allowed) position,
+ *     its qty is truncated to that close leg (`min(qty, |position|)`) and
+ *     the order proceeds as a pure close; with no opposite position (flat
+ *     or same-side position) the order is blocked entirely.
  *   - max_position_size: evaluated at fill; an increasing leg is truncated
  *     to the remaining cap, while a purely reducing order is unchanged
  */
@@ -1039,8 +1044,22 @@ export function isOrderBlockedByRisk(strategy: StrategyState, order: Order): boo
     const orderDir = order.direction;
 
     if (rules.allow_entry_in) {
-        if (rules.allow_entry_in === 'long' && orderDir === -1) return true;
-        if (rules.allow_entry_in === 'short' && orderDir === 1) return true;
+        if (rules.allow_entry_in === 'long' && orderDir === -1) {
+            // Only longs allowed: a short order may close/reduce an existing
+            // long, never open a short. Truncate to the close leg; a flat or
+            // same-side (short) position has nothing closeable → blocked.
+            const positionSize = strategy.position_size;
+            const closeable = positionSize > 0 ? Math.min(order.qty, positionSize) : 0;
+            if (!(closeable > 0)) return true;
+            order.qty = closeable;
+        } else if (rules.allow_entry_in === 'short' && orderDir === 1) {
+            // Only shorts allowed: a long order may close/reduce an existing
+            // short, never open a long.
+            const positionSize = strategy.position_size;
+            const closeable = positionSize < 0 ? Math.min(order.qty, -positionSize) : 0;
+            if (!(closeable > 0)) return true;
+            order.qty = closeable;
+        }
     }
     if (rules.max_position_size !== undefined) {
         const positionSize = strategy.position_size;

@@ -7,6 +7,11 @@
  * the actual blocking is performed by `checkRiskRules()` in utils.ts,
  * invoked before each entry fills.
  *
+ * `allow_entry_in` never opens a prohibited residual: an entry in the
+ * prohibited direction may still close/reduce an existing opposite
+ * (allowed) position — its qty is truncated to that close leg at fill —
+ * while flat or same-side positions block it entirely.
+ *
  * Pine signatures:
  *   strategy.risk.allow_entry_in(value)                         → void
  *   strategy.risk.max_cons_loss_days(count, alert_message)      → void
