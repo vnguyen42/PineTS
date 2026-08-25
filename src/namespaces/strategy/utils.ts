@@ -76,9 +76,12 @@ export function parseStrategyOptions(args: any[]): any {
  *   - Short TP below entry / SL above entry → floor / ceil
  *
  * For mintick === 0 or undefined (defensive), returns the price unchanged.
+ * A non-finite mintick (NaN, ±Infinity — e.g. invalid symbol metadata where
+ * minmove/pricescale resolve to 0) also returns the price unchanged instead
+ * of letting 0 × Infinity corrupt the rounding into NaN.
  */
 export function roundToMintick(price: number, referencePrice: number, mintick: number): number {
-    if (!mintick || mintick <= 0 || !Number.isFinite(price)) return price;
+    if (!Number.isFinite(mintick) || mintick <= 0 || !Number.isFinite(price)) return price;
     if (price === referencePrice) return price;
     const ticks = price / mintick;
     // Snap to the NEAREST tick when the price sits within a
@@ -91,6 +94,43 @@ export function roundToMintick(price: number, referencePrice: number, mintick: n
     const snapEps = 1e-12 * Math.max(1, Math.abs(price));
     if (Math.abs(price - nearestTicks * mintick) <= snapEps) return nearestTicks * mintick;
     return price > referencePrice ? Math.ceil(ticks) * mintick : Math.floor(ticks) * mintick;
+}
+/**
+ * Snap a nominal market execution price to the nearest symbol tick.
+ *
+ * This intentionally differs from roundToMintick(): execution uses Pine's
+ * nearest-grid rule with JavaScript's exact Math.round division behavior,
+ * while order placement rounds conservatively away from its reference price.
+ */
+function snapExecutionPrice(price: number, mintick: number): number {
+    if (!Number.isFinite(price) || !Number.isFinite(mintick) || mintick <= 0) return price;
+    const ticks = price / mintick;
+    const roundedTicks = Math.round(ticks);
+    const snapped = roundedTicks * mintick;
+    // A non-finite quotient (price/mintick overflow) or product must not
+    // fabricate an execution price — return the original nominal value.
+    if (!Number.isFinite(roundedTicks) || !Number.isFinite(snapped)) return price;
+    // Preserve an already-grid nominal representation so multiplication
+    // noise (e.g. 26216.01 → 26216.010000000002) does not perturb strict
+    // ledgers. The tolerance is BOUNDED below half a tick: a magnitude-
+    // relative epsilon alone would preserve genuinely off-grid values at
+    // large prices (|price| 1e12 → epsilon 1, far past half a 0.01 tick).
+    const snapEps = Math.min(1e-12 * Math.max(1, Math.abs(price)), Math.abs(mintick) * 0.25);
+    if (Math.abs(price - snapped) <= snapEps) return price;
+    // Normalize a genuinely snapped fill to the mintick's decimal places so
+    // strict ledgers never see multiplication noise (9696 × 0.01 →
+    // 96.96000000000001 must be 96.96). Same convention as roundTrailLevel.
+    // toFixed is only defined for 0–100 decimals; beyond that (minticks
+    // smaller than ~1e-100) the raw finite product is already the best
+    // representation — a RangeError must never abort an execution. And
+    // Math.round's exact signed-zero result must survive normalization:
+    // (-0).toFixed(2) → "0.00" → +0 would erase the mandated -0 fill.
+    const mintickNotation = mintick.toString().toLowerCase();
+    const [coefficient, exponentText] = mintickNotation.split('e');
+    const exponent = exponentText === undefined ? 0 : Number(exponentText);
+    const decimalPlaces = Math.max(0, (coefficient.split('.')[1]?.length ?? 0) - exponent);
+    if (decimalPlaces > 100 || Object.is(snapped, -0)) return snapped;
+    return Number(snapped.toFixed(decimalPlaces));
 }
 /**
  * Pine's `na` price literal reaches the strategy runtime as `NaN`.
@@ -374,6 +414,8 @@ export function processStrategyOrders(context: any, phase: 'open' | 'close' = 'o
     const lowPrice = Series.from(context.data.low).get(0);
     const closePrice = Series.from(context.data.close).get(0);
     const currentTime = Series.from(context.data.openTime).get(0);
+    const mintick = context.pine?.syminfo?.mintick ?? 0.01;
+    const snapExecutionPrices = context.pine?.syminfo?.type === 'stock';
     const intrabarPath = assumedIntrabarPath(openPrice, highPrice, lowPrice, closePrice);
 
     // Per-trade peak adverse / favorable excursion (max-drawdown / max-runup
@@ -449,6 +491,11 @@ export function processStrategyOrders(context: any, phase: 'open' | 'close' = 'o
 
         let shouldFill = false;
         let fillPrice = openPrice;
+        // True when the chosen fill price is an OPEN/gap execution (market
+        // fills; stops filled at the bar open, the COF open tick, or a
+        // marketable-at-submission stop). Ordinary intrabar stop crossings
+        // fill at their trigger level and are NOT execution-snapped.
+        let gapExecution = false;
 
         // Determine if order should be filled based on type
         switch (order.type) {
@@ -459,6 +506,7 @@ export function processStrategyOrders(context: any, phase: 'open' | 'close' = 'o
                 // The process_orders_on_close phase is the one exception:
                 // current-bar market orders fill at the signal bar's close.
                 shouldFill = true;
+                gapExecution = true;
                 fillPrice = closePhase && order.bar === context.idx
                     ? closePrice
                     : cofState && order.bar === context.idx
@@ -526,6 +574,10 @@ export function processStrategyOrders(context: any, phase: 'open' | 'close' = 'o
                                 : stopPreviousTick! <= order.stop && tickPrice >= order.stop;
                             if (crossed) {
                                 shouldFill = true;
+                                // Pass 0 evaluates the OPEN tick (a gap/open
+                                // execution); later passes cross intrabar at
+                                // the trigger level.
+                                gapExecution = cofState.pass === 0;
                                 fillPrice = cofState.pass === 0 ? tickPrice : order.stop;
                             }
                         } else {
@@ -545,7 +597,8 @@ export function processStrategyOrders(context: any, phase: 'open' | 'close' = 'o
                             const gapAtOpen = openPrice >= order.stop - stopEps;
                             if (order._stop_marketable || highPrice >= order.stop - stopEps) {
                                 shouldFill = true;
-                                fillPrice = (order._stop_marketable || gapAtOpen) ? openPrice : order.stop;
+                                gapExecution = order._stop_marketable || gapAtOpen;
+                                fillPrice = gapExecution ? openPrice : order.stop;
                             }
                         }
                     } else if (tickPrice !== undefined) {
@@ -554,6 +607,7 @@ export function processStrategyOrders(context: any, phase: 'open' | 'close' = 'o
                             : stopPreviousTick! >= order.stop && tickPrice <= order.stop;
                         if (crossed) {
                             shouldFill = true;
+                            gapExecution = cofState.pass === 0;
                             fillPrice = cofState.pass === 0 ? tickPrice : order.stop;
                         }
                     } else {
@@ -562,7 +616,8 @@ export function processStrategyOrders(context: any, phase: 'open' | 'close' = 'o
                         const gapAtOpen = openPrice <= order.stop + stopEps;
                         if (order._stop_marketable || lowPrice <= order.stop + stopEps) {
                             shouldFill = true;
-                            fillPrice = (order._stop_marketable || gapAtOpen) ? openPrice : order.stop;
+                            gapExecution = order._stop_marketable || gapAtOpen;
+                            fillPrice = gapExecution ? openPrice : order.stop;
                         }
                     }
                 }
@@ -622,6 +677,16 @@ export function processStrategyOrders(context: any, phase: 'open' | 'close' = 'o
             // crossings use the trigger level.
             if (order.type === 'limit' || order.type === 'stop') {
                 fillPrice = Math.min(highPrice, Math.max(lowPrice, fillPrice));
+            }
+            // On the proved stock surface, executions recorded on the
+            // nearest mintick after slippage are MARKET fills and OHLC-GAP
+            // fills (stop filled at the open / open tick / marketable at
+            // submission). An ordinary intrabar stop crossing keeps its
+            // trigger level — it is not an execution snap. Limit fills (an
+            // activated stop-limit is a limit by this point) retain their
+            // placement semantics.
+            if (snapExecutionPrices && gapExecution) {
+                fillPrice = snapExecutionPrice(fillPrice, mintick);
             }
 
             // Pre-trade margin check (Pine broker emulator). When the
@@ -1671,6 +1736,7 @@ interface ExitFillEvent {
     direction: number;
     price: number;
     kind: ExitFillKind;
+    gap?: boolean;
     tradeId?: string;
     activationTradeIds: string[];
     excludedConsumedTradeIds: readonly string[];
@@ -1718,6 +1784,7 @@ export function processExitOrders(
     const closePrice = Series.from(context.data.close).get(0);
     const currentTime = Series.from(context.data.openTime).get(0);
     const mintick = context.pine?.syminfo?.mintick ?? 0.01;
+    const snapExecutionPrices = context.pine?.syminfo?.type === 'stock';
     const cofTickPrice = cofState
         ? cofState.ticks[Math.min(cofState.pass, cofState.ticks.length - 1)]
         : undefined;
@@ -1884,6 +1951,7 @@ export function processExitOrders(
                 direction: matchingDir,
                 price: fillPrice,
                 kind: 'market',
+                gap: true,
                 activationTradeIds: matching.map((trade) => trade._activation_id ?? trade.id),
                 excludedConsumedTradeIds,
                 fillCount: 1,
@@ -2046,11 +2114,13 @@ export function processExitOrders(
             const tQty = Math.abs(t.size);
             let tp = absTp;
             if (tp === undefined && order.profit !== undefined) {
-                tp = isLong ? entry + order.profit * mintick : entry - order.profit * mintick;
+                const derivedTp = isLong ? entry + order.profit * mintick : entry - order.profit * mintick;
+                tp = roundToMintick(derivedTp, entry, mintick);
             }
             let sl = absSl;
             if (sl === undefined && order.loss !== undefined) {
-                sl = isLong ? entry - order.loss * mintick : entry + order.loss * mintick;
+                const derivedSl = isLong ? entry - order.loss * mintick : entry + order.loss * mintick;
+                sl = roundToMintick(derivedSl, entry, mintick);
             }
 
             // A waiting bracket can attach to an entry filled on this bar,
@@ -2357,6 +2427,7 @@ export function processExitOrders(
                 direction: matchingDir,
                 price: event.price,
                 kind: event.kind,
+                gap: event.gap === true,
                 tradeId: event.tradeId,
                 activationTradeIds: matching.map((trade) => trade._activation_id ?? trade.id),
                 excludedConsumedTradeIds,
@@ -2388,9 +2459,15 @@ export function processExitOrders(
         // Profit events are limit take-profits and do not receive slippage.
         // Market, loss/stop, and trailing events retain the configured
         // strategy slippage.
-        const fillPrice = event.kind === 'market' || event.kind === 'profit'
+        const nominalFillPrice = event.kind === 'market' || event.kind === 'profit'
             ? event.price
             : applySlippage(context, -event.direction, event.price);
+        // Market and OHLC-gap executions on the proved stock surface snap
+        // after slippage. Other asset classes retain their prior execution
+        // representation until an equivalent oracle proves this rule there.
+        const fillPrice = snapExecutionPrices && (event.kind === 'market' || event.gap === true)
+            ? snapExecutionPrice(nominalFillPrice, mintick)
+            : nominalFillPrice;
         const sizesBefore = new Map(strategy.opentrades.map((trade) => [trade.id, Math.abs(trade.size)]));
         const exitComment = event.kind === 'profit'
             ? (event.order.comment_profit ?? event.order.comment)
