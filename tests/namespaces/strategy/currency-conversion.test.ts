@@ -23,6 +23,7 @@ import {
 } from '../../../src/namespaces/strategy/utils';
 import { convertAccountToSymbol, convertSymbolToAccount } from '../../../src/namespaces/strategy/currency';
 import { entry } from '../../../src/namespaces/strategy/methods/entry';
+import { default_entry_qty } from '../../../src/namespaces/strategy/methods/default_entry_qty';
 
 const DAY = 24 * 60 * 60 * 1000;
 
@@ -169,5 +170,77 @@ describe('strategy.cash sizing with currency conversion and qty step (VIN-113)',
         context.pine.qtyStep = 0.001;
         entry(context)('market', 'long');
         expect(context.strategy.pending_orders[0].qty).toBe(500);
+    });
+});
+
+describe('strategy.percent_of_equity sizing with currency conversion (VIN-134)', () => {
+    const D = dayStartMs('2024-01-01T00:00:00Z');
+
+    function makePercentContext(overrides: Record<string, unknown> = {}) {
+        const context = new Context({
+            marketData: [],
+            source: ['strategy("p", overlay=false, default_qty_type=strategy.percent_of_equity, default_qty_value=100, commission_type=strategy.commission.percent, commission_value=0.018, currency="USD")', 'plot(close)'],
+            tickerId: 'ALO',
+            timeframe: '120',
+        });
+        context.idx = 0;
+        context.data.open = new Series([31]);
+        context.data.high = new Series([32]);
+        context.data.low = new Series([30]);
+        context.data.close = new Series([31.0277]);
+        context.data.openTime = new Series([D]);
+        context.pine.syminfo = { mintick: 0.005, pointvalue: 1, currency: 'EUR' };
+        initializeStrategy(context, {
+            default_qty_type: 'percent_of_equity',
+            default_qty_value: 100,
+            currency: 'USD',
+            initial_capital: 100000,
+            commission_type: 'percent',
+            commission_value: 0.018,
+            ...overrides,
+        });
+        return context;
+    }
+
+    it('converts the equity notional to the symbol currency before dividing by the sizing price (2577 anchor)', () => {
+        // VIN-134 first TV key: 100000 USD equity, EUR symbol (ALO), sizing
+        // close 31.0277, commission 0.018% → without conversion 3222 shares;
+        // TradingView with the previous daily EURUSD ≈ 1.2435 → 2591 shares
+        // (qty step 1 on integer-share stocks).
+        const rates = { EURUSD: [[D - DAY, 1.2435]] };
+        const context = makePercentContext({});
+        context.pine.currencyRates = rates;
+        context.pine.qtyStep = 1;
+        // Not converted: floor(100000 / (31.0277 × 1.00018)) = 3222.
+        expect(calculateOrderQty(context, undefined, 1, 31.0277)).toBe(2591);
+    });
+
+    it('uses the last close STRICTLY BEFORE the sizing day, not the same-day close', () => {
+        // same-day 1.25 would give floor(100000/1.25/(31.0277×1.00018)) = 2577;
+        // previous day 1.20 gives 2591+…: the strict-before rule picks 1.20.
+        const rates = { EURUSD: [[D - DAY, 1.2], [D, 1.25]] };
+        const context = makePercentContext({});
+        context.pine.currencyRates = rates;
+        context.pine.qtyStep = 1;
+        expect(calculateOrderQty(context, undefined, 1, 31.0277)).toBe(Math.floor(100000 / (31.0277 * 1.00018 * 1.2)));
+    });
+
+    it('behaves EXACTLY as pre-VIN-134 when no rate series is provided (identity)', () => {
+        const context = makePercentContext({});
+        // rawQty = 100000 / (31.0277 × 1.00018) = 3222.346588… → 3222 (floor qtyStep)
+        context.pine.qtyStep = 1;
+        expect(calculateOrderQty(context, undefined, 1, 31.0277)).toBe(3222);
+        // And the five-decimal generic truncation when no step is supplied:
+        const context2 = makePercentContext({});
+        expect(calculateOrderQty(context2, undefined, 1, 31.0277)).toBeCloseTo(Math.floor((100000 / (31.0277 * 1.00018)) * 1e5) / 1e5, 10);
+    });
+
+    it('propagates the conversion to strategy.default_entry_qty (single sizing point)', () => {
+        const rates = { EURUSD: [[D - DAY, 1.2435]] };
+        const context = makePercentContext({});
+        context.pine.currencyRates = rates;
+        context.pine.qtyStep = 1;
+        const qty = default_entry_qty(context)(31.0277);
+        expect(qty).toBe(2591);
     });
 });

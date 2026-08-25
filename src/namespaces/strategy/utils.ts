@@ -410,7 +410,20 @@ export function calculateOrderQty(context: any, specifiedQty: number | undefined
             // TradingView reserves the entry commission inside the requested
             // equity notional. With commission_value=0.11%, for example:
             // qty = equity * pct / (price * (1 + 0.0011)).
-            const positionValue = (strategy.equity * qtyValue) / 100;
+            //
+            // VIN-134: the equity notional is expressed in the ACCOUNT
+            // currency (strategy.currency). TradingView converts it to the
+            // symbol currency at the previous daily FX rate before dividing
+            // by the sizing price (percent sizing on 2577 EURONEXT:ALO,
+            // symbol EUR / account USD: TV 2591 vs fork 3222 → implied rate
+            // 1.2435353, interval proof ]1.2432741; 1.2437540]). Same helper
+            // and previous-daily temporal convention as the cash branch
+            // (VIN-113); without a rate series provided by the host the
+            // notional passes through unconverted, preserving the
+            // pre-VIN-134 corpus behavior. The calc_on_order_fills fill
+            // resize and strategy.default_entry_qty share this function, so
+            // they convert through the same single point.
+            const positionValue = convertAccountToSymbol(context, (strategy.equity * qtyValue) / 100, currentBarTimeMs(context), 'identity');
             const commissionRate = strategy.config.commission_type === 'percent'
                 ? (Number(strategy.config.commission_value) || 0) / 100
                 : 0;
