@@ -1041,7 +1041,7 @@ let src_open = input.any({ title: 'Open Source', defval: open });
     const p1 = math.param(($.get(src, 0) - $.get(src, 1)) / temp_1, undefined, $$.id + 'p1');
     const temp_2 = math.atan(p1);
     $$.const.fn1_ang = $.init($$.const.fn1_ang, $.get($$.const.fn1_rad2degree, 0) * temp_2);
-    return $.precision($.get($$.const.fn1_ang, 0));
+    return $.precision($.get($.get($$, 0).const.fn1_ang, 0));
   }
   function get_average(avg_src, avg_len) {
     const $$ = $.peekCtx();

@@ -271,7 +271,11 @@ plot(ma)
 
             // Verify that default case includes both runtime.error and float(na)
             expect(code).toContain('default:');
-            expect(code).toContain("runtime.error('No matching MA type found.')");
+            // Canonical form since 325508c: the message passes through
+            // runtime.param (Type B unwrap), then runtime.error(pN) throws
+            // PineRuntimeError with the exact message.
+            expect(code).toContain("runtime.param('No matching MA type found.', undefined, 'p16')");
+            expect(code).toContain('const temp_7 = runtime.error(p16);');
             expect(code).toMatch(/default:[^]*?runtime\.error[^]*?float/);
         });
 
@@ -294,8 +298,10 @@ plot(result)
             const transpiledFn = transpile(indicatorCode, { debug: false });
             const code = transpiledFn.toString();
 
-            // Check that both statements are present in default case
-            expect(code).toMatch(/default:[^]*?runtime\.error\('Invalid value'\)[^]*?return.*?float/);
+            // Check that both statements are present in default case.
+            // Canonical since 325508c: message via runtime.param, then
+            // runtime.error(pN), then the return float — all preserved.
+            expect(code).toMatch(/default:[^]*?runtime\.param\('Invalid value'[^]*?runtime\.error\(p1\)[^]*?return.*?float/);
         });
     });
 
