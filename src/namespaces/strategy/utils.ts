@@ -298,6 +298,52 @@ export function computeHeldMargin(context: any, atPrice: number): number {
 }
 
 /**
+ * Truncate a computed quantity at the provider's instrument quantity step
+ * (VIN-113 cash, VIN-95 percent_of_equity). The rule is the same proved
+ * truncation for both: floor(rawQty / step) * step (0.001 on CAKEUSDT, 1 on
+ * integer-share stocks). Absent/invalid step → undefined, so the caller keeps
+ * its generic precision truncation (corpus unchanged when no step is
+ * supplied).
+ */
+function quantizeToQtyStep(context: any, rawQty: number): number | undefined {
+    const step = context.pine?.qtyStep;
+    // A stepped quantity is meaningful only for finite, positive inputs.
+    // Invalid values fall through to the caller's generic precision path.
+    if (
+        !Number.isFinite(rawQty)
+        || !(rawQty > 0)
+        || typeof step !== 'number'
+        || !Number.isFinite(step)
+        || !(step > 0)
+    ) {
+        return undefined;
+    }
+
+    let quotient = rawQty / step;
+    if (!Number.isFinite(quotient) || !(quotient > 0)) return undefined;
+
+    // Decimal quantities can divide to a few ulps below an exact integer
+    // (0.3 / 0.1 === 2.9999999999999996 = 2·EPSILON below 3; 1.2 / 0.1 ===
+    // 11.999999999999998 = 4 ulps at 12). Snap only within the ULP-scale
+    // tolerance EPSILON·max(1, |quotient|) — the smallest proved constant:
+    // 0.3 / 0.1 needs K ≥ 2/3, 1.2 / 0.1 needs K ≥ 2/3·2 (both covered by
+    // K = 1) and 1_234_567.89 / 0.001 needs K ≥ 0.87. Anything beyond a
+    // few ulps is a genuinely sub-step value and must floor: the old
+    // 1e-12-relative tolerance (1e-3 at |q| ≈ 1e9) wrongly snapped
+    // 1_000_000_000.9995 up to 1_000_000_001, booking one extra share.
+    const nearest = Math.round(quotient);
+    const tolerance = Number.EPSILON * Math.max(1, Math.abs(quotient));
+    if (Math.abs(quotient - nearest) <= tolerance) quotient = nearest;
+
+    const flooredQuotient = Math.floor(quotient);
+    if (!Number.isFinite(flooredQuotient) || flooredQuotient < 0) return undefined;
+    const steppedQty = flooredQuotient * step;
+    // Zero is a valid result: it is how a positive sub-step quantity is
+    // rejected by the VIN-95/VIN-103 sizing path.
+    return Number.isFinite(steppedQty) && steppedQty >= 0 ? steppedQty : undefined;
+}
+
+/**
  * Calculate order quantity based on strategy configuration
  */
 export function calculateOrderQty(context: any, specifiedQty: number | undefined, direction: number, fillPrice: number): number {
@@ -354,8 +400,9 @@ export function calculateOrderQty(context: any, specifiedQty: number | undefined
             // decimals). The step is per-instrument and only applied when
             // the provider supplies it; otherwise the generic six-decimal
             // truncation below applies (corpus unchanged).
-            if (typeof context.pine?.qtyStep === 'number' && context.pine.qtyStep > 0 && Number.isFinite(context.pine.qtyStep)) {
-                return Math.floor(rawQty / context.pine.qtyStep) * context.pine.qtyStep;
+            {
+                const stepped = quantizeToQtyStep(context, rawQty);
+                if (stepped !== undefined) return stepped;
             }
             break;
 
@@ -369,6 +416,15 @@ export function calculateOrderQty(context: any, specifiedQty: number | undefined
                 : 0;
             rawQty = positionValue / (fillPrice * (1 + commissionRate));
             qtyPrecision = PERCENT_QTY_PRECISION;
+            // VIN-95: TV truncates percent_of_equity quantities at the same
+            // instrument qty step as cash (integer shares on stocks: a 0.41
+            // share leg quantizes to 0 and the order is never submitted —
+            // 1786/2467). Same proved rule as the cash branch; absent step →
+            // the five-decimal equity-sizing truncation below.
+            {
+                const stepped = quantizeToQtyStep(context, rawQty);
+                if (stepped !== undefined) return stepped;
+            }
             break;
         }
 
@@ -728,15 +784,18 @@ export function processStrategyOrders(context: any, phase: 'open' | 'close' = 'o
                     let qtyType = strategy.config.default_qty_type ?? 'fixed';
                     if (typeof qtyType === 'function') qtyType = (qtyType as Function)();
                     if (qtyType === 'percent_of_equity') {
-                        let qtyValue = strategy.config.default_qty_value ?? 1;
-                        if (typeof qtyValue === 'function') qtyValue = (qtyValue as Function)();
-                        const commissionRate = strategy.config.commission_type === 'percent'
-                            ? (Number(strategy.config.commission_value) || 0) / 100
-                            : 0;
-                        const positionValue = (strategy.equity * Number(qtyValue)) / 100;
-                        const baseQty = Math.floor(
-                            (positionValue / (fillPrice * (1 + commissionRate))) * 1e5,
-                        ) / 1e5;
+                        // Same sizing function as placement/default_entry_qty
+                        // (VIN-95: qty-step truncation included), evaluated at
+                        // fill-time equity and fill price.
+                        const baseQty = calculateOrderQty(context, undefined, direction, fillPrice);
+                        // A quantized-zero/non-finite default base cancels the
+                        // whole pending entry. Check before adding the old
+                        // position's close leg for a reversal: otherwise a
+                        // zero requested base would still close the position.
+                        if (!(baseQty > 0) || !Number.isFinite(baseQty)) {
+                            order.status = 'cancelled';
+                            continue;
+                        }
                         order._base_qty = baseQty;
                         order.qty = isReversal ? Math.abs(oldSize) + baseQty : baseQty;
                     }
