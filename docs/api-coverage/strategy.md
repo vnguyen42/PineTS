@@ -177,7 +177,8 @@ parent: API Coverage
 The entire `strategy.*` namespace is implemented and matches TV's surface 1:1. Of the 31 TV oracle scripts in `Automations/PineTS/pinescripts/strategy/`, 12 currently match TradingView to comparator-epsilon (precision 3, eps 0.001001). The remaining 18 produce valid output that diverges from TV in specific numeric fields — these are precision/semantics differences that need iterative refinement:
 
 - **`strategy.margin_liquidation_price`** — PineTS uses a simple "equity hits zero" approximation; TV's broker liquidation formula differs in detail. Affects `account_props.pine`.
-- **`strategy.convert_to_account` / `convert_to_symbol`** — identity passthrough for same-currency cases. TV may return `na` when symbol/account currencies differ even nominally (e.g. BTCUSDC's USDC vs USD). Affects `conversion.pine`.
+- **`strategy.convert_to_account` / `convert_to_symbol`** — conversion at the previous daily FX rate requires the host-provided `currencyRates` series (VIN-113); without it, same-currency = identity passthrough, cross-currency = `NaN`, and currency identity is string equality (TV may return `na` for `BTCUSDC`'s USDC vs USD). Affects `conversion.pine`.
+
 - **OCA enforcement (cancel/reduce semantics)** — order objects carry `oca_name` / `oca_type` fields, but the engine does not yet auto-cancel or reduce siblings on fill. Deferred. Affects `oca_groups.pine`.
 - **Commission rounding** — per-leg charges may differ from TV by sub-cent rounding in edge cases. Affects `commission_slippage.pine` and `commission_types.pine` in the second-decimal place.
 - **Per-trade max_drawdown / max_runup** — PineTS tracks intra-bar high/low excursions, but TV's accounting includes the entry price's pre-fill open and exit-bar close in subtly different ways for trades that open and close in adjacent bars. Affects `closedtrades_full.pine`, `opentrades_full.pine`.

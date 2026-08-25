@@ -1,5 +1,16 @@
 # Change Log
 
+
+## [Unreleased] - 2026-08-25 - Multi-range session parsing + percent_of_equity FX conversion (1625 fix, VIN-134)
+
+### Fixed
+
+- **`time()` session parser — multi-range strings were a permanent pass-through**: any unrecognized session string (comma ranges, overnight, weekday-suffixed) silently matched 24/7, so the strategy never traded (1625: `time('1','0400-0700,0900-1300')` active around the clock → 0 trades instead of the TV sessions). Now: comma-separated ranges, overnight windows (end ≤ start → the portion past start runs the NEXT day), `:days` weekday suffix (1=Sun…7=Sat, applied per-day on the overnight portion), equal non-null bounds = 24h, and a string without any range = outside session. 1625 SILENT_SUSPECT → OK_WITH_OUTPUT.
+
+### Changed
+
+- **`percent_of_equity` sizing converts the equity notional to the symbol currency (VIN-134)**: the notional is converted via `convertAccountToSymbol` (previous daily FX rate) before dividing by the sizing price — same helper and convention as the `cash` branch (VIN-113), applied at the single sizing point shared by `strategy.entry`, `default_entry_qty`, and the `calc_on_order_fills` fill-time re-size. No host rate series → EXACT pre-VIN-134 behavior (identity fallback; corpus scan and witnesses unchanged, byte-audit: the only bundle mutation is the conversion call). Data caveat, documented on VIN-134: no public FX source reproduces TradingView's internal conversion rates, so the percent conversion currently activates only when the host supplies a series.
+
 ## [Unreleased] - 2026-08-24 - Strategy Broker Emulator Fidelity Batch (VIN-100/103/110 + Series unwrap)
 
 ### Fixed

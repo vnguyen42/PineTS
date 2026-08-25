@@ -617,7 +617,22 @@ console.log(ctx.strategy.risk_halted);  // true if any hard-stop fired
 
 ## Conversion helpers
 
-Three utility functions for currency / qty math. In PineTS today the conversion functions are identity passthroughs for same-currency strategies (the engine doesn't currently fetch FX rates); `default_entry_qty` is fully functional and computes the qty a `strategy.entry()` would size given the current `default_qty_type` / `default_qty_value` and a hypothetical fill price.
+`convert_to_account` / `convert_to_symbol` convert between the account currency
+(`strategy.currency`) and the symbol currency at TradingView's **"previous daily
+value"** — the last daily FX close strictly before the UTC day of the sizing bar.
+The FX rates are optional HOST input: the provider may expose
+`getCurrencyRates(): Record<string, Array<[dayUtcMs, close]>>` keyed by
+`<symbolCurrency><accountCurrency>` (e.g. `"EURUSD"`), which the engine reads from
+`context.pine.currencyRates` (VIN-113). Without a series — or for same-currency
+strategies — the helpers keep their original behavior: identity passthrough for
+`convert_to_*` on same-currency, `NaN` for cross-currency. The sizing branches
+convert through the same single helper: `cash` since VIN-113, `percent_of_equity`
+since VIN-134 — both fall back to the UNCONVERTED value when no series is
+available, leaving the engine byte-identical to the pre-conversion behavior.
+`default_entry_qty(fillPrice)` computes the qty a `strategy.entry()` would size
+under the current `default_qty_type` / `default_qty_value` — it goes through the
+same single sizing function, so cash and percent quantities include the
+conversion when a series is available.
 
 ```javascript
 await pine.run(($) => {
@@ -625,7 +640,7 @@ await pine.run(($) => {
     strategy('Conversion', { overlay: true, currency: 'USD',
                              default_qty_type: 'percent_of_equity', default_qty_value: 10 });
 
-    const inUsd  = strategy.convert_to_account(100);  // 100 (passthrough for same-currency)
+    const inUsd  = strategy.convert_to_account(100);  // 100 (same currency, or no host rates series)
     const inSym  = strategy.convert_to_symbol(100);   // 100
     const qty    = strategy.default_entry_qty(50000); // (equity * 10%) / 50000
 });
@@ -638,7 +653,8 @@ await pine.run(($) => {
 The strategy namespace's surface is implemented 1:1 with TV. A subset of strategies produce values that diverge from TV in specific fields — these are tracked iteration items, **not** missing surface:
 
 - **`strategy.margin_liquidation_price`** — PineTS uses an "equity hits zero" approximation; TV's broker liquidation formula differs.
-- **`strategy.convert_to_account` / `convert_to_symbol`** — identity passthrough for same-currency cases. TV may return `na` when symbol/account currencies differ even nominally (e.g. `BTCUSDC`'s USDC vs USD).
+- **`strategy.convert_to_account` / `convert_to_symbol`** — real conversion requires the host-provided `currencyRates` series (VIN-113). Currency identity is string equality, not economic equivalence — so nominally-pegged pairs that differ as strings (e.g. `BTCUSDC`'s USDC vs USD) still fall back to the pre-conversion behavior, where TV may return `na`.
+
 - **OCA enforcement** — order objects carry `oca_name` / `oca_type` fields, but the engine doesn't yet auto-cancel or reduce siblings on fill. Deferred Phase 7.
 - **Commission rounding** — per-leg charges may differ from TV by sub-cent rounding in edge cases.
 - **Per-trade `max_drawdown` / `max_runup`** — PineTS tracks intra-bar high/low excursions, but TV's accounting differs for trades that open and close in adjacent bars.

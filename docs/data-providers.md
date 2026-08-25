@@ -418,6 +418,16 @@ Provider['MyProvider'] = new MyProvider();
 // Now available as Provider.MyProvider
 ```
 
+### Optional Provider Hooks
+
+The `IProvider` interface accepts two optional hooks read by the engine for strategy sizing and currency conversion (VIN-113 / VIN-134):
+
+- `getCurrencyRates?(): Record<string, Array<[number, number]>> | undefined` — daily FX close series keyed by `<symbolCurrency><accountCurrency>` (e.g. `"EURUSD"`), sorted ascending by UTC day. Used by the `cash` and `percent_of_equity` sizing branches and by `strategy.convert_to_symbol` / `convert_to_account` to convert at the previous daily FX rate. Absent → exact pre-VIN-113 behavior (identity for same-currency, `NaN` for cross-currency helpers, unconverted sizing).
+- `getQtyStep?(): number | undefined` — the instrument quantity step used to truncate computed quantities (e.g. `0.001` on CAKEUSDT, `1` on integer-share stocks). Absent → generic precision truncation.
+
+See [Strategy — Conversion helpers](strategy.md#conversion-helpers).
+
+
 ### Chart-Type Modifiers (Extended Tickers)
 
 A ticker may carry a chart-type modifier suffix — `"BTCUSDT;heikinashi"` (see [Non-Standard Chart Types](initialization-and-usage.html#non-standard-chart-types-heikin-ashi)). The contract at the provider boundary:
