@@ -235,7 +235,13 @@ function firstTriggerAfter(
     startPrice: number,
 ): PathTrigger | undefined {
     if (isTriggered(startPrice)) {
-        return { position: start, fillPrice: startPrice };
+        // VIN-1763a: a trigger already true at the start position can fire
+        // on tolerance alone (start price within 1e-12×max(1,|level|) of the
+        // level). The fill price must stay the literal level in that case —
+        // never the noisy start price (1.0744800000009 vs 1.07448). A
+        // genuine crossing beyond the band keeps the start price (open/gap
+        // execution semantics, e.g. a stop far past the open).
+        return { position: start, fillPrice: isLevelTouched(level, startPrice) ? level : startPrice };
     }
 
     const firstSegment = Math.max(0, start.pathSegment);
@@ -1919,6 +1925,45 @@ export function hasPendingMatchingEntry(strategy: StrategyState, fromEntry: stri
 
 type ExitFillKind = 'profit' | 'loss' | 'trailing' | 'market';
 
+/**
+ * VIN-1763a — canonical noise-tolerant level-touch test.
+ * True when `price` has REACHED `level` to within the canonical
+ * magnitude-relative tolerance 1e-12×max(1,|level|) (never a fixed EPS,
+ * never an ULP of the quotient alone): absorbs binary representation
+ * noise like bar high 1.0744799999999999 vs stop 1.07448 — TV operates
+ * on displayed prices and fills the level there (VIN-136).
+ *
+ * Contract: the tolerance lives on the TOUCH TEST ONLY, and fill prices
+ * always stay at the literal level — never at the noisy touch price.
+ * Ranking / order inversion (rankEvent, comparePathPositions, event sort)
+ * never take the tolerance as a DIRECT input: the underlying comparisons
+ * are unchanged. The tolerance can still change precedence INDIRECTLY: a
+ * touch that fires only within the band at the activation position
+ * (pathSegment === -1) reclassifies the fill as an open gap through
+ * openPastSl/openPastTp — the same tolerance band the entries side already
+ * applies (gapAtOpen in processStrategyOrders) — and that
+ * reclassified position is what rankEvent (front-of-bar precedence),
+ * comparePathPositions (OCO arbitrage) and buyStopSparesFreshEntry (fresh
+ * short-entry stop suppression) consume. This matches TV, which operates
+ * on displayed prices: an open equal to the level within noise is the
+ * level, so the reclassification is intended behavior, not an artifact.
+ */
+function isLevelTouched(level: number, price: number): boolean {
+    if (!Number.isFinite(level) || !Number.isFinite(price)) return false;
+    const tolerance = 1e-12 * Math.max(1, Math.abs(level));
+    return Math.abs(price - level) <= tolerance;
+}
+
+/** Tolerant up-crossing touch: price reached or crossed `level` upward. */
+function touchedAtOrAbove(level: number, price: number): boolean {
+    return price >= level || isLevelTouched(level, price);
+}
+
+/** Tolerant down-crossing touch: price reached or crossed `level` downward. */
+function touchedAtOrBelow(level: number, price: number): boolean {
+    return price <= level || isLevelTouched(level, price);
+}
+
 interface ExitFillEvent {
     order: Order;
     orderSequence: number;
@@ -2307,13 +2352,15 @@ export function processExitOrders(
                 armPrice = isLong ? avgEntry + order.trail_points * mintick : avgEntry - order.trail_points * mintick;
             }
             if (armPrice !== undefined) {
-                const armed = isLong ? highPrice >= armPrice : lowPrice <= armPrice;
+                const armed = isLong
+                    ? touchedAtOrAbove(armPrice, highPrice)
+                    : touchedAtOrBelow(armPrice, lowPrice);
                 if (armed) {
                     trailArmPrice = armPrice;
                     trailActivationPosition = firstTriggerAfter(
                         path,
                         armPrice,
-                        isLong ? (price) => price >= armPrice! : (price) => price <= armPrice!,
+                        isLong ? (price) => touchedAtOrAbove(armPrice!, price) : (price) => touchedAtOrBelow(armPrice!, price),
                         { pathSegment: -1, distanceAlongSegment: 0 },
                         openPrice,
                     )?.position;
@@ -2419,30 +2466,33 @@ export function processExitOrders(
                     // process_orders_on_close evaluates a bracket placed on
                     // this bar against the close only. High/low values from
                     // the already-completed intrabar path are not replayed.
-                    tpHit = isLong ? closePrice >= tp : closePrice <= tp;
+                    tpHit = isLong ? touchedAtOrAbove(tp, closePrice) : touchedAtOrBelow(tp, closePrice);
                 } else if (activationPosition !== undefined) {
                     tpExecution = firstTriggerAfter(
                         path,
                         tp,
-                        isLong ? (price) => price >= tp! : (price) => price <= tp!,
+                        isLong ? (price) => touchedAtOrAbove(tp!, price) : (price) => touchedAtOrBelow(tp!, price),
                         activationPosition,
                         activationPrice,
                     );
                     tpHit = tpExecution !== undefined;
                 } else if (phase === 'open' || (cofState !== null && cofState.pass === 0)) {
-                    tpHit = isLong ? openPrice >= tp : openPrice <= tp;
+                    tpHit = isLong ? touchedAtOrAbove(tp, openPrice) : touchedAtOrBelow(tp, openPrice);
                 } else if (cofState !== null && cofMarkedThisPass) {
                     // A fresh bracket is marketable when the CURRENT tick is
                     // already past its level — no prior-tick crossing is
                     // required (the leg did not exist before this tick; the
                     // wrong-sided-but-marketable 2205 cases prove it).
-                    tpHit = isLong ? cofTickPrice! >= tp : cofTickPrice! <= tp;
+                    tpHit = isLong ? touchedAtOrAbove(tp, cofTickPrice!) : touchedAtOrBelow(tp, cofTickPrice!);
                 } else if (cofState !== null) {
+                    // The prior tick must be strictly before the level (a
+                    // within-noise prior tick already fired the touch on
+                    // that pass); the current tick uses the tolerant test.
                     tpHit = isLong
-                        ? cofPreviousPrice! < tp && cofTickPrice! >= tp
-                        : cofPreviousPrice! > tp && cofTickPrice! <= tp;
+                        ? cofPreviousPrice! < tp && touchedAtOrAbove(tp, cofTickPrice!)
+                        : cofPreviousPrice! > tp && touchedAtOrBelow(tp, cofTickPrice!);
                 } else {
-                    tpHit = isLong ? highPrice >= tp : lowPrice <= tp;
+                    tpHit = isLong ? touchedAtOrAbove(tp, highPrice) : touchedAtOrBelow(tp, lowPrice);
                 }
             }
             if (sl !== undefined) {
@@ -2450,26 +2500,26 @@ export function processExitOrders(
                     // A close-phase stop is marketable only when the close
                     // itself is beyond the current stop. Do not reuse a
                     // historical low/high crossing from the intrabar pass.
-                    slHit = isLong ? closePrice <= sl : closePrice >= sl;
+                    slHit = isLong ? touchedAtOrBelow(sl, closePrice) : touchedAtOrAbove(sl, closePrice);
                 } else if (activationPosition !== undefined) {
                     slExecution = firstTriggerAfter(
                         path,
                         sl,
-                        isLong ? (price) => price <= sl! : (price) => price >= sl!,
+                        isLong ? (price) => touchedAtOrBelow(sl!, price) : (price) => touchedAtOrAbove(sl!, price),
                         activationPosition,
                         activationPrice,
                     );
                     slHit = slExecution !== undefined;
                 } else if (phase === 'open' || (cofState !== null && cofState.pass === 0)) {
-                    slHit = isLong ? openPrice <= sl : openPrice >= sl;
+                    slHit = isLong ? touchedAtOrBelow(sl, openPrice) : touchedAtOrAbove(sl, openPrice);
                 } else if (cofState !== null && cofMarkedThisPass) {
-                    slHit = isLong ? cofTickPrice! <= sl : cofTickPrice! >= sl;
+                    slHit = isLong ? touchedAtOrBelow(sl, cofTickPrice!) : touchedAtOrAbove(sl, cofTickPrice!);
                 } else if (cofState !== null) {
                     slHit = isLong
-                        ? cofPreviousPrice! > sl && cofTickPrice! <= sl
-                        : cofPreviousPrice! < sl && cofTickPrice! >= sl;
+                        ? cofPreviousPrice! > sl && touchedAtOrBelow(sl, cofTickPrice!)
+                        : cofPreviousPrice! < sl && touchedAtOrAbove(sl, cofTickPrice!);
                 } else {
-                    slHit = isLong ? lowPrice <= sl : highPrice >= sl;
+                    slHit = isLong ? touchedAtOrBelow(sl, lowPrice) : touchedAtOrAbove(sl, highPrice);
                 }
             }
 
@@ -2654,11 +2704,11 @@ export function processExitOrders(
                     if (favorableFirst) {
                         // Phase 2 (favorable extreme → adverse extreme): low for
                         // long / high for short crosses trigger.
-                        const hit = isLong ? lowPrice <= trig : highPrice >= trig;
+                        const hit = isLong ? touchedAtOrBelow(trig, lowPrice) : touchedAtOrAbove(trig, highPrice);
                         if (hit) emitTrail(trig, 1);
                     } else {
                         // Phase 3 (favorable extreme → close): close past trigger.
-                        const seg3 = isLong ? closePrice <= trig : closePrice >= trig;
+                        const seg3 = isLong ? touchedAtOrBelow(trig, closePrice) : touchedAtOrAbove(trig, closePrice);
                         if (seg3) emitTrail(trig, 2);
                     }
                 }
@@ -2666,17 +2716,17 @@ export function processExitOrders(
                 // Already armed in a prior bar. Full segment model.
                 updatePeak();
                 const trig = triggerFromPeak();
-                const hit = isLong ? lowPrice <= trig : highPrice >= trig;
+                const hit = isLong ? touchedAtOrBelow(trig, lowPrice) : touchedAtOrAbove(trig, highPrice);
                 if (hit) emitTrail(trig, 1);
             } else {
                 const oldTrig = triggerFromPeak();
-                const seg1 = isLong ? lowPrice <= oldTrig : highPrice >= oldTrig;
+                const seg1 = isLong ? touchedAtOrBelow(oldTrig, lowPrice) : touchedAtOrAbove(oldTrig, highPrice);
                 if (seg1) {
                     emitTrail(oldTrig, 0);
                 } else {
                     updatePeak();
                     const newTrig = triggerFromPeak();
-                    const seg3 = isLong ? closePrice <= newTrig : closePrice >= newTrig;
+                    const seg3 = isLong ? touchedAtOrBelow(newTrig, closePrice) : touchedAtOrAbove(newTrig, closePrice);
                     if (seg3) emitTrail(newTrig, 2);
                 }
             }
