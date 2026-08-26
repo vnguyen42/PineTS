@@ -97,11 +97,11 @@ export function exit(context: any) {
         const trailPoints      = extractValue(parsed.trail_points);
         const trailOffset      = extractValue(parsed.trail_offset);
 
-        // Snap absolute limit/stop levels to the mintick grid AWAY from the
-        // current position's average entry on stock symbols. TradingView
-        // quantizes absolute exit levels against the position reference
-        // (e.g. position_avg_price * 1.01), not the current close. Pending
-        // exits without an open position retain the close reference.
+        // Snap absolute limit/stop levels to the mintick grid. For an open
+        // stock position, TradingView rounds a stop toward the market's
+        // adverse side (long=floor, short=ceil) and a limit away from it
+        // (long=ceil, short=floor). Without a position, preserve the
+        // reference-directed placement rule.
         // Absolute trail_price placement keeps the established current-close
         // reference so VIN-86c trailing direction semantics remain unchanged.
         const mintick = context.pine?.syminfo?.mintick ?? 0;
@@ -113,12 +113,19 @@ export function exit(context: any) {
         const normalizedQty = qty !== undefined && qty !== null
             ? calculateOrderQty(context, Number(qty), 0, currentClose)
             : undefined;
-        const positionReference = context.pine?.syminfo?.type === 'stock'
-            && Number.isFinite(context.strategy.position_avg_price)
+        const isStock = context.pine?.syminfo?.type === 'stock';
+        const positionDirection = Math.sign(context.strategy.position_size);
+        const positionReference = isStock && Number.isFinite(context.strategy.position_avg_price)
             ? context.strategy.position_avg_price
             : currentClose;
-        const limit       = limitRaw      !== undefined ? roundToMintick(limitRaw,      positionReference, mintick) : undefined;
-        const stop        = stopRaw       !== undefined ? roundToMintick(stopRaw,       positionReference, mintick) : undefined;
+        const limitRounding: 'up' | 'down' | undefined = isStock && positionDirection !== 0
+            ? positionDirection === 1 ? 'up' : 'down'
+            : undefined;
+        const stopRounding: 'up' | 'down' | undefined = isStock && positionDirection !== 0
+            ? positionDirection === 1 ? 'down' : 'up'
+            : undefined;
+        const limit       = limitRaw      !== undefined ? roundToMintick(limitRaw,      positionReference, mintick, limitRounding) : undefined;
+        const stop        = stopRaw       !== undefined ? roundToMintick(stopRaw,       positionReference, mintick, stopRounding) : undefined;
         const trailPrice  = trailPriceRaw !== undefined ? roundToMintick(trailPriceRaw, currentClose, mintick) : undefined;
         const fromEntryId = fromEntry ?? '';
         const exitId = idValue ?? 'exit';
@@ -285,7 +292,11 @@ export function exit(context: any) {
             const trailPeak = pending.trail_peak;
             const activationExclusions = pending._excluded_activation_trade_ids;
             const consumedExclusions = pending._excluded_consumed_trade_ids;
+            const continuousSameLifecycle =
+                pending.bar === context.idx - 1
+                || (pending.bar === context.idx && pending._isPersistent === true);
             Object.assign(pending, order);
+            pending._isPersistent = order._isPersistent || continuousSameLifecycle;
             if (trailArmed) {
                 pending.trail_armed = true;
                 pending.trail_peak = trailPeak;

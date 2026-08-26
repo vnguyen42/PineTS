@@ -67,22 +67,22 @@ export function parseStrategyOptions(args: any[]): any {
  *   price < referencePrice → floor to mintick (push price DOWN)
  *   price === referencePrice → return as-is
  *
- * Covers all four cases naturally:
- *   - Buy stop above current  → ceil
- *   - Sell stop below current → floor
- *   - Buy limit below current → floor
- *   - Sell limit above current → ceil
- *   - Long TP above entry / SL below entry → ceil / floor
- *   - Short TP below entry / SL above entry → floor / ceil
+ * `rounding` overrides the reference direction for exit levels whose
+ * broker-side direction is known: `up` uses ceil and `down` uses floor.
  *
  * For mintick === 0 or undefined (defensive), returns the price unchanged.
  * A non-finite mintick (NaN, ±Infinity — e.g. invalid symbol metadata where
  * minmove/pricescale resolve to 0) also returns the price unchanged instead
  * of letting 0 × Infinity corrupt the rounding into NaN.
  */
-export function roundToMintick(price: number, referencePrice: number, mintick: number): number {
+export function roundToMintick(
+    price: number,
+    referencePrice: number,
+    mintick: number,
+    rounding?: 'up' | 'down',
+): number {
     if (!Number.isFinite(mintick) || mintick <= 0 || !Number.isFinite(price)) return price;
-    if (price === referencePrice) return price;
+    if (rounding === undefined && price === referencePrice) return price;
     const ticks = price / mintick;
     // Snap to the NEAREST tick when the price sits within a
     // magnitude-relative epsilon of the grid (absorbs upstream float noise
@@ -93,6 +93,8 @@ export function roundToMintick(price: number, referencePrice: number, mintick: n
     const nearestTicks = Math.round(ticks);
     const snapEps = 1e-12 * Math.max(1, Math.abs(price));
     if (Math.abs(price - nearestTicks * mintick) <= snapEps) return nearestTicks * mintick;
+    if (rounding === 'up') return Math.ceil(ticks) * mintick;
+    if (rounding === 'down') return Math.floor(ticks) * mintick;
     return price > referencePrice ? Math.ceil(ticks) * mintick : Math.floor(ticks) * mintick;
 }
 /**
