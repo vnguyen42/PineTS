@@ -1231,7 +1231,7 @@ export class PineTS {
                     const highPrice = Series.from(context.data.high).get(0);
                     const lowPrice = Series.from(context.data.low).get(0);
                     const closePrice = Series.from(context.data.close).get(0);
-                    const openCloserToHigh = Math.abs(highPrice - openPrice) <= Math.abs(openPrice - lowPrice);
+                    const openCloserToHigh = Math.abs(highPrice - openPrice) < Math.abs(openPrice - lowPrice); // VIN-132b: tie -> LOW first
                     strategy._cof = {
                         pass: 0,
                         ticks: openCloserToHigh
@@ -1342,7 +1342,7 @@ export class PineTS {
                     const highPrice = Series.from(context.data.high).get(0);
                     const lowPrice = Series.from(context.data.low).get(0);
                     const closePrice = Series.from(context.data.close).get(0);
-                    const openCloserToHigh = Math.abs(highPrice - openPrice) <= Math.abs(openPrice - lowPrice);
+                    const openCloserToHigh = Math.abs(highPrice - openPrice) < Math.abs(openPrice - lowPrice); // VIN-132b: tie -> LOW first
                     strategy._cof = {
                         pass: 3,
                         ticks: openCloserToHigh

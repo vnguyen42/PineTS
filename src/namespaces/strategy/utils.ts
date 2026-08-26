@@ -210,7 +210,10 @@ interface PathTrigger {
 }
 
 function assumedIntrabarPath(open: number, high: number, low: number, close: number): number[] {
-    return Math.abs(high - open) <= Math.abs(open - low)
+    // VIN-132b: on an EXACT distance tie the assumed broker path goes LOW
+    // first (measured TV broker-emulator rule: 1781 USDZAR bar 66 — stop and
+    // limit at equal distance from the open, TV fills the stop).
+    return Math.abs(high - open) < Math.abs(open - low)
         ? [open, high, low, close]
         : [open, low, high, close];
 }
@@ -2000,7 +2003,10 @@ export function processExitOrders(
         })),
     );
     const globalEvents: ExitFillEvent[] = [];
-    const openCloserToHigh = Math.abs(highPrice - openPrice) <= Math.abs(openPrice - lowPrice);
+    // VIN-132b: exact distance tie → LOW first (strict <), consistent with
+    // assumedIntrabarPath. The old <= sent ties HIGH-first, which fired the
+    // TP legs of 1781 bar 66 where TV fires the stops.
+    const openCloserToHigh = Math.abs(highPrice - openPrice) < Math.abs(openPrice - lowPrice);
     const path = assumedIntrabarPath(openPrice, highPrice, lowPrice, closePrice);
     const rankEvent = (
         price: number,
@@ -2885,7 +2891,7 @@ export function isAdverseFirstBar(context: any): boolean {
     const openPrice = Series.from(context.data.open).get(0);
     const highPrice = Series.from(context.data.high).get(0);
     const lowPrice = Series.from(context.data.low).get(0);
-    const openCloserToHigh = Math.abs(highPrice - openPrice) <= Math.abs(openPrice - lowPrice);
+    const openCloserToHigh = Math.abs(highPrice - openPrice) < Math.abs(openPrice - lowPrice);
     return dir === 1 ? !openCloserToHigh : openCloserToHigh;
 }
 
