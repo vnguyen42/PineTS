@@ -133,16 +133,18 @@ export function exit(context: any) {
         // below by processExitOrders to keep persistent-pattern exits
         // active, matching TV's actual behavior of firing the captured
         // value when the user keeps refreshing it. (The reversal-drop
-        // suppression was removed in VIN-77: brackets now attach to the
-        // filled position, including reversal entries.)
+        // suppression was removed in VIN-77; since VIN-125 the bracket
+        // binding is snapshotted at call time — a reversal entry filled
+        // later never inherits an order created for the outgoing position.)
         const history = context.strategy._exit_call_history as Map<string, number>;
         const lastBarForSite = history.get(callsiteId);
         const isPersistent = lastBarForSite !== undefined && lastBarForSite === context.idx - 1;
         history.set(callsiteId, context.idx);
-        const matchingTradeIds = context.strategy.opentrades.flatMap(
+        const matchingActivations = context.strategy.opentrades.flatMap(
             (trade: {
                 id: string;
                 entry_id: string;
+                size: number;
                 _activation_id?: string;
                 _activation_entry_id?: string;
                 _activation_segments?: Array<{ id: string; entryId: string }>;
@@ -154,9 +156,63 @@ export function exit(context: any) {
                     }];
                 return identities
                     .filter((identity) => !fromEntryId || identity.entryId === fromEntryId)
-                    .map((identity) => identity.id);
+                    .map((identity) => ({
+                        ...identity,
+                        direction: Math.sign(trade.size),
+                    }));
             },
         );
+        const matchingTradeIds = matchingActivations.map((activation) => activation.id);
+        const pendingMatchingEntries = context.strategy.pending_orders.filter(
+            (order: Order) =>
+                order.status === 'pending'
+                && (order.category ?? 'entry') === 'entry'
+                && (!fromEntryId || order.id === fromEntryId),
+        );
+
+        // Conditional exits bind to the call-time position, not the
+        // activation book that exists after a later reversal fills. When an
+        // open activation is present it takes precedence over pending
+        // entries; when flat, preserve the same-evaluation entry(); exit()
+        // pattern only if pending entries have one unambiguous direction.
+        let boundActivationIds: string[] | undefined;
+        let boundEntryIds: string[] | undefined;
+        let boundDirection: -1 | 1 | undefined;
+        if (matchingActivations.length > 0) {
+            boundActivationIds = Array.from(new Set(matchingActivations.map((activation) => activation.id)));
+            const direction = matchingActivations.find((activation) => activation.direction === 1 || activation.direction === -1)?.direction;
+            if (direction === 1 || direction === -1) {
+                boundDirection = direction;
+                // A same-side entry already pending at the call remains an
+                // eligible activation (pyramiding). Opposite pending entries
+                // are deliberately excluded; they are reversal candidates
+                // and must not inherit this bracket.
+                const sameSidePendingIds = pendingMatchingEntries
+                    .filter((order) => Math.sign(Number(order.direction)) === direction)
+                    .map((order) => order.id);
+                if (sameSidePendingIds.length > 0) {
+                    boundEntryIds = Array.from(new Set(sameSidePendingIds));
+                }
+            }
+        } else if (pendingMatchingEntries.length > 0) {
+            const pendingDirections: Array<-1 | 1> = Array.from(new Set<-1 | 1>(
+                pendingMatchingEntries
+                    .map((order) => Math.sign(Number(order.direction)))
+                    .filter((direction): direction is -1 | 1 => direction === -1 || direction === 1),
+            ));
+            if (pendingDirections.length === 1) {
+                boundDirection = pendingDirections[0];
+                boundEntryIds = Array.from(new Set(pendingMatchingEntries.map((order) => order.id)));
+                boundActivationIds = [];
+            } else {
+                // Never choose one side when a flat book has pending
+                // entries in both directions. An empty captured set is
+                // intentionally non-matching and is cancelled once those
+                // entries are gone.
+                boundActivationIds = [];
+                boundEntryIds = [];
+            }
+        }
         const lifecycle = context.strategy._filled_exit_trade_ids?.get(lifecycleKey);
         const sameBarLifecycle = lifecycle?.bar === context.idx ? lifecycle : undefined;
         const partialExit = Number(qty) > 0 || Number(qtyPercent) > 0;
@@ -204,6 +260,10 @@ export function exit(context: any) {
             _isPersistent: isPersistent,
             _callsiteId: callsiteId,
             _exit_lifecycle_key: lifecycleKey,
+            _exit_bound_activation_ids: boundActivationIds,
+            _exit_bound_entry_ids: boundEntryIds,
+            _exit_bound_direction: boundDirection,
+            _exit_refreshed: false,
             _excluded_activation_trade_ids: excludedActivationTradeIds,
             _excluded_consumed_trade_ids: excludedConsumedTradeIds,
         };
@@ -232,6 +292,7 @@ export function exit(context: any) {
             }
             pending._excluded_activation_trade_ids = activationExclusions;
             pending._excluded_consumed_trade_ids = consumedExclusions;
+            pending._exit_refreshed = true;
             return;
         }
         list.push(order);

@@ -208,6 +208,21 @@ export interface Order {
     _isPersistent?: boolean;
     _callsiteId?: string;
 
+    // Internal: strategy.exit() binds its conditional bracket to the
+    // activation segments visible when the call is evaluated. This prevents
+    // a reversal entry filled later from inheriting an order that was created
+    // for the outgoing position. Pending entries are captured by entry ID
+    // when no matching activation is open yet (the flat entry(); exit()
+    // pattern), and also same-direction pending entries when an activation
+    // is already open (pyramiding); explicit from_entry + pyramiding > 1
+    // keeps the bound set to pending-only (no late-activation override).
+    _exit_bound_activation_ids?: string[];
+    _exit_bound_entry_ids?: string[];
+    _exit_bound_direction?: -1 | 1;
+    // Internal: distinguishes a refreshed broker order from a newly-created
+    // instance with the same logical (id, from_entry) key.
+    _exit_refreshed?: boolean;
+
     // Internal: snapshot of open trade IDs at the moment strategy.close_all()
     // or strategy.close(id) was called. TV binds `close_all` / `close(id)` to
     // the position state at CALL time; if those trades are closed by another

@@ -1923,6 +1923,7 @@ interface ExitFillEvent {
     price: number;
     kind: ExitFillKind;
     gap?: boolean;
+    atClose?: boolean;
     tradeId?: string;
     activationTradeIds: string[];
     excludedConsumedTradeIds: readonly string[];
@@ -1999,7 +2000,15 @@ export function processExitOrders(
     const globalEvents: ExitFillEvent[] = [];
     const openCloserToHigh = Math.abs(highPrice - openPrice) <= Math.abs(openPrice - lowPrice);
     const path = assumedIntrabarPath(openPrice, highPrice, lowPrice, closePrice);
-    const rankEvent = (price: number, gap: boolean, forcedSegment?: number): { pathSegment: number; distanceAlongSegment: number } => {
+    const rankEvent = (
+        price: number,
+        gap: boolean,
+        forcedSegment?: number,
+        atClose = false,
+    ): { pathSegment: number; distanceAlongSegment: number } => {
+        if (atClose) {
+            return { pathSegment: Number.MAX_SAFE_INTEGER, distanceAlongSegment: 0 };
+        }
         if (gap || phase === 'open' || (cofState !== null && cofState.pass === 0)) {
             return { pathSegment: -1, distanceAlongSegment: 0 };
         }
@@ -2075,24 +2084,61 @@ export function processExitOrders(
         // already gone.
         const excludedActivationTradeIds = order._excluded_activation_trade_ids;
         const excludedConsumedTradeIds = order._excluded_consumed_trade_ids ?? [];
+        const boundActivationIds = order.from_entry
+            && (order._exit_bound_activation_ids?.length ?? 0) > 0
+            ? undefined
+            : order._exit_bound_activation_ids;
+        const boundEntryIds = order.from_entry && (strategy.config.pyramiding ?? 1) > 1
+            ? undefined
+            : order._exit_bound_entry_ids;
+        const boundDirection = order._exit_bound_direction;
         let matching = activationBook.filter(
-            (t) =>
-                (!order.from_entry || (t._activation_entry_id ?? t.entry_id) === order.from_entry)
-                && !excludedActivationTradeIds?.includes(t._activation_id ?? t.id),
+            (t) => {
+                const activationId = t._activation_id ?? t.id;
+                const entryId = t._activation_entry_id ?? t.entry_id;
+                const matchesCallBinding = boundActivationIds === undefined
+                    || boundActivationIds.includes(activationId)
+                    || boundEntryIds?.includes(entryId) === true
+                    // Explicit from_entry brackets may continue across
+                    // same-direction physical re-entries; the call-time
+                    // direction still blocks a reversal activation.
+                    || (
+                        order.from_entry !== ''
+                        && boundDirection !== undefined
+                        && Math.sign(t.size) === boundDirection
+                    );
+                return (
+                    (!order.from_entry || entryId === order.from_entry)
+                    && (boundDirection === undefined || Math.sign(t.size) === boundDirection)
+                    && matchesCallBinding
+                    && !excludedActivationTradeIds?.includes(activationId)
+                );
+            },
         );
         if (order._intended_trade_ids) {
             const snapshot = new Set(order._intended_trade_ids);
             matching = matching.filter((t) => snapshot.has(t.id));
         }
+        const waitingForBoundEntry = boundEntryIds !== undefined
+            && boundEntryIds.some((entryId) =>
+                strategy.pending_orders.some(
+                    (candidate) =>
+                        candidate.status === 'pending'
+                        && (candidate.category ?? 'entry') === 'entry'
+                        && candidate.id === entryId,
+                ),
+            );
         if (matching.length === 0) {
             // Exit orders placed before their matching entry wait for it,
-            // including deferred entries that remain pending across COF
-            // passes or a process_orders_on_close phase. Once the entry is
-            // explicitly cancelled and no eligible trade exists, the exit is
-            // dead and is cleared on the next post-entry phase.
-            const waitingForEntry = cof
-                && !order._intended_trade_ids
-                && hasPendingMatchingEntry(strategy, order.from_entry);
+            // including deferred entries captured at call time. Once the
+            // captured entry is cancelled, the exit is dead; it must not
+            // attach to a later opposite-direction activation.
+            const waitingForEntry = waitingForBoundEntry
+                || (
+                    cof
+                    && !order._intended_trade_ids
+                    && hasPendingMatchingEntry(strategy, order.from_entry)
+                );
             if ((phase === 'intrabar' || closePhase) && !waitingForEntry) {
                 order.status = 'cancelled';
             }
@@ -2150,9 +2196,16 @@ export function processExitOrders(
             });
             continue;
         }
-        // Brackets queued by the normal bar-close evaluation are not market
-        // orders and therefore remain pending for a later bar/path.
-        if (closePhase && order.bar >= context.idx) continue;
+        // Current-bar conditionals are evaluated against the close only.
+        // Older orders already had their full OHLC pass; future-dated
+        // orders cannot execute in this phase.
+        if (closePhase && order.bar > context.idx) continue;
+        const closeOnly =
+            closePhase
+            && order.bar === context.idx
+            && order._isPersistent === true
+            && order._exit_refreshed !== true;
+        if (closePhase && order.bar === context.idx && !closeOnly) continue;
 
         // ---- Conditional exits from exit() ----
         // PER-TRADE exit brackets (TV broker-emulator semantics): when a
@@ -2284,6 +2337,7 @@ export function processExitOrders(
             kind: 'profit' | 'loss' | 'trailing';
             tradeId?: string;
             gap?: boolean;
+            atClose?: boolean;
             forcedSegment?: number;
             sourceCount?: number;
         };
@@ -2336,15 +2390,20 @@ export function processExitOrders(
             const activationPrice = entryPathSegment === -1 ? openPrice : entry;
             let tpExecution: PathTrigger | undefined;
             let slExecution: PathTrigger | undefined;
+            let slHit = false;
 
             // During COF, price-based orders require a fresh crossing of
             // their level. A recalculation can refresh an order while price
             // is already beyond it; that order stays inert until the path
             // crosses again.
             let tpHit = false;
-            let slHit = false;
             if (tp !== undefined) {
-                if (activationPosition !== undefined) {
+                if (closeOnly) {
+                    // process_orders_on_close evaluates a bracket placed on
+                    // this bar against the close only. High/low values from
+                    // the already-completed intrabar path are not replayed.
+                    tpHit = isLong ? closePrice >= tp : closePrice <= tp;
+                } else if (activationPosition !== undefined) {
                     tpExecution = firstTriggerAfter(
                         path,
                         tp,
@@ -2364,7 +2423,12 @@ export function processExitOrders(
                 }
             }
             if (sl !== undefined) {
-                if (activationPosition !== undefined) {
+                if (closeOnly) {
+                    // A close-phase stop is marketable only when the close
+                    // itself is beyond the current stop. Do not reuse a
+                    // historical low/high crossing from the intrabar pass.
+                    slHit = isLong ? closePrice <= sl : closePrice >= sl;
+                } else if (activationPosition !== undefined) {
                     slExecution = firstTriggerAfter(
                         path,
                         sl,
@@ -2399,9 +2463,11 @@ export function processExitOrders(
             else if (slHit) kind = 'loss';
 
             if (kind === 'loss') {
-                const openPastSl = slExecution !== undefined
-                    ? slExecution.position.pathSegment === -1
-                    : atOpenTick && (isLong ? openPrice <= (sl as number) : openPrice >= (sl as number));
+                const openPastSl = !closeOnly && (
+                    slExecution !== undefined
+                        ? slExecution.position.pathSegment === -1
+                        : atOpenTick && (isLong ? openPrice <= (sl as number) : openPrice >= (sl as number))
+                );
                 // TV asymmetry (637-event census from the gap_precedence
                 // probe, BTCUSDT 1D): a BUY-stop — the SL leg of a SHORT
                 // position — that is already in-the-money at the open does
@@ -2414,10 +2480,13 @@ export function processExitOrders(
                 if (!buyStopSparesFreshEntry) {
                     slEvents.push({
                         qty: tQty,
-                        price: slExecution?.fillPrice ?? (openPastSl ? rawOpenPrice : (sl as number)),
+                        price: closeOnly
+                            ? closePrice
+                            : slExecution?.fillPrice ?? (openPastSl ? rawOpenPrice : (sl as number)),
                         kind: 'loss',
                         tradeId: activationId,
                         gap: openPastSl,
+                        atClose: closeOnly,
                         forcedSegment: forcedSegmentFor(slExecution),
                     });
                 } else if (tpHit) {
@@ -2425,15 +2494,20 @@ export function processExitOrders(
                 }
             }
             if (kind === 'profit') {
-                const openPastTp = tpExecution !== undefined
-                    ? tpExecution.position.pathSegment === -1
-                    : atOpenTick && (isLong ? openPrice >= (tp as number) : openPrice <= (tp as number));
+                const openPastTp = !closeOnly && (
+                    tpExecution !== undefined
+                        ? tpExecution.position.pathSegment === -1
+                        : atOpenTick && (isLong ? openPrice >= (tp as number) : openPrice <= (tp as number))
+                );
                 tpEvents.push({
                     qty: tQty,
-                    price: tpExecution?.fillPrice ?? (openPastTp ? rawOpenPrice : (tp as number)),
+                    price: closeOnly
+                        ? closePrice
+                        : tpExecution?.fillPrice ?? (openPastTp ? rawOpenPrice : (tp as number)),
                     kind: 'profit',
                     tradeId: activationId,
                     gap: openPastTp,
+                    atClose: closeOnly,
                     forcedSegment: forcedSegmentFor(tpExecution),
                 });
             }
@@ -2597,6 +2671,7 @@ export function processExitOrders(
                     candidate.kind === event.kind
                     && candidate.price === event.price
                     && candidate.gap === event.gap
+                    && candidate.atClose === event.atClose
                     && candidate.forcedSegment === event.forcedSegment,
             );
             if (existing === undefined) {
@@ -2619,11 +2694,12 @@ export function processExitOrders(
                 price: event.price,
                 kind: event.kind,
                 gap: event.gap === true,
+                atClose: event.atClose === true,
                 tradeId: event.tradeId,
                 activationTradeIds: matching.map((trade) => trade._activation_id ?? trade.id),
                 excludedConsumedTradeIds,
                 fillCount: event.sourceCount ?? 1,
-                ...rankEvent(event.price, event.gap === true, event.forcedSegment),
+                ...rankEvent(event.price, event.gap === true, event.forcedSegment, event.atClose === true),
             });
         }
     }
@@ -2653,10 +2729,12 @@ export function processExitOrders(
         const nominalFillPrice = event.kind === 'market' || event.kind === 'profit'
             ? event.price
             : applySlippage(context, -event.direction, event.price);
-        // Market and OHLC-gap executions on the proved stock surface snap
-        // after slippage. Other asset classes retain their prior execution
-        // representation until an equivalent oracle proves this rule there.
-        const fillPrice = snapExecutionPrices && (event.kind === 'market' || event.gap === true)
+        // Market, close-phase, and OHLC-gap executions on the proved stock
+        // surface snap after slippage. Other asset classes retain their prior
+        // execution representation until an equivalent oracle proves this
+        // rule there.
+        const fillPrice = snapExecutionPrices
+            && (event.kind === 'market' || event.gap === true || event.atClose === true)
             ? snapExecutionPrice(nominalFillPrice, mintick)
             : nominalFillPrice;
         const sizesBefore = new Map(strategy.opentrades.map((trade) => [trade.id, Math.abs(trade.size)]));
