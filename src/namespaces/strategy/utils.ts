@@ -2079,7 +2079,16 @@ export function processExitOrders(
             order.stop === undefined &&
             order.trail_price === undefined &&
             order.trail_points === undefined;
-        if (marketExitsOnly && !isPureMarketExit) continue;
+        // VIN-120: the same-tick drain also admits the exit bracket the
+        // CURRENT recalculation created fresh — pass marker equals the
+        // current COF pass and the order belongs to this bar. Only that one
+        // conditional passes; pre-existing/refreshed brackets and pyramided
+        // books keep their next-path semantics (1502 byte-identical).
+        const cofMarkedThisPass = cofState !== null
+            && order.bar === context.idx
+            && order._cof_fresh_single_trade_exit_pass !== undefined
+            && order._cof_fresh_single_trade_exit_pass === cofState.pass;
+        if (marketExitsOnly && !isPureMarketExit && !cofMarkedThisPass) continue;
 
         // Gather matching open trades (from_entry filter; '' = all).
         // For market closes from strategy.close_all() / strategy.close(id),
@@ -2262,7 +2271,7 @@ export function processExitOrders(
         // of entry will still fire at the bar's open via gap-fill when
         // the open is past the trigger. Dropping wrong-sided legs here
         // would miss that.
-        if (!order._isPersistent) {
+        if (!order._isPersistent && !cofMarkedThisPass) {
             if (absSl !== undefined) {
                 const slValid = isLong ? absSl < avgEntry : absSl > avgEntry;
                 if (!slValid) absSl = undefined;
@@ -2422,6 +2431,12 @@ export function processExitOrders(
                     tpHit = tpExecution !== undefined;
                 } else if (phase === 'open' || (cofState !== null && cofState.pass === 0)) {
                     tpHit = isLong ? openPrice >= tp : openPrice <= tp;
+                } else if (cofState !== null && cofMarkedThisPass) {
+                    // A fresh bracket is marketable when the CURRENT tick is
+                    // already past its level — no prior-tick crossing is
+                    // required (the leg did not exist before this tick; the
+                    // wrong-sided-but-marketable 2205 cases prove it).
+                    tpHit = isLong ? cofTickPrice! >= tp : cofTickPrice! <= tp;
                 } else if (cofState !== null) {
                     tpHit = isLong
                         ? cofPreviousPrice! < tp && cofTickPrice! >= tp
@@ -2447,6 +2462,8 @@ export function processExitOrders(
                     slHit = slExecution !== undefined;
                 } else if (phase === 'open' || (cofState !== null && cofState.pass === 0)) {
                     slHit = isLong ? openPrice <= sl : openPrice >= sl;
+                } else if (cofState !== null && cofMarkedThisPass) {
+                    slHit = isLong ? cofTickPrice! <= sl : cofTickPrice! >= sl;
                 } else if (cofState !== null) {
                     slHit = isLong
                         ? cofPreviousPrice! > sl && cofTickPrice! <= sl
@@ -2471,11 +2488,13 @@ export function processExitOrders(
             else if (slHit) kind = 'loss';
 
             if (kind === 'loss') {
-                const openPastSl = !closeOnly && (
-                    slExecution !== undefined
-                        ? slExecution.position.pathSegment === -1
-                        : atOpenTick && (isLong ? openPrice <= (sl as number) : openPrice >= (sl as number))
-                );
+                const openPastSl = cofMarkedThisPass
+                    ? (isLong ? cofTickPrice! <= (sl as number) : cofTickPrice! >= (sl as number))
+                    : !closeOnly && (
+                        slExecution !== undefined
+                            ? slExecution.position.pathSegment === -1
+                            : atOpenTick && (isLong ? openPrice <= (sl as number) : openPrice >= (sl as number))
+                    );
                 // TV asymmetry (637-event census from the gap_precedence
                 // probe, BTCUSDT 1D): a BUY-stop — the SL leg of a SHORT
                 // position — that is already in-the-money at the open does
@@ -2488,9 +2507,11 @@ export function processExitOrders(
                 if (!buyStopSparesFreshEntry) {
                     slEvents.push({
                         qty: tQty,
-                        price: closeOnly
-                            ? closePrice
-                            : slExecution?.fillPrice ?? (openPastSl ? rawOpenPrice : (sl as number)),
+                        price: cofMarkedThisPass
+                            ? cofTickPrice!
+                            : closeOnly
+                              ? closePrice
+                              : slExecution?.fillPrice ?? (openPastSl ? rawOpenPrice : (sl as number)),
                         kind: 'loss',
                         tradeId: activationId,
                         gap: openPastSl,
@@ -2502,16 +2523,20 @@ export function processExitOrders(
                 }
             }
             if (kind === 'profit') {
-                const openPastTp = !closeOnly && (
-                    tpExecution !== undefined
-                        ? tpExecution.position.pathSegment === -1
-                        : atOpenTick && (isLong ? openPrice >= (tp as number) : openPrice <= (tp as number))
-                );
+                const openPastTp = cofMarkedThisPass
+                    ? (isLong ? cofTickPrice! >= (tp as number) : cofTickPrice! <= (tp as number))
+                    : !closeOnly && (
+                        tpExecution !== undefined
+                            ? tpExecution.position.pathSegment === -1
+                            : atOpenTick && (isLong ? openPrice >= (tp as number) : openPrice <= (tp as number))
+                    );
                 tpEvents.push({
                     qty: tQty,
-                    price: closeOnly
-                        ? closePrice
-                        : tpExecution?.fillPrice ?? (openPastTp ? rawOpenPrice : (tp as number)),
+                    price: cofMarkedThisPass
+                        ? cofTickPrice!
+                        : closeOnly
+                          ? closePrice
+                          : tpExecution?.fillPrice ?? (openPastTp ? rawOpenPrice : (tp as number)),
                     kind: 'profit',
                     tradeId: activationId,
                     gap: openPastTp,

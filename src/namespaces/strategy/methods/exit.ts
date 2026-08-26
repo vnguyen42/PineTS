@@ -296,6 +296,10 @@ export function exit(context: any) {
                 pending.bar === context.idx - 1
                 || (pending.bar === context.idx && pending._isPersistent === true);
             Object.assign(pending, order);
+            // VIN-120: a refresh is never a fresh instance — drop the
+            // pass-scoped marker so a later bar with a coincident COF pass
+            // number cannot drain this bracket same-tick as if it were new.
+            delete pending._cof_fresh_single_trade_exit_pass;
             pending._isPersistent = order._isPersistent || continuousSameLifecycle;
             if (trailArmed) {
                 pending.trail_armed = true;
@@ -305,6 +309,26 @@ export function exit(context: any) {
             pending._excluded_consumed_trade_ids = consumedExclusions;
             pending._exit_refreshed = true;
             return;
+        }
+        // VIN-120: mark a FRESH single-trade exit bracket created by a COF
+        // fill recalculation. Only the new instance is marked (a refreshed
+        // pending returned above); the qualification is the measured
+        // lifecycle: one open trade, entered on the current bar at the
+        // current assumed path point (pass 0 → the open segment −1, later
+        // passes → segment pass−1). The same-tick drain fills it when
+        // already marketable; the marker is pass-scoped — any later pass or
+        // bar ignores it and restores the next-path semantics.
+        const cofState = context.strategy._cof;
+        if (cofState != null && context.strategy.opentrades.length === 1) {
+            const trade = context.strategy.opentrades[0];
+            const entryBar = trade._activation_entry_bar_index ?? trade.entry_bar_index;
+            const entryPathSegment = trade._activation_entry_path_segment;
+            const activationAtCurrentTick = cofState.pass === 0
+                ? entryPathSegment === -1
+                : entryPathSegment === cofState.pass - 1;
+            if (entryBar === context.idx && activationAtCurrentTick) {
+                order._cof_fresh_single_trade_exit_pass = cofState.pass;
+            }
         }
         list.push(order);
     };

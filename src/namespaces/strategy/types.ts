@@ -193,6 +193,18 @@ export interface Order {
     // 1539: close 1, open 1 — not 2).
     _cof_reversal_same_tick?: boolean;
 
+    // Internal (VIN-120): pass-scoped marker for a FRESH single-trade exit
+    // bracket created by a COF fill recalculation — the new instance only,
+    // never a refreshed one (an unfilled pending refresh returns before the
+    // marker is stamped) and never a pyramided book (exactly one open trade,
+    // entered on the current bar at the current assumed path point).
+    // The same-tick drain admits this order in addition to pure market
+    // exits, keeps its ephemeral wrong-sided leg (precisely marketable, not
+    // stale) and gap-fills at the cofTickPrice when the level is already
+    // crossed. A later pass — or a later bar — invalidates the marker and
+    // restores the next-path semantics (the 2205 same-bar round-trips).
+    _cof_fresh_single_trade_exit_pass?: number;
+
     // Internal: cadence-detection for strategy.exit. TV's broker
     // emulator uses Pine's lazy series-eval semantic for exit
     // parameters — the variable behind limit/stop is re-read each bar.
