@@ -4,7 +4,7 @@
 import { Order } from '../types';
 import { Series } from '../../../Series';
 import { parseArgsForPineParams, extractCallsiteId } from '../../utils';
-import { hasPendingMatchingEntry, roundToMintick } from '../utils';
+import { calculateOrderQty, hasPendingMatchingEntry, roundToMintick } from '../utils';
 
 /**
  * Pine signature (21 named args):
@@ -106,6 +106,13 @@ export function exit(context: any) {
         // reference so VIN-86c trailing direction semantics remain unchanged.
         const mintick = context.pine?.syminfo?.mintick ?? 0;
         const currentClose = Series.from(context.data.close).get(0);
+        // Explicit exit quantities use the same provider step as entry/order
+        // quantities. With an integer-only instrument, floor the requested
+        // leg at creation; an uncapped sibling exit consumes the remaining
+        // position and therefore receives the integer remainder.
+        const normalizedQty = qty !== undefined && qty !== null
+            ? calculateOrderQty(context, Number(qty), 0, currentClose)
+            : undefined;
         const positionReference = context.pine?.syminfo?.type === 'stock'
             && Number.isFinite(context.strategy.position_avg_price)
             ? context.strategy.position_avg_price
@@ -169,7 +176,8 @@ export function exit(context: any) {
         const order: Order = {
             id: exitId,
             direction: 0,           // resolved at trigger based on matching trades
-            qty: qty !== undefined ? Math.abs(Number(qty)) : 0,
+            qty: normalizedQty ?? 0,
+            _explicit_qty_cap: qty !== undefined && qty !== null,
             qty_percent: qtyPercent,
             type: 'market',
             bar: context.idx,

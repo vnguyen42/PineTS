@@ -420,7 +420,9 @@ export function calculateOrderQty(context: any, specifiedQty: number | undefined
     const truncateQty = (q: number, precision = QTY_PRECISION) => Math.floor(q * precision) / precision;
 
     if (specifiedQty !== undefined && specifiedQty !== null) {
-        return truncateQty(Math.abs(specifiedQty));
+        const absoluteQty = Math.abs(specifiedQty);
+        const stepped = quantizeToQtyStep(context, absoluteQty);
+        return stepped !== undefined ? stepped : truncateQty(absoluteQty);
     }
 
     let rawQty: number;
@@ -2127,7 +2129,7 @@ export function processExitOrders(
             fillPrice = applySlippage(context, -matchingDir, fillPrice);
 
             let qtyToClose = matchingQty;
-            if (order.qty && order.qty > 0) qtyToClose = Math.min(order.qty, matchingQty);
+            if (order._explicit_qty_cap || (order.qty && order.qty > 0)) qtyToClose = Math.min(order.qty, matchingQty);
             else if (order.qty_percent && order.qty_percent > 0) {
                 qtyToClose = matchingQty * (order.qty_percent / 100);
             }
@@ -2583,7 +2585,7 @@ export function processExitOrders(
         if (events.length === 0) continue;
 
         let reservedQty = matchingQty;
-        if (order.qty && order.qty > 0) reservedQty = Math.min(order.qty, matchingQty);
+        if (order._explicit_qty_cap || (order.qty && order.qty > 0)) reservedQty = Math.min(order.qty, matchingQty);
         else if (order.qty_percent && order.qty_percent > 0) {
             reservedQty = matchingQty * (order.qty_percent / 100);
         }

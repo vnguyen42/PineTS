@@ -155,6 +155,11 @@ export interface Order {
     trail_points?: number; // alternative trail-arm: entry_price + N ticks
     from_entry?: string; // entry id this exit attaches to ('' = all)
     qty_percent?: number; // percent of matching position to close
+    // Internal: strategy.exit() received an explicit qty argument. This
+    // remains true when qty-step quantization reduces that cap to zero, so
+    // zero is not mistaken for an omitted (uncapped) qty. Such an order
+    // remains pending inert with a zero reservation until normal cleanup.
+    _explicit_qty_cap?: boolean;
     comment_profit?: string;
     comment_loss?: string;
     comment_trailing?: string;

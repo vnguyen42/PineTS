@@ -110,6 +110,99 @@ describe('strategy exit global FIFO allocation', () => {
         ]);
         expect(context.strategy.opentrades.map((trade: Trade) => trade.size)).toEqual([5, 10]);
     });
+    it.each([
+        { total: 10, requested: 5, expected: [5, 5] },
+        { total: 11, requested: 5.5, expected: [5, 6] },
+    ])('floors an explicit qty-step exit and gives the position remainder to the later exit ($total)', ({ total, requested, expected }) => {
+        const context = makeContext();
+        context.pine.qtyStep = 1;
+        const trade = lot('trade_1', 'L', 1800, 0);
+        trade.size = total;
+        context.strategy.opentrades = [trade];
+        context.strategy.position_size = total;
+        context.strategy.position_avg_price = 1800;
+        context.strategy.position_entry_name = 'L';
+
+        exit(context)('half', 'L', { limit: 1880, qty: requested });
+        exit(context)('rest', 'L', { limit: 1880 });
+
+        expect(processExitOrders(context)).toBe(2);
+        expect(context.strategy.closedtrades.map((closed) => Math.abs(closed.size))).toEqual(expected);
+        expect(context.strategy.closedtrades.every((closed) => Number.isInteger(closed.size))).toBe(true);
+        expect(context.strategy.position_size).toBe(0);
+    });
+    it('keeps an explicit sub-step exit pending inert and refreshable', () => {
+        const context = makeContext();
+        context.pine.qtyStep = 1;
+        const trade = lot('trade_1', 'L', 1800, 0);
+        trade.size = 1;
+        context.strategy.opentrades = [trade];
+        context.strategy.position_size = 1;
+        context.strategy.position_avg_price = 1800;
+        context.strategy.position_entry_name = 'L';
+
+        exit(context)('substep', 'L', { limit: 1880, qty: 0.5 });
+
+        expect(context.strategy.pending_orders).toHaveLength(1);
+        const initialOrder = context.strategy.pending_orders[0];
+        expect(initialOrder).toMatchObject({ qty: 0, _explicit_qty_cap: true, limit: 1880, status: 'pending' });
+        expect(processExitOrders(context)).toBe(0);
+        expect(context.strategy.closedtrades).toHaveLength(0);
+        expect(context.strategy.opentrades.map((open) => open.size)).toEqual([1]);
+        expect(context.strategy.position_size).toBe(1);
+        expect(context.strategy.pending_orders).toHaveLength(1);
+
+        exit(context)('substep', 'L', { limit: 1881, qty: 0.5 });
+
+        expect(context.strategy.pending_orders).toHaveLength(1);
+        expect(context.strategy.pending_orders[0]).toBe(initialOrder);
+        expect(context.strategy.pending_orders[0]).toMatchObject({ qty: 0, _explicit_qty_cap: true, limit: 1881, status: 'pending' });
+        expect(processExitOrders(context)).toBe(0);
+        expect(context.strategy.closedtrades).toHaveLength(0);
+        expect(context.strategy.position_size).toBe(1);
+    });
+
+    it('re-derives the cap when a same-id exit refresh crosses the qty step boundary', () => {
+        const zeroToPositive = makeContext();
+        zeroToPositive.pine.qtyStep = 1;
+        const tradeA = lot('trade_1', 'L', 1800, 0);
+        tradeA.size = 1;
+        zeroToPositive.strategy.opentrades = [tradeA];
+        zeroToPositive.strategy.position_size = 1;
+        zeroToPositive.strategy.position_avg_price = 1800;
+        zeroToPositive.strategy.position_entry_name = 'L';
+
+        exit(zeroToPositive)('substep', 'L', { limit: 1880, qty: 0.5 });
+        expect(zeroToPositive.strategy.pending_orders[0]).toMatchObject({ qty: 0, _explicit_qty_cap: true });
+        exit(zeroToPositive)('substep', 'L', { limit: 1880, qty: 2 });
+
+        expect(zeroToPositive.strategy.pending_orders).toHaveLength(1);
+        expect(zeroToPositive.strategy.pending_orders[0]).toMatchObject({ qty: 2, _explicit_qty_cap: true });
+        expect(processExitOrders(zeroToPositive)).toBe(1);
+        expect(zeroToPositive.strategy.closedtrades).toHaveLength(1);
+        expect(zeroToPositive.strategy.position_size).toBe(0);
+
+        const positiveToZero = makeContext();
+        positiveToZero.pine.qtyStep = 1;
+        const tradeB = lot('trade_1', 'L', 1800, 0);
+        tradeB.size = 1;
+        positiveToZero.strategy.opentrades = [tradeB];
+        positiveToZero.strategy.position_size = 1;
+        positiveToZero.strategy.position_avg_price = 1800;
+        positiveToZero.strategy.position_entry_name = 'L';
+
+        exit(positiveToZero)('substep', 'L', { limit: 1880, qty: 2 });
+        expect(positiveToZero.strategy.pending_orders[0]).toMatchObject({ qty: 2, _explicit_qty_cap: true });
+        exit(positiveToZero)('substep', 'L', { limit: 1880, qty: 0.5 });
+
+        expect(positiveToZero.strategy.pending_orders).toHaveLength(1);
+        expect(positiveToZero.strategy.pending_orders[0]).toMatchObject({ qty: 0, _explicit_qty_cap: true });
+        expect(processExitOrders(positiveToZero)).toBe(0);
+        expect(positiveToZero.strategy.closedtrades).toHaveLength(0);
+        expect(positiveToZero.strategy.position_size).toBe(1);
+    });
+
+
 
     it('retains targeted physical allocation for close_entries_rule ANY', () => {
         const context = makeContext('ANY');
