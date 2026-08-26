@@ -506,7 +506,16 @@ export function calculateOrderQty(context: any, specifiedQty: number | undefined
             const commissionRate = strategy.config.commission_type === 'percent'
                 ? (Number(strategy.config.commission_value) || 0) / 100
                 : 0;
-            rawQty = positionValue / (sizingPrice * (1 + commissionRate));
+            // VIN-2205: the equity notional is converted to CONTRACTS at the
+            // symbol's contract multiplier. Futures price in units of
+            // pointvalue × price (NYMEX:CL1! pointvalue=1000: TV computes
+            // floor(1_000_000 / (74.23 × 1000)) = 13 contracts; omitting the
+            // multiplier booked 13,471 → P&L −8,756,150, equity −7,756,150,
+            // 1,042 trades masked). pointvalue=1 (stocks/crypto) leaves the
+            // established notional unchanged. Placement sizing, the COF fill
+            // resize and strategy.default_entry_qty all share this function.
+            const pointValue = context.pine?.syminfo?.pointvalue ?? 1;
+            rawQty = positionValue / (sizingPrice * pointValue * (1 + commissionRate));
             qtyPrecision = PERCENT_QTY_PRECISION;
             // VIN-95: TV truncates percent_of_equity quantities at the same
             // instrument qty step as cash (integer shares on stocks: a 0.41

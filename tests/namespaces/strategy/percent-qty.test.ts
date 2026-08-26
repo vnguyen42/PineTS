@@ -8,6 +8,7 @@ import {
 } from '../../../src/namespaces/strategy/utils';
 import { entry } from '../../../src/namespaces/strategy/methods/entry';
 import { order } from '../../../src/namespaces/strategy/methods/order';
+import { default_entry_qty } from '../../../src/namespaces/strategy/methods/default_entry_qty';
 
 type StrategyContext = Context & { strategy: NonNullable<Context['strategy']> };
 
@@ -512,5 +513,93 @@ describe('strategy percent_of_equity stock displayed-price sizing (VIN-130)', ()
         // open lot contributes 1.00 rather than the raw-marked 1.003 to the
         // sizing equity.
         expect(calculateOrderQty(context, undefined, 1, 101.003)).toBe(9.91089);
+    });
+});
+
+describe('strategy percent_of_equity pointvalue sizing (VIN-2205)', () => {
+    it('divides the futures notional by syminfo.pointvalue: CL1! 1,000,000 / (74.23 × 1000) → 13 contracts', () => {
+        const cl1 = makeContext({
+            initial_capital: 1_000_000,
+            default_qty_type: 'percent_of_equity',
+            default_qty_value: 100,
+        });
+        // NYMEX:CL1! — syminfo.pointvalue=1000 resolved from the capture DB.
+        cl1.pine.syminfo = { mintick: 0.01, pointvalue: 1000 };
+        // fractional=false → integer contracts (proven from raw WS).
+        cl1.pine.qtyStep = 1;
+        cl1.strategy.equity = 1_000_000;
+        // floor(1_000_000 / (74.23 × 1000)) = 13 — TV's quantity; omitting
+        // the multiplier books 13,471 contracts and a −8,756,150 loss.
+        expect(calculateOrderQty(cl1, undefined, 1, 74.23)).toBe(13);
+
+        // Same pointvalue notional through the five-decimal equity quantum
+        // when the provider supplies no qty step: 13.471641… → 13.47164.
+        const noStep = makeContext({
+            default_qty_type: 'percent_of_equity',
+            default_qty_value: 100,
+        });
+        noStep.pine.syminfo = { mintick: 0.01, pointvalue: 1000 };
+        noStep.strategy.equity = 1_000_000;
+        expect(calculateOrderQty(noStep, undefined, 1, 74.23)).toBe(13.47164);
+    });
+
+    it('shares the pointvalue notional across placement, COF fill resize, and strategy.default_entry_qty', () => {
+        const context = makeContext({
+            initial_capital: 1_000_000,
+            calc_on_order_fills: true,
+            default_qty_type: 'percent_of_equity',
+            default_qty_value: 100,
+        });
+        context.pine.syminfo = { mintick: 0.01, pointvalue: 1000 };
+        context.pine.qtyStep = 1;
+        context.strategy.equity = 1_000_000;
+
+        // Placement at the signal close: floor(1_000_000 / (100 × 1000)) = 10.
+        entry(context)('L', 'long');
+        expect(context.strategy.pending_orders[0].qty).toBe(10);
+        // strategy.default_entry_qty resolves the same pointvalue notional.
+        expect(default_entry_qty(context)(100)).toBe(10);
+
+        // COF fill at 125: floor(1_000_000 / (125 × 1000)) = 8 — the fill
+        // resize re-derives at fill-time equity and fill price through the
+        // same central calculation.
+        context.idx = 1;
+        context.data.open = new Series([100, 125]);
+        context.data.high = new Series([101, 126]);
+        context.data.low = new Series([99, 124]);
+        context.data.close = new Series([100, 125]);
+        context.data.openTime = new Series([0, 86_400_000]);
+
+        expect(processStrategyOrders(context)).toBe(1);
+        expect(context.strategy.opentrades[0].size).toBe(8);
+        expect(context.strategy.position_size).toBe(8);
+    });
+
+    it('leaves pointvalue-1 instruments (stocks/crypto) on the established notional', () => {
+        const pv1 = makeContext({ default_qty_type: 'percent_of_equity', default_qty_value: 10 });
+        pv1.strategy.equity = 1000;
+        expect(calculateOrderQty(pv1, undefined, 1, 25)).toBe(4);
+
+        // Same equity at pointvalue 1000 now sizes 1/1000th of the notional.
+        const pv1000 = makeContext({ default_qty_type: 'percent_of_equity', default_qty_value: 10 });
+        pv1000.pine.syminfo = { mintick: 0.01, pointvalue: 1000 };
+        pv1000.strategy.equity = 1000;
+        expect(calculateOrderQty(pv1000, undefined, 1, 25)).toBe(0.004);
+    });
+
+    it('keeps explicit, fixed, and cash quantities free of the pointvalue factor', () => {
+        const explicit = makeContext({ default_qty_type: 'fixed', default_qty_value: 1 });
+        explicit.pine.syminfo = { mintick: 0.01, pointvalue: 1000 };
+        expect(calculateOrderQty(explicit, 1.23456789, 1, 100)).toBe(1.234567);
+
+        const fixed = makeContext({ default_qty_type: 'fixed', default_qty_value: 1.23456789 });
+        fixed.pine.syminfo = { mintick: 0.01, pointvalue: 1000 };
+        fixed.strategy.equity = 1000;
+        expect(calculateOrderQty(fixed, undefined, 1, 100)).toBe(1.234567);
+
+        const cash = makeContext({ default_qty_type: 'cash', default_qty_value: 123.456789 });
+        cash.pine.syminfo = { mintick: 0.01, pointvalue: 1000 };
+        cash.strategy.equity = 1000;
+        expect(calculateOrderQty(cash, undefined, 1, 7.89)).toBe(15.647248);
     });
 });
