@@ -458,3 +458,59 @@ describe('strategy qty=0 orders are never submitted (VIN-103)', () => {
         expect(context.strategy.pending_orders).toHaveLength(0);
     });
 });
+describe('strategy percent_of_equity stock displayed-price sizing (VIN-130)', () => {
+    it('uses nearest display prices for discriminants, half-ticks, and grid-noise cases', () => {
+        const cases = [
+            { price: 0.07, mintick: 0.01, equity: 100, qtyStep: undefined, expectedQty: 1428.57142 },
+            { price: 0.07000000000000001, mintick: 0.01, equity: 100, qtyStep: undefined, expectedQty: 1428.57142 },
+            { price: 0.1 - 9 * 0.01, mintick: 0.01, equity: 100, qtyStep: undefined, expectedQty: 10000 },
+            // At 13.665, nearest display pricing gives 860 shares; the
+            // order-level away rounding would instead produce 859.
+            { price: 13.665, mintick: 0.01, equity: 11750, qtyStep: 1, expectedQty: 860 },
+            { price: 20.833, mintick: 0.01, equity: 100, qtyStep: undefined, expectedQty: 4.80076 },
+            { price: 20.835, mintick: 0.01, equity: 100, qtyStep: undefined, expectedQty: 4.79846 },
+            { price: 7.945, mintick: 0.01, equity: 100, qtyStep: undefined, expectedQty: 12.57861 },
+            { price: 5.435, mintick: 0.01, equity: 100, qtyStep: undefined, expectedQty: 18.38235 },
+        ] as const;
+
+        for (const { price, mintick, equity, qtyStep, expectedQty } of cases) {
+            const context = makeContext({
+                default_qty_type: 'percent_of_equity',
+                default_qty_value: 100,
+            });
+            context.pine.syminfo = { mintick, pointvalue: 1, type: 'stock' };
+            context.pine.qtyStep = qtyStep;
+            context.strategy.equity = equity;
+            expect(calculateOrderQty(context, undefined, 1, price)).toBe(expectedQty);
+        }
+    });
+
+    it('revalues an open stock lot at the snapped sizing price', () => {
+        const context = makeContext({
+            default_qty_type: 'percent_of_equity',
+            default_qty_value: 100,
+        });
+        context.pine.syminfo = { mintick: 0.01, pointvalue: 1, type: 'stock' };
+        context.strategy.initial_capital = 1000;
+        context.strategy.netprofit = 0;
+        context.strategy.openprofit = 1;
+        context.strategy.equity = 1001;
+        context.strategy.opentrades = [{
+            id: 'lot',
+            entry_id: 'L',
+            entry_price: 100,
+            entry_bar_index: 0,
+            entry_time: 0,
+            size: 1,
+            commission: 0,
+            max_drawdown: 0,
+            max_runup: 0,
+            status: 'open',
+        }];
+
+        // Raw 101.003 snaps to the nearest displayed tick, 101.00, so the
+        // open lot contributes 1.00 rather than the raw-marked 1.003 to the
+        // sizing equity.
+        expect(calculateOrderQty(context, undefined, 1, 101.003)).toBe(9.91089);
+    });
+});

@@ -133,6 +133,31 @@ function snapExecutionPrice(price: number, mintick: number): number {
     return Number(snapped.toFixed(decimalPlaces));
 }
 /**
+ * Snap a stock sizing/mark-to-market price to the displayed nearest tick.
+ *
+ * This is deliberately separate from roundToMintick(): order levels keep
+ * their reference-directed, away-from-zero contract, while stock sizing uses
+ * the nearest grid point from Math.round(price / mintick). Values already
+ * on-grid within the canonical magnitude-relative tolerance are pre-snapped
+ * before the quotient is evaluated, absorbing upstream binary noise without
+ * changing genuine half-tick decisions.
+ */
+function snapDisplayPrice(price: number, mintick: number): number {
+    if (!Number.isFinite(price) || !Number.isFinite(mintick) || mintick <= 0) return price;
+
+    const snapEps = 1e-12 * Math.max(1, Math.abs(price));
+    const nearestTicks = Math.round(price / mintick);
+    const nearestPrice = nearestTicks * mintick;
+    const preSnappedPrice =
+        Number.isFinite(nearestPrice) && Math.abs(price - nearestPrice) <= snapEps
+            ? nearestPrice
+            : price;
+    const roundedTicks = Math.round(preSnappedPrice / mintick);
+    const snapped = roundedTicks * mintick;
+    return Number.isFinite(roundedTicks) && Number.isFinite(snapped) ? snapped : price;
+}
+
+/**
  * Pine's `na` price literal reaches the strategy runtime as `NaN`.
  * Normalize it only when the sibling price level is also part of the call.
  * A lone `stop=na`/`limit=na` keeps the legacy non-executable order shape;
@@ -423,11 +448,28 @@ export function calculateOrderQty(context: any, specifiedQty: number | undefined
             // pre-VIN-134 corpus behavior. The calc_on_order_fills fill
             // resize and strategy.default_entry_qty share this function, so
             // they convert through the same single point.
-            const positionValue = convertAccountToSymbol(context, (strategy.equity * qtyValue) / 100, currentBarTimeMs(context), 'identity');
+            // VIN-130: TradingView sizes percent_of_equity on the DISPLAYED
+            // symbol prices — stock references use the displayed nearest tick
+            // with the canonical magnitude-relative pre-snap tolerance, then
+            // Math.round on the binary quotient. This deliberately differs
+            // from roundToMintick(), whose order-level contract remains
+            // reference-directed and away from zero.
+            // VIN-130: TV applies this displayed-price path to stock symbols.
+            // Non-stock paths retain the established sizing semantics
+            // (witness 2825 / crypto).
+            const stockTickSizing = context.pine?.syminfo?.type === 'stock';
+            const sizingPrice = stockTickSizing
+                ? snapDisplayPrice(fillPrice, context.pine?.syminfo?.mintick ?? 0)
+                : fillPrice;
+            const sizingEquity = stockTickSizing
+                ? strategy.equity - strategy.openprofit + openProfitAt(context, sizingPrice)
+                : strategy.equity;
+
+            const positionValue = convertAccountToSymbol(context, (sizingEquity * qtyValue) / 100, currentBarTimeMs(context), 'identity');
             const commissionRate = strategy.config.commission_type === 'percent'
                 ? (Number(strategy.config.commission_value) || 0) / 100
                 : 0;
-            rawQty = positionValue / (fillPrice * (1 + commissionRate));
+            rawQty = positionValue / (sizingPrice * (1 + commissionRate));
             qtyPrecision = PERCENT_QTY_PRECISION;
             // VIN-95: TV truncates percent_of_equity quantities at the same
             // instrument qty step as cash (integer shares on stocks: a 0.41
@@ -1539,6 +1581,21 @@ function ledgerOpenLots(strategy: StrategyState): Array<{ qty: number; entry_pri
 }
 
 /**
+ * Unrealized P&L of the open positions marked at `price` — the shared
+ * valuation used by markToMarket and by the percent_of_equity sizing
+ * (which re-derives it at the snapped reference price, VIN-130).
+ */
+function openProfitAt(context: any, price: number): number {
+    const pointValue = context.pine?.syminfo?.pointvalue ?? 1;
+    let unrealizedPnL = 0;
+    for (const lot of ledgerOpenLots(context.strategy)) {
+        const priceChange = lot.dir === 1 ? price - lot.entry_price : lot.entry_price - price;
+        unrealizedPnL += priceChange * lot.qty * pointValue;
+    }
+    return unrealizedPnL;
+}
+
+/**
  * Mark-to-market the open positions to `currentPrice`, updating
  * `strategy.openprofit` and `strategy.equity`. Does NOT touch the
  * max_drawdown / max_runup peaks — those are latched once per bar by
@@ -1548,12 +1605,7 @@ function ledgerOpenLots(strategy: StrategyState): Array<{ qty: number; entry_pri
  */
 function markToMarket(context: any, currentPrice: number): void {
     const strategy: StrategyState = context.strategy;
-    const pointValue = context.pine?.syminfo?.pointvalue ?? 1;
-    let unrealizedPnL = 0;
-    for (const lot of ledgerOpenLots(strategy)) {
-        const priceChange = lot.dir === 1 ? currentPrice - lot.entry_price : lot.entry_price - currentPrice;
-        unrealizedPnL += priceChange * lot.qty * pointValue;
-    }
+    const unrealizedPnL = openProfitAt(context, currentPrice);
     strategy.openprofit = unrealizedPnL;
     strategy.equity = strategy.initial_capital + strategy.netprofit + unrealizedPnL;
 }
