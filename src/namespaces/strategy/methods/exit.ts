@@ -97,16 +97,21 @@ export function exit(context: any) {
         const trailPoints      = extractValue(parsed.trail_points);
         const trailOffset      = extractValue(parsed.trail_offset);
 
-        // Snap limit/stop/trail_price to the mintick grid AWAY from the
-        // current bar's close (broker-emulator convention — see
-        // roundToMintick in utils.ts). Already-aligned inputs (e.g. an
-        // exact `position_avg_price + N`) round to themselves; arbitrary
-        // multiplications like `close * 0.95` get the same adverse
-        // rounding Pine applies at order placement.
+        // Snap absolute limit/stop levels to the mintick grid AWAY from the
+        // current position's average entry on stock symbols. TradingView
+        // quantizes absolute exit levels against the position reference
+        // (e.g. position_avg_price * 1.01), not the current close. Pending
+        // exits without an open position retain the close reference.
+        // Absolute trail_price placement keeps the established current-close
+        // reference so VIN-86c trailing direction semantics remain unchanged.
         const mintick = context.pine?.syminfo?.mintick ?? 0;
         const currentClose = Series.from(context.data.close).get(0);
-        const limit       = limitRaw      !== undefined ? roundToMintick(limitRaw,      currentClose, mintick) : undefined;
-        const stop        = stopRaw       !== undefined ? roundToMintick(stopRaw,       currentClose, mintick) : undefined;
+        const positionReference = context.pine?.syminfo?.type === 'stock'
+            && Number.isFinite(context.strategy.position_avg_price)
+            ? context.strategy.position_avg_price
+            : currentClose;
+        const limit       = limitRaw      !== undefined ? roundToMintick(limitRaw,      positionReference, mintick) : undefined;
+        const stop        = stopRaw       !== undefined ? roundToMintick(stopRaw,       positionReference, mintick) : undefined;
         const trailPrice  = trailPriceRaw !== undefined ? roundToMintick(trailPriceRaw, currentClose, mintick) : undefined;
         const fromEntryId = fromEntry ?? '';
         const exitId = idValue ?? 'exit';

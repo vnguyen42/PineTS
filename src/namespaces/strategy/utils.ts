@@ -133,14 +133,15 @@ function snapExecutionPrice(price: number, mintick: number): number {
     return Number(snapped.toFixed(decimalPlaces));
 }
 /**
- * Snap a stock sizing/mark-to-market price to the displayed nearest tick.
+ * Snap a stock price observed by TV to the displayed nearest tick.
  *
  * This is deliberately separate from roundToMintick(): order levels keep
- * their reference-directed, away-from-zero contract, while stock sizing uses
- * the nearest grid point from Math.round(price / mintick). Values already
- * on-grid within the canonical magnitude-relative tolerance are pre-snapped
- * before the quotient is evaluated, absorbing upstream binary noise without
- * changing genuine half-tick decisions.
+ * their reference-directed, away-from-zero contract, while displayed
+ * sizing/mark-to-market prices and OHLC path values use the nearest grid
+ * point from Math.round(price / mintick). Values already on-grid within the
+ * canonical magnitude-relative tolerance are pre-snapped before the
+ * quotient is evaluated, absorbing upstream binary noise without changing
+ * genuine half-tick decisions.
  */
 function snapDisplayPrice(price: number, mintick: number): number {
     if (!Number.isFinite(price) || !Number.isFinite(mintick) || mintick <= 0) return price;
@@ -155,6 +156,29 @@ function snapDisplayPrice(price: number, mintick: number): number {
     const roundedTicks = Math.round(preSnappedPrice / mintick);
     const snapped = roundedTicks * mintick;
     return Number.isFinite(roundedTicks) && Number.isFinite(snapped) ? snapped : price;
+}
+
+interface OhlcPrices {
+    open: number;
+    high: number;
+    low: number;
+    close: number;
+}
+
+/**
+ * Build the nearest-tick OHLC view shown by TradingView for stocks.
+ *
+ * Keep this view separate from the raw feed: trigger/path decisions use the
+ * displayed values, while gap executions retain their raw nominal price and
+ * are normalized once after slippage.
+ */
+function snapDisplayOhlc(prices: OhlcPrices, mintick: number): OhlcPrices {
+    return {
+        open: snapDisplayPrice(prices.open, mintick),
+        high: snapDisplayPrice(prices.high, mintick),
+        low: snapDisplayPrice(prices.low, mintick),
+        close: snapDisplayPrice(prices.close, mintick),
+    };
 }
 
 /**
@@ -520,14 +544,21 @@ export function processStrategyOrders(context: any, phase: 'open' | 'close' = 'o
     let fills = 0;
 
     // Get current bar's OHLC data
-    const openPrice = Series.from(context.data.open).get(0);
-    const highPrice = Series.from(context.data.high).get(0);
-    const lowPrice = Series.from(context.data.low).get(0);
-    const closePrice = Series.from(context.data.close).get(0);
+    const rawOhlc: OhlcPrices = {
+        open: Series.from(context.data.open).get(0),
+        high: Series.from(context.data.high).get(0),
+        low: Series.from(context.data.low).get(0),
+        close: Series.from(context.data.close).get(0),
+    };
+    const { open: openPrice, high: highPrice, low: lowPrice, close: closePrice } = rawOhlc;
     const currentTime = Series.from(context.data.openTime).get(0);
     const mintick = context.pine?.syminfo?.mintick ?? 0.01;
     const snapExecutionPrices = context.pine?.syminfo?.type === 'stock';
+    const displayedOhlc = snapExecutionPrices ? snapDisplayOhlc(rawOhlc, mintick) : rawOhlc;
     const intrabarPath = assumedIntrabarPath(openPrice, highPrice, lowPrice, closePrice);
+    const displayedIntrabarPath = snapExecutionPrices
+        ? assumedIntrabarPath(displayedOhlc.open, displayedOhlc.high, displayedOhlc.low, displayedOhlc.close)
+        : intrabarPath;
 
     // Per-trade peak adverse / favorable excursion (max-drawdown / max-runup
     // on each open trade) using INTRA-BAR high/low rather than close-only.
@@ -621,7 +652,9 @@ export function processStrategyOrders(context: any, phase: 'open' | 'close' = 'o
                 fillPrice = closePhase && order.bar === context.idx
                     ? closePrice
                     : cofState && order.bar === context.idx
-                      ? cofState.ticks[Math.min(cofState.pass, cofState.ticks.length - 1)]
+                      ? snapExecutionPrices
+                          ? openPrice
+                          : cofState.ticks[Math.min(cofState.pass, cofState.ticks.length - 1)]
                       : openPrice;
                 break;
             // In COF mode, price-based orders are evaluated only against the
@@ -705,8 +738,8 @@ export function processStrategyOrders(context: any, phase: 'open' | 'close' = 'o
                             // market order and fills at the next admissible
                             // open regardless of the gap (C4-2097).
                             const stopEps = 1e-12 * Math.max(1, Math.abs(order.stop));
-                            const gapAtOpen = openPrice >= order.stop - stopEps;
-                            if (order._stop_marketable || highPrice >= order.stop - stopEps) {
+                            const gapAtOpen = displayedOhlc.open >= order.stop - stopEps;
+                            if (order._stop_marketable || displayedOhlc.high >= order.stop - stopEps) {
                                 shouldFill = true;
                                 gapExecution = order._stop_marketable || gapAtOpen;
                                 fillPrice = gapExecution ? openPrice : order.stop;
@@ -724,8 +757,8 @@ export function processStrategyOrders(context: any, phase: 'open' | 'close' = 'o
                     } else {
                         // Mirror for sell-stops (see the LONG branch above).
                         const stopEps = 1e-12 * Math.max(1, Math.abs(order.stop));
-                        const gapAtOpen = openPrice <= order.stop + stopEps;
-                        if (order._stop_marketable || lowPrice <= order.stop + stopEps) {
+                        const gapAtOpen = displayedOhlc.open <= order.stop + stopEps;
+                        if (order._stop_marketable || displayedOhlc.low <= order.stop + stopEps) {
                             shouldFill = true;
                             gapExecution = order._stop_marketable || gapAtOpen;
                             fillPrice = gapExecution ? openPrice : order.stop;
@@ -784,10 +817,15 @@ export function processStrategyOrders(context: any, phase: 'open' | 'close' = 'o
                 ? fillPrice
                 : applySlippage(context, direction, fillPrice);
             // A price-based fill, including slippage, cannot exist outside
-            // the bar that filled it. Gap fills use the open above; ordinary
-            // crossings use the trigger level.
+            // the bar that filled it. Stock intrabar stops are evaluated
+            // against displayed OHLC, so use that same range for the
+            // non-gap clamp. Gap fills retain raw OHLC here and are snapped
+            // after this block.
             if (order.type === 'limit' || order.type === 'stop') {
-                fillPrice = Math.min(highPrice, Math.max(lowPrice, fillPrice));
+                const clampOhlc = snapExecutionPrices && order.type === 'stop' && !gapExecution
+                    ? displayedOhlc
+                    : rawOhlc;
+                fillPrice = Math.min(clampOhlc.high, Math.max(clampOhlc.low, fillPrice));
             }
             // On the proved stock surface, executions recorded on the
             // nearest mintick after slippage are MARKET fills and OHLC-GAP
@@ -939,7 +977,10 @@ export function processStrategyOrders(context: any, phase: 'open' | 'close' = 'o
             // path. A pre-existing exit may attach to it, but cannot inherit
             // a trigger crossed earlier in the same bar.
             const fillsAtClose = closePhase && order.type === 'market' && order.bar === context.idx;
-            const fillPathPosition = entryFillPathPosition(order, direction, intrabarPath, cofState, fillsAtClose);
+            const fillPath = snapExecutionPrices && order.type === 'stop'
+                ? displayedIntrabarPath
+                : intrabarPath;
+            const fillPathPosition = entryFillPathPosition(order, direction, fillPath, cofState, fillsAtClose);
             executeOrder(context, order, fillPrice, currentTime, fillPathPosition);
             order.status = 'filled';
             order.fill_price = fillPrice;
@@ -1920,14 +1961,19 @@ export function processExitOrders(
     const processOnClose = strategy.config.process_orders_on_close === true;
     const closePhase = phase === 'close' && processOnClose;
     let fills = 0;
-
-    const openPrice = Series.from(context.data.open).get(0);
-    const highPrice = Series.from(context.data.high).get(0);
-    const lowPrice = Series.from(context.data.low).get(0);
-    const closePrice = Series.from(context.data.close).get(0);
+    const rawOhlc: OhlcPrices = {
+        open: Series.from(context.data.open).get(0),
+        high: Series.from(context.data.high).get(0),
+        low: Series.from(context.data.low).get(0),
+        close: Series.from(context.data.close).get(0),
+    };
+    const rawOpenPrice = rawOhlc.open;
+    const rawClosePrice = rawOhlc.close;
     const currentTime = Series.from(context.data.openTime).get(0);
     const mintick = context.pine?.syminfo?.mintick ?? 0.01;
     const snapExecutionPrices = context.pine?.syminfo?.type === 'stock';
+    const displayedOhlc = snapExecutionPrices ? snapDisplayOhlc(rawOhlc, mintick) : rawOhlc;
+    const { open: openPrice, high: highPrice, low: lowPrice, close: closePrice } = displayedOhlc;
     const cofTickPrice = cofState
         ? cofState.ticks[Math.min(cofState.pass, cofState.ticks.length - 1)]
         : undefined;
@@ -2071,12 +2117,12 @@ export function processExitOrders(
             // assumed intrabar tick's OHLC value. The process-on-close phase
             // overrides that only for a current-bar market close.
             let fillPrice = closePhase && order.bar === context.idx
-                ? closePrice
+                ? rawClosePrice
                 : cofState && order.bar === context.idx
                   ? cofState.ticks[Math.min(cofState.pass, cofState.ticks.length - 1)]
                   : order.immediately
-                    ? closePrice
-                    : openPrice;
+                    ? rawClosePrice
+                    : rawOpenPrice;
             // Apply slippage against the close direction (opposite of position direction).
             fillPrice = applySlippage(context, -matchingDir, fillPrice);
 
@@ -2366,7 +2412,7 @@ export function processExitOrders(
                 if (!buyStopSparesFreshEntry) {
                     slEvents.push({
                         qty: tQty,
-                        price: slExecution?.fillPrice ?? (openPastSl ? openPrice : (sl as number)),
+                        price: slExecution?.fillPrice ?? (openPastSl ? rawOpenPrice : (sl as number)),
                         kind: 'loss',
                         tradeId: activationId,
                         gap: openPastSl,
@@ -2382,7 +2428,7 @@ export function processExitOrders(
                     : atOpenTick && (isLong ? openPrice >= (tp as number) : openPrice <= (tp as number));
                 tpEvents.push({
                     qty: tQty,
-                    price: tpExecution?.fillPrice ?? (openPastTp ? openPrice : (tp as number)),
+                    price: tpExecution?.fillPrice ?? (openPastTp ? rawOpenPrice : (tp as number)),
                     kind: 'profit',
                     tradeId: activationId,
                     gap: openPastTp,
@@ -2462,7 +2508,7 @@ export function processExitOrders(
             const emitTrail = (price: number, forcedSegment?: number, gap = false) => {
                 trailEvent = {
                     qty: Infinity,
-                    price: gap ? openPrice : price,
+                    price: gap ? rawOpenPrice : price,
                     kind: 'trailing',
                     gap,
                     forcedSegment,

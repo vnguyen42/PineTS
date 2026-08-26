@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { Context } from '../../../src/Context.class';
-import { initializeStrategy, processExitOrders, processStrategyOrders, roundToMintick } from '../../../src/namespaces/strategy/utils';
+import { initializeStrategy, openTrade, processExitOrders, processStrategyOrders, roundToMintick } from '../../../src/namespaces/strategy/utils';
 import { entry } from '../../../src/namespaces/strategy/methods/entry';
 import { order } from '../../../src/namespaces/strategy/methods/order';
 import { exit } from '../../../src/namespaces/strategy/methods/exit';
@@ -135,6 +135,39 @@ describe('stock execution snap — market and open-gap fills snap, intrabar stop
         expect(processStrategyOrders(context)).toBe(1);
         expect(context.strategy.opentrades[0].entry_price).toBe(97.04); // snapped next open
     });
+    it('stock strategy.entry stop uses displayed OHLC for the trigger and reversal fill', () => {
+        const run = (open: number, high: number) => {
+            const context = makeContext();
+            setBar(context, 0, 19.65, 19.65, 19.64, 19.65);
+            openTrade(context, 'S', -1, 1, 19.64, 0);
+            entry(context)('L', 'long', { stop: 19.66 });
+            setBar(context, 1, open, high, 19.64, 19.65);
+            return { context, fills: processStrategyOrders(context) };
+        };
+
+        // Below the displayed 19.66 threshold, the raw high must not trigger.
+        const below = run(19.65, 19.6549);
+        expect(below.fills).toBe(0);
+        // At the displayed threshold, strategy.entry() reverses the short at
+        // 19.66; the raw bar's high is already on that level.
+        const atThreshold = run(19.65, 19.66);
+        expect(atThreshold.fills).toBe(1);
+        expect(atThreshold.context.strategy.closedtrades[0].exit_price).toBe(19.66);
+        expect(atThreshold.context.strategy.opentrades[0].size).toBe(1);
+        expect(atThreshold.context.strategy.opentrades[0].entry_price).toBe(19.66);
+
+        // The replay's raw open/high pair (19.655) is displayed as 19.66;
+        // retain the raw gap nominal and snap once after slippage.
+        const replay = run(19.655, 19.655);
+        expect(replay.fills).toBe(1);
+        expect(replay.context.strategy.closedtrades[0].exit_price).toBe(19.66);
+        expect(replay.context.strategy.opentrades[0].entry_price).toBe(19.66);
+        // A half-tick raw high rounds up to the displayed trigger without
+        // making the open a gap: the intrabar fill must remain at 19.66.
+        const halfTick = run(19.6549, 19.655);
+        expect(halfTick.fills).toBe(1);
+        expect(halfTick.context.strategy.opentrades[0].entry_price).toBe(19.66);
+    });
 
     it('NON-stock is unchanged: market open keeps its raw value', () => {
         const context = makeContext({}, 'crypto');
@@ -232,6 +265,35 @@ describe('stock execution snap — market and open-gap fills snap, intrabar stop
         setBar(context, 2, 98, 99, 97, 97.5); // open above the stop, low crosses intrabar → fill at the trigger
         expect(processExitOrders(context)).toBe(1);
         expect(context.strategy.closedtrades[0].exit_price).toBe(97.003); // trigger kept, never snapped to 97.00
+    });
+    it('stock COF market entries use the displayed bar open, not the next path extreme', () => {
+        const context = makeContext({ calc_on_order_fills: true });
+        setBar(context, 1, 101.037, 102, 100.5, 101.5);
+        context.strategy._cof = { pass: 1, ticks: [101.037, 100.5, 102, 101.5] };
+        entry(context)('M', 'long');
+        expect(processStrategyOrders(context)).toBe(1);
+        expect(context.strategy.opentrades[0].entry_price).toBe(101.04);
+    });
+
+    it('stock absolute exits round against the open position average', () => {
+        const context = makeContext();
+        setBar(context, 1, 22.55370718, 22.6, 22.5, 22.55370718);
+        context.strategy.position_size = 1;
+        context.strategy.position_avg_price = 22.325;
+        exit(context)('TP', { limit: 22.54825 });
+        const pending = context.strategy.pending_orders.find((order: any) => order.id === 'TP');
+        expect(pending?.limit).toBe(22.55);
+    });
+
+    it('stock exit triggers use displayed OHLC before filling at the rounded level', () => {
+        const context = makeContext();
+        context.pine.syminfo = { mintick: 0.005, pointvalue: 1, type: 'stock' } as any;
+        setBar(context, 0, 23.485, 23.485, 23.485, 23.485);
+        openTrade(context, 'S', -1, 1, 23.485, 0);
+        exit(context)('SL', { stop: 23.602425 });
+        setBar(context, 1, 23.485, 23.60312359, 23.49818251, 23.59875128);
+        expect(processExitOrders(context)).toBe(1);
+        expect(context.strategy.closedtrades[0].exit_price).toBe(23.605);
     });
 });
 

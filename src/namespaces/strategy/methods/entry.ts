@@ -168,7 +168,11 @@ export function entry(context: any) {
         // current position), Pine ADDS the absolute current position to the
         // requested qty so that one market order both flattens the prior
         // position AND opens a new one of the requested qty.
-        const currentPrice = Series.from(context.data.close).get(0);
+        const currentPrice = stopValue === undefined
+            && limitValue === undefined
+            && context.strategy._cof
+            ? context.strategy._cof.ticks[Math.min(context.strategy._cof.pass, context.strategy._cof.ticks.length - 1)]
+            : Series.from(context.data.close).get(0);
         const sizingPrice = stopValue !== undefined
             ? stopValue
             : limitValue !== undefined
@@ -184,14 +188,16 @@ export function entry(context: any) {
         // order, no fill, no zero-size lot. `!(x > 0)` also refuses NaN.
         if (!(baseQty > 0)) return;
 
-        // Flag orders whose qty came from the strategy() default under
-        // percent_of_equity (no explicit qty argument). With
-        // calc_on_order_fills=true the engine re-sizes them at FILL time
-        // (TV sizes percent_of_equity as a percentage of the available
-        // equity "when the trade opens" — see processStrategyOrders).
+        // Flag non-stock orders whose qty came from the strategy() default
+        // under percent_of_equity (no explicit qty argument). Stock COF
+        // orders are sized from the current assumed tick above, which is
+        // already the fill-time/displayed reference TV uses.
         let defaultQtyType = strategy.config.default_qty_type ?? 'fixed';
         if (typeof defaultQtyType === 'function') defaultQtyType = (defaultQtyType as Function)();
-        const qtyFromDefaultEquity = qtyValue === undefined && defaultQtyType === 'percent_of_equity';
+        const qtyFromDefaultEquity =
+            qtyValue === undefined
+            && defaultQtyType === 'percent_of_equity'
+            && context.pine?.syminfo?.type !== 'stock';
 
         const isReversal = currentSize !== 0 && Math.sign(currentSize) !== dir;
         const totalQty = isReversal ? Math.abs(currentSize) + baseQty : baseQty;
