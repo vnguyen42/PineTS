@@ -147,6 +147,41 @@ export function entry(context: any) {
             return; // no-op
         }
 
+        // A same-direction same-id replacement re-quantifies against the
+        // position PROJECTED forward by the pending order it replaces: the
+        // first call of a contiguous same-id pair already carries the close
+        // qty in its order, so the later call sees the position AFTER that
+        // order fills. 2121 (SAME_ID_PENDING_ENTRY_OVERTRADE): double LONG
+        // at b39 with pos −15 — the first call queues a q30 reversal, the
+        // replacement classifies against −15+30 = +15 (same side) and
+        // submits the plain q15, which fills close-only at b40: TV books no
+        // long lot, no overtrade. The engine's old in-place replacement kept
+        // the first call's qty 30, booked the phantom lot (611 extras) and
+        // got the next same-side entry rejected by the pyramiding cap (the
+        // 186 TV-missing trades, e.g. TV LONG b431→432 @37.44).
+        // The projection is disabled for EVERY strategy configured with
+        // calc_on_order_fills=true — that strategy's own bar-close
+        // evaluation included. With COF, the same-tick recalculation
+        // re-emissions re-quantify against the position state at the fill
+        // tick, and a forward projection double-counts the pending qty (2027:
+        // certified ledger 811 rows keeps the full reversal qty 0.001115 on
+        // the COF re-emission; projecting it shrank the order to 0.000571 and
+        // booked 5 residual lots).
+        // A phase-based guard (project when the live COF
+        // context `context.strategy._cof` is null, i.e. at the COF close
+        // evaluation) was implemented and measured: it breaks 2027 the same
+        // way — 816 vs 811 rows, first divergence at bar 6 (size 0.000561 →
+        // 0.000556 + a 0.000005 residue trade) — so the close evaluation of
+        // a COF strategy must NOT be projected either. LIMITATION (2121
+        // SAME_ID_PENDING_ENTRY_OVERTRADE): the same-id replacement pattern
+        // under COF stays unfixed — no TV oracle capture exists for that
+        // combination, so its correct close-evaluation semantics cannot be
+        // decided; the config guard is empirical, not a stated rule.
+        const cofMode = strategy.config.calc_on_order_fills === true;
+        const qtySourceSize = !cofMode && pendingIndex >= 0 && !replacesPendingGroup
+            ? currentSize + parseDirection(strategy.pending_orders[pendingIndex].direction) * strategy.pending_orders[pendingIndex].qty
+            : currentSize;
+
         // Determine the order qty. For a reversal (direction differs from
         // current position), Pine ADDS the absolute current position to the
         // requested qty so that one market order both flattens the prior
@@ -182,8 +217,8 @@ export function entry(context: any) {
             && defaultQtyType === 'percent_of_equity'
             && context.pine?.syminfo?.type !== 'stock';
 
-        const isReversal = currentSize !== 0 && Math.sign(currentSize) !== dir;
-        const totalQty = isReversal ? Math.abs(currentSize) + baseQty : baseQty;
+        const isReversal = qtySourceSize !== 0 && Math.sign(qtySourceSize) !== dir;
+        const totalQty = isReversal ? Math.abs(qtySourceSize) + baseQty : baseQty;
 
         // Determine order type from limit/stop presence
         let orderType: 'market' | 'limit' | 'stop' | 'stop-limit' = 'market';
