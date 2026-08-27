@@ -57,10 +57,13 @@ export function valuewhen(context: any) {
 
         const result = values[index];
 
-        // Check if result is a number to apply precision, else return as is (e.g. boolean/color)
-        if (typeof result === 'number') {
-            return context.precision(result);
-        }
+        // Return the memorized source value bit-for-bit. TradingView stores the
+        // source value as-is and only rounds for display; rounding here to the
+        // context precision (10 dp) manufactured artificial crossings at
+        // equality boundaries — e.g. `1.0881399999999999` → `1.08814` made
+        // `crossunder(close, valuewhen(...))` fire on the capture bar itself
+        // instead of the next one (corpus ids 2014/2029,
+        // VALUEWHEN_SOURCE_ROUNDED_10DP).
         return result;
     };
 }
