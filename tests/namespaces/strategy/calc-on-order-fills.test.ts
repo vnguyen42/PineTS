@@ -667,7 +667,7 @@ describe('strategy calc_on_order_fills — same-bar sequencing', () => {
         expect(context.strategy.pending_orders[0].stop).toBe(106);
     });
 
-    it('keeps same-ID pending entries in separate pyramiding slots across bars', () => {
+    it('coalesces same-ID pending entries into ONE even with free pyramiding slots and changed levels (2444 refutes the VIN-75 coexistence branch)', () => {
         const context = makeContext({ calc_on_order_fills: true, pyramiding: 3 });
 
         for (let bar = 0; bar < 3; bar++) {
@@ -676,15 +676,19 @@ describe('strategy calc_on_order_fills — same-bar sequencing', () => {
             entry(context)('L', 'long', { limit: 90 - bar });
         }
 
-        expect(context.strategy.pending_orders).toHaveLength(3);
-        expect(context.strategy.pending_orders.map((order: Order) => order.limit)).toEqual([90, 89, 88]);
+        // TV keeps at most one pending entry per ID: each re-call modifies the
+        // pending order in place, whatever the pyramiding setting, position
+        // state, or price definition (2444: 5 same-ID stops while flat with
+        // pyramiding=5 → TV fills only the last level; the engine's old
+        // coexistence branch booked 4 stale fills at b296).
+        expect(context.strategy.pending_orders).toHaveLength(1);
+        expect(context.strategy.pending_orders[0]).toMatchObject({ id: 'L', limit: 88, bar: 2 });
     });
 
-    it('cancels every same-ID pending order before placing an opposite-direction entry', () => {
+    it('cancels the pending same-ID order before placing an opposite-direction entry', () => {
         const context = makeContext({ calc_on_order_fills: true, pyramiding: 3 });
 
         entry(context)('E', 'long', { limit: 90 });
-        entry(context)('E', 'long', { limit: 89 });
         entry(context)('E', 'long', { limit: 88 });
         entry(context)('E', 'short', { limit: 110 });
 
@@ -710,17 +714,17 @@ describe('strategy calc_on_order_fills — same-bar sequencing', () => {
         expect(context.strategy.pending_orders[0].bar).toBe(2);
     });
 
-    it('modifies a same-ID pending entry after that direction already has an open trade', () => {
+    it('keeps the pending same-ID order untouched when the re-call is qty-inert (VIN-103)', () => {
         const context = makeContext({ calc_on_order_fills: true, pyramiding: 3 });
-        context.strategy.position_size = 1;
-        context.strategy.opentrades.push({ size: 1 });
 
-        entry(context)('L2', 'long', { limit: 90 });
-        context.idx = 1;
-        entry(context)('L2', 'long', { limit: 89 });
+        entry(context)('L', 'long', { stop: 105 });
+        entry(context)('L', 'long', { qty: 0, limit: 88 });
 
+        // A call whose calculated quantity is not strictly positive never
+        // submits an order — it must not cancel or displace an existing
+        // pending same-ID entry.
         expect(context.strategy.pending_orders).toHaveLength(1);
-        expect(context.strategy.pending_orders[0].limit).toBe(89);
+        expect(context.strategy.pending_orders[0]).toMatchObject({ id: 'L', type: 'stop', stop: 105, bar: 0 });
     });
 
     it('percent_of_equity default quantity is re-sized at FILL in COF mode (TV: "when the trade opens") — and no-COF fills at placement size (v5 margin 0: no rejection)', () => {

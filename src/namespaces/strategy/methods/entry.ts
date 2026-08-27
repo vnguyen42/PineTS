@@ -106,37 +106,20 @@ export function entry(context: any) {
         const ocaName       = extractValue(parsed.oca_name);
         const ocaType       = extractValue(parsed.oca_type);
         const commentValue  = extractValue(parsed.comment);
-        // [HYPOTHÈSE] Same-direction, same-ID orders coexist only while flat,
-        // pyramiding has a free slot, and the price definition changes.
-        // Otherwise this implementation modifies one pending order. TV's
-        // strategy.cancel() example proves coexistence is possible, but does
-        // not fully specify this boundary; if TV modifies the whole same-ID
-        // group in another case, pending-order counts and later fills diverge.
+        // TV keeps AT MOST ONE pending entry order per ID. Re-calling
+        // `strategy.entry(id, …)` while a pending entry with that id exists
+        // MODIFIES it (the new spec replaces the old one) — whatever the
+        // pyramiding setting, position state, or price definition
+        // (2444: 5 same-ID stops queued while flat with pyramiding=5 are
+        // coalesced by TV into the last submission; the engine's old
+        // coexistence branch booked 4 stale fills at b296). A direction
+        // flip cancels the pending group and places a brand-new order
+        // (VIN-75, unchanged). https://www.tradingview.com/pine-script-docs/concepts/strategies/
         const pendingIndex = strategy.pending_orders.findIndex(
             (order: Order) => order.status === 'pending' && (order.category ?? 'entry') === 'entry' && order.id === idValue,
         );
         const replacesPendingGroup = pendingIndex >= 0
             && parseDirection(strategy.pending_orders[pendingIndex].direction) !== dir;
-        let hasFreePyramidingSlot = false;
-        if (pendingIndex >= 0 && parseDirection(strategy.pending_orders[pendingIndex].direction) === dir) {
-            let openSameSide = 0;
-            for (const trade of strategy.opentrades) {
-                if (Math.sign(trade.size) === dir) openSameSide++;
-            }
-            let occupiedSlots = openSameSide;
-            for (const order of strategy.pending_orders) {
-                if (
-                    order.status === 'pending'
-                    && (order.category ?? 'entry') === 'entry'
-                    && parseDirection(order.direction) === dir
-                ) {
-                    occupiedSlots++;
-                }
-            }
-            const cap = strategy.config.pyramiding ?? 1;
-            hasFreePyramidingSlot = openSameSide === 0 && occupiedSlots < cap;
-        }
-
         // Project the position forward over MARKET entry orders already queued
         // on THIS bar: they fill (in queue order) before this one, so the
         // reversal/add classification AND the reversal close-qty must be
@@ -317,12 +300,14 @@ export function entry(context: any) {
                 pending.bar = activatedBar;
                 pending.time = activatedTime;
             } else {
-                const priceDefinitionChanged =
-                    pending.type !== orderObj.type
-                    || pending.limit !== orderObj.limit
-                    || pending.stop !== orderObj.stop;
-                if (hasFreePyramidingSlot && priceDefinitionChanged) strategy.pending_orders.push(orderObj);
-                else strategy.pending_orders[pendingIndex] = orderObj;
+                // TV modifies the pending order in place: the new spec
+                // (type/levels/qty) replaces the old one and the order keeps
+                // its queue position. The removed coexistence branch (flat +
+                // pyramiding slot free + price change → stack another
+                // same-ID pending) was the VIN-75 hypothesis; 2444 refutes
+                // it — TV coalesced 5 same-ID stop resubmissions into the
+                // last level and never booked the stale fills.
+                strategy.pending_orders[pendingIndex] = orderObj;
             }
         }
     };
