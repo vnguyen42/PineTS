@@ -5,7 +5,6 @@ import { Order, StrategyState, Trade } from './types';
 import { Series } from '../../Series';
 import { defaultStrategyMargin } from './defaults';
 import { convertAccountToSymbol, currentBarTimeMs } from './currency';
-import { normalizeCommissionType } from '../../Indicator/propsSchema';
 
 /**
  * Parse strategy() function arguments
@@ -3338,17 +3337,6 @@ export function unwrapSeriesConfig<T extends object>(config: T): T {
     for (const key of Object.keys(record)) {
         const value = record[key];
         if (value instanceof Series) record[key] = value.get(0);
-    }
-    // Forme DOC pointée de commission_type (strategy.commission.percent /
-    // strategy.commission.cash_per_contract / strategy.commission.cash_per_order —
-    // 259 + 7 + 15 occurrences réelles, commissions non nulles chez TV : 1719,
-    // 1740) → option runtime au point de fusion UNIQUE de la config. Le proxy
-    // .prop ne normalise rien (les seeds de source contournent son trap set) ;
-    // la forme plate strategy.commission_percent (2575) n'est PAS mappée — TV la
-    // garde verbatim et facture zéro, l'engine de commission ne facture que les
-    // options runtime connues.
-    if (typeof record.commission_type === 'string') {
-        record.commission_type = normalizeCommissionType(record.commission_type);
     }
     return config;
 }

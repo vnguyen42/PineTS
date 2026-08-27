@@ -4,28 +4,6 @@
 import type { IPineProp } from './types';
 import { defaultStrategyMargin } from '../namespaces/strategy/defaults';
 
-/**
- * Normalise la forme DOC pointée de `commission_type` vers l'option runtime.
- *
- * Mesures TV (campagnes orchestrées, 279 settings capturés) :
- *   - la forme plate `strategy.commission_percent` (script 2575, seul cas réel)
- *     n'est PAS convertie par TV : elle est restituée verbatim dans
- *     09-settings-effective.json et facture ZÉRO commission (commissionPaid = 0,
- *     ledger sans commission) — le moteur la garde telle quelle, et l'engine de
- *     commission ne facture que les options runtime connues.
- *   - seule la forme DOC pointée (strategy.commission.percent / .cash_per_contract /
- *     .cash_per_order — 259 + 7 + 15 occurrences réelles dans les sources) porte
- *     une commission non nulle chez TV (1719 : 0.075 → 2823.13 ; 1740 : 0.2 →
- *     11380.08). Cette normalisation s'applique au point de fusion de la config
- *     strategy (namespaces/strategy/utils.ts), PAS au proxy .prop : les seeds de
- *     source contournent le trap set (keyedProxy) et la relecture du proxy n'est
- *     pas canonique.
- */
-export function normalizeCommissionType(value: unknown): unknown {
-    if (typeof value !== 'string') return value;
-    const m = /^strategy\.commission\.(percent|cash_per_contract|cash_per_order)$/.exec(value);
-    return m ? m[1] : value;
-}
 
 /**
  * Schema for `indicator()` / `strategy()` declaration arguments.
@@ -129,10 +107,10 @@ export const STRATEGY_PROPS: IPineProp[] = [
     // Chaîne OUVERTE — 'percent' | 'cash_per_contract' | 'cash_per_order' (options
     // runtime) ou toute autre chaîne, acceptée et facturant ZÉRO commission (forme
     // plate strategy.commission_percent du script 2575, mesurée chez TV : restituée
-    // verbatim, commissionPaid = 0). La forme doc pointée strategy.commission.percent
-    // est normalisée au point de fusion de config (normalizeCommissionType); aucune
-    // whitelist ici : un commission_type inconnu n'est pas une erreur, il est
-    // simplement non facturant.
+    // verbatim, commissionPaid = 0). Les constantes namespace pointées sont
+    // résolues par le transpileur vers les options runtime ; aucune whitelist ici :
+    // un commission_type inconnu n'est pas une erreur, il est simplement
+    // non facturant.
     { name: 'commission_type', type: 'enum', defval: 'percent',
       mutable: true, appliesTo: 'strategy' },
 

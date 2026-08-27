@@ -17,7 +17,7 @@ import { PineTS } from '../../../src/PineTS.class';
 //     : aucune ligne de trade avec une commission non nulle. TV facture ZÉRO commission
 //     pour une forme non reconnue — elle n'interprète pas la chaîne comme « percent ».
 //   - les constantes DOC pointées (strategy.commission.percent / .cash_per_contract /
-//     .cash_per_order — 259 + 7 + 15 occurrences réelles dans le corpus) produisent
+//     .cash_per_order — 258 + 7 + 15 affectations dans le corpus) produisent
 //     des commissions non nulles chez TV (1719 : value 0.075 → commissionPaid
 //     2823.125842500002 ; 1740 : 0.2 → 11380.077999999994).
 //
@@ -63,7 +63,7 @@ plot(close)`;
 const SOURCE_FLAT = `
 //@version=5
 strategy('C2575', overlay=true, default_qty_type=strategy.fixed, default_qty_value=10,
-     commission_type='strategy.commission_percent', commission_value=0.01, initial_capital=3000)
+     commission_value=0.01, initial_capital=3000)
 ${body}`;
 
 const SOURCE_DOTTED = `
@@ -75,6 +75,7 @@ ${body}`;
 describe('commission_type famille strategy.commission.* — révélateur 2575', () => {
     it('forme plate non reconnue : exécution OK et commission NULLE sur tous les trades (mesure run 2575)', async () => {
         const ind = new Indicator(SOURCE_FLAT);
+        ind.prop.commission_type = 'strategy.commission_percent';
         const ctx = await new PineTS(candles()).run(ind);
 
         // S'exécute sans ENGINE_ERROR et la config garde la valeur TELLE QUELLE,
@@ -94,7 +95,7 @@ describe('commission_type famille strategy.commission.* — révélateur 2575', 
         expect(t.commission).toBe(0);
     });
 
-    it('forme pointée : la commission en % est réellement appliquée au ledger (chemin 259 sources)', async () => {
+    it('forme pointée : la commission en % est réellement appliquée au ledger (chemin 258 affectations)', async () => {
         const ind = new Indicator(SOURCE_DOTTED);
         const ctx = await new PineTS(candles()).run(ind);
 
