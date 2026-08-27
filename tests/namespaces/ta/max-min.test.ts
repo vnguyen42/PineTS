@@ -6,6 +6,9 @@
 //   chart up to the current bar." Remarks: "na occurrences of source are
 //   ignored." — an na bar leaves the running value unchanged; before the first
 //   non-na value the result is na.
+// Famille (condition 2) : `builtins ta.max/ta.min` — fix fork 2e085ca, id
+// révélateur 1956 (script 1956 : `ta.max is not a function` avant le fix —
+// le test « transpile path » ci-dessous reprend la forme du script).
 import { describe, expect, it } from 'vitest';
 import { PineTS } from '../../../src/PineTS.class';
 import { Indicator } from '../../../src/Indicator';

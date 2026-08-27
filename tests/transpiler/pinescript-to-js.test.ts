@@ -16,6 +16,9 @@
  * - CodeGen: JavaScript code generation from AST
  * - Full transpilation pipeline integrity
  */
+// Famille (condition 2) : `nom contextuel dans déclarations typées (1776)`
+// — fix fork 2d65210, id révélateur 1776 (voir le describe « Contextual
+// keywords as typed local variable names » ci-dessous).
 
 import { describe, it, expect } from 'vitest';
 import { transpile } from '../../src/transpiler/index';

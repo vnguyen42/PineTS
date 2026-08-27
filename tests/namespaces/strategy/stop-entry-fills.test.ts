@@ -357,6 +357,8 @@ describe('strategy stop-entries — TV fill semantics (VIN-95)', () => {
         expect(context.strategy.position_size).toBe(0);
     });
 
+    // Famille : entry(limit=na, stop=na) — ids 2359/2114, fork 1036df3 : limit=na ET stop=na
+    // explicites ENSEMBLE → market ; na SEUL → ordre non exécutable inchangé.
     it('fills an entry with limit=na and stop=na as a market order', () => {
         const context = makeContext();
         entry(context)('market', 'long', { limit: Number.NaN, stop: Number.NaN });

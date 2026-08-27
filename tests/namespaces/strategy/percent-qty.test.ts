@@ -517,6 +517,9 @@ describe('strategy percent_of_equity stock displayed-price sizing (VIN-130)', ()
 });
 
 describe('strategy percent_of_equity pointvalue sizing (VIN-2205)', () => {
+    // Famille : pointvalue futures dans percent_of_equity — id révélateur 2205 (NYMEX:CL1!),
+    // fork 81173f9 : notionnel = qty×prix×syminfo.pointvalue (sans le multiplicateur :
+    // 13 471 contrats au lieu de 13 sur l'ancre CL1!).
     it('divides the futures notional by syminfo.pointvalue: CL1! 1,000,000 / (74.23 × 1000) → 13 contracts', () => {
         const cl1 = makeContext({
             initial_capital: 1_000_000,

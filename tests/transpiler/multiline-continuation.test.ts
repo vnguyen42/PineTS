@@ -23,6 +23,9 @@
  * token — any binary/assignment/ternary OPERATOR (except `=>`, which
  * opens a new block), COMMA, COLON, or the `and` / `or` keyword.
  */
+// Famille (condition 2) : `commentaires en continuation` — fix fork
+// 093080b, ids révélateurs 1568/2553/2562 (describe « Comments inside
+// wrapped expressions » ci-dessous).
 
 import { describe, it, expect } from 'vitest';
 import { transpile } from '../../src/transpiler/index';

@@ -1,3 +1,14 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright (C) 2026 LuxAlgo
+
+/**
+ * heikinashi (VIN-92, corpus id 1622, fork e77d8d8) — la transformation HA est
+ * possédée par le moteur (récurrence TV depuis la 1re barre du feed, appliquée
+ * UNE fois) et `ticker.heikinashi` n'est plus un no-op silencieux. Ces tests
+ * épinglent la récurrence, la sémantique ticker.heikinashi/standard/inherit et
+ * le contrat single-transform (le provider reçoit le ticker stripé).
+ */
+
 import { PineTS } from 'index';
 import { describe, expect, it } from 'vitest';
 

@@ -1,3 +1,13 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
+/**
+ * singletons historisés (corpus ids 1744 1778 2372, fork 741400d) — les
+ * builtins singleton sont des SÉRIES Pine : `barstate.isfirst[1]` vaut
+ * [na, true, false, …] et `dayofmonth[1]`/`hour[1]` rendent le composant de
+ * la barre précédente. Couvre aussi le contrat lazy (premier accès
+ * conditionnel tardif, 503 barres) et le passage en fonction utilisateur.
+ */
+
 import { describe, expect, it } from 'vitest';
 import PineTS from '../../src/PineTS.class';
 

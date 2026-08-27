@@ -12,6 +12,8 @@ import { Context } from '../../../src/Context.class';
 // bar. Before this fix the re-merge re-polled config with the Series object:
 // calculateOrderQty(Series) → NaN → qty>0 refused → 1833 ran 0 trades, and
 // commission_value → Number(Series) → NaN made 2133/2135 P&L NaN.
+// Famille (condition 2) : `unwrap Series des params strategy()` — fix fork
+// 1768c13, ids révélateurs 1833/2133/2135.
 
 function makeProvider(candles: any[]) {
     return {

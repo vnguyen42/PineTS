@@ -22,6 +22,12 @@ import { Series } from '../../../src/Series';
  * ranking / order inversion never see the tolerance. The canonical four
  * rounding cases (HARNESS) are covered by the pre-existing
  * round-to-mintick / trailing-parity tests and must stay green.
+ *
+ * Familles défendues par ce fichier (identification passe A_VERIFIER) :
+ * - touch exact isLevelTouched (1763a) — tolérance bruit binaire 1e-12×max(1,|level|)
+ *   centralisée dans isLevelTouched ; prix de fill = niveau littéral (fork 8c6a0bc)
+ * - PARTIAL_BRACKET_RESERVATION_SAME_TICK (1763) — 2 réservations q500 à égalité de tick
+ *   jamais agrégées en q1000 (b1184/b6286 ; le variant b8181 2-prix reste ouvert, non asserté)
  */
 function makeContext(mintick: number) {
     const context: any = new Context({

@@ -168,6 +168,9 @@ if bar_index == 4
     });
 });
 
+// Famille : gating `when=` — VIN-31 (ids 2490/2401) : slot when en fin de signature, garde
+// avant tout push d'ordre/mutation d'état, falsy explicite → no-op complet
+// (ici sur cancel_all : when=false/na laisse les pending intacts et les fills suivre).
 describe('cancel_all when-gating', () => {
     it('no-arg cancels pending entries and exits unconditionally', async () => {
         const context = await run(`

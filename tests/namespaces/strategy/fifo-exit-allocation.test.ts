@@ -75,6 +75,10 @@ function allocation(context: any) {
     }));
 }
 
+// Famille : FIFO global des exits — VIN-85 (fork 9b7008b, preuve probe TV 2026-08-20,
+// /tmp/tv-vin85/run-probe-20260820/06-probe-fifo-analysis.json) : file FIFO GLOBALE par
+// direction, fractionnement aux frontières, from_entry = activation seulement
+// (forme du probe : X-low-L3 qty 5 ferme le lot le plus ancien L1 en premier).
 describe('strategy exit global FIFO allocation', () => {
     it('sorts distinct-id exits by path crossing, not reversed Pine call order', () => {
         const context = makeContext();

@@ -8,6 +8,10 @@
 // absorbs `, var y = ...` multi-declarations; a trailing comma with a NON-var
 // continuation now falls through into the shared statement-sequence loop.
 // Convention: same as the other v4-*.test.ts transpiler suites.
+// Famille (condition 2) : `séquences comma multi-lignes (1816)` — fix fork
+// 42689cf, ids révélateurs 1816/2270 : la séquence à cheval sur plusieurs
+// lignes (chaque statement du f_printscr est sur sa propre ligne) ne plantait
+// plus sur `peek().line === startLine`.
 
 import { describe, it, expect } from 'vitest';
 import { pineToJS } from '../../src/transpiler/pineToJS/pineToJS.index';

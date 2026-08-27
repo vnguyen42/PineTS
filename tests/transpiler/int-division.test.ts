@@ -1,6 +1,10 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 /**
+ * `__idiv` (VIN-109, corpus ids 2406 1648 2099 1516, fork f161504) — `/` → `__idiv`
+ * était sur-agressif (TypeInferencePass sans qualifiers) ; la règle est désormais
+ * gatée v4|v5 et const-int/const-int prouvés.
+ *
  * Pine v4/v5 integer division is a qualifier-sensitive compatibility rule:
  * only const-int / const-int truncates. Inputs and series keep their
  * fractional value, and v6 always keeps it. The old RC2b tests asserted

@@ -1,6 +1,13 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright (C) 2026 LuxAlgo
 
+/**
+ * ta.vwap nu (corpus ids 1861 2651, fork 196776c) — l'auto-call d'un membre nu
+ * (`ta.vwap` en position valeur ou opérande directe) doit injecter hlc3 avant
+ * l'ID `_taN`, sinon il rend NaN. Voir le describe « Bare ta.vwap source
+ * lowering » ci-dessous.
+ */
+
 import { describe, expect, it } from 'vitest';
 import { PineTS } from '../../src/PineTS.class';
 import { Provider } from '../../src/marketData/Provider.class';

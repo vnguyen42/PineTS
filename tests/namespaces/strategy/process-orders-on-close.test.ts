@@ -39,6 +39,9 @@ function queueMarketEntry(context: Context, bar: number): Order {
     return order;
 }
 
+// Famille : process_orders_on_close (POC) — VIN-73 (fork 6dd7c3d, témoins 2841/2086/2808) :
+// close-phase UNIQUE après l'évaluation de barre, remplit les ordres market au closePrice
+// (+ slippage), sans ré-exécution du code utilisateur.
 describe('strategy process_orders_on_close — fill phase', () => {
     it('fills a current-bar market entry at that bar close when enabled', () => {
         const context = makeContext({ process_orders_on_close: true });

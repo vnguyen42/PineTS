@@ -32,6 +32,17 @@ import { Order } from '../../../src/namespaces/strategy/types';
  * percent_of_equity default quantities (TV: "position sizes will be
  * calculated as a percentage of the available equity when the trade opens" —
  * Strategy properties help article).
+ *
+ * Familles défendues par ce fichier (identification passe A_VERIFIER) :
+ * - VIN-72 (calc_on_order_fills) — paramètre mort → séquençage intrabar 4 ticks (fork 6959522)
+ * - VIN-107 (COF market-exits same-tick) — market exit RÉDUCTEUR créé par la
+ *   ré-exécution COF rempli au prix du fill déclencheur (fork 5e0c9d2, ids 1539/2673/2390)
+ * - VIN-78 (cycle de vie des exits par lot sous COF) — exit qty_percent déjà rempli
+ *   jamais recréé pour le même lot partiel (fork 40163c4, id 1502)
+ * - VIN-74 (gate de marge) — défaut margin v5 = 0 : un fill au notionnel > equity
+ *   n'est plus rejeté (fork 792f0f0, id 1502)
+ * - UNATTRIBUTED_2444_PYRAMIDING_STOP_LIMIT — coalescence same-ID : au plus UN ordre
+ *   entry vivant par id ; remplace in-place, sens opposé = cancel+neuf (fork e6e15d5, id 2444)
  */
 
 function makeContext(config: Record<string, unknown> = {}) {
@@ -766,6 +777,8 @@ describe('strategy calc_on_order_fills — same-bar sequencing', () => {
         // margin is 0 (no margin requirement) so the entry fills at the
         // placement-time size — the fork divergence is gone. The COF-vs-noCOF
         // contrast (fill-time re-size vs placement-time size) still holds.
+        // VIN-74 — gate de marge : la jambe no-COF ci-dessous (notionnel 1100 >
+        // equity 1000) ne remplit QUE si le défaut margin v5 = 0 (fork 792f0f0).
         const plain = makeContext({
             initial_capital: 1000,
             default_qty_type: 'percent_of_equity',
@@ -873,6 +886,8 @@ if strategy.position_size > 0
 
         expect(strategy.closedtrades).toHaveLength(1);
         expect(strategy.closedtrades[0].entry_price).toBe(100);
+        // VIN-107 — le market exit pur émis par la recalcul COF se draine au tick du
+        // fill déclencheur (open 100), jamais au point OHLC suivant.
         // Bar 1 follows open → low → high; the old next-tick behavior closed
         // this trade at 95 instead of at the entry fill's open price.
         expect(strategy.closedtrades[0].exit_price).toBe(100);

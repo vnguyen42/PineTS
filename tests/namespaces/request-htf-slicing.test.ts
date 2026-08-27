@@ -22,6 +22,9 @@
  * Output-equivalence (Phase 4 vs full-script slow path) is covered by
  * the `request-htf-pre-phase4.test.ts` suite.
  */
+// Famille (condition 2) : `slicing Phase 3 : consommateurs du retour
+// tronqué (1746)` — fix fork 2e7bea9, id révélateur 1746 (voir la section
+// « Phase 3: post-call consumers » ci-dessous).
 
 import { describe, it, expect } from 'vitest';
 import { PineTS, Provider } from 'index';

@@ -33,6 +33,9 @@ function setBar(context: any, idx: number, open: number, high: number, low: numb
     context.data.openTime = new Series([idx * 86_400_000, idx * 86_400_000]);
 }
 
+// Famille : slippage sur fills market+stop, jamais limit — VIN-108 (fork f161504, id 2097) :
+// le slippage s'applique aux fills MARKET+STOP (trailing/loss inclus), JAMAIS aux LIMIT
+// (entrées limit, exits profit/limit, stop-limit activé = fill limit sans slippage).
 describe('strategy slippage — market and stop only', () => {
     it.each([
         { direction: 'long', limit: 99, open: 100, high: 101, low: 98, expected: 99 },

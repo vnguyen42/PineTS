@@ -20,6 +20,10 @@ import { PineTS } from '../../../src/PineTS.class';
  * fills at b296 that TV never made, then skipped the real q2 lot at b333.
  * These tests replay the same shape on synthetic bars: they must fail on the
  * pre-fix engine (worktree 4ca51c3) and pass with the coalescing rule.
+ *
+ * Famille : UNATTRIBUTED_2444_PYRAMIDING_STOP_LIMIT (coalescence same-ID) — id 2444,
+ * fork e6e15d5 : au plus UN ordre entry vivant par id ; remplace in-place,
+ * sens opposé = cancel+neuf.
  */
 
 const mintick = 0.01;
