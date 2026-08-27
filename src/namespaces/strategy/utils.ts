@@ -2309,33 +2309,16 @@ export function processExitOrders(
         let absTp: number | undefined = order.limit;
         let absSl: number | undefined = order.stop;
 
-        // Validate trigger prices are on the correct side of avgEntry —
-        // EPHEMERAL pattern only. A wrong-sided leg (e.g. SL below entry
-        // for a short, TP above entry for a short) typically arises when
-        // the user computes the price from strategy.position_avg_price
-        // BEFORE a reversal fill — the value reflects the OUTGOING
-        // position. For sparse/ephemeral exits (variable scoped inside
-        // an if-block), TV's lazy series-eval gives NA on non-trigger
-        // bars → no fire; PT mirrors that by dropping the wrong-sided
-        // leg here.
-        //
-        // For PERSISTENT exits (every-bar refresh, main-scope variable),
-        // TV trusts the captured value and lets gap-fill produce the
-        // actual reachable price — a stale TP sitting on the wrong side
-        // of entry will still fire at the bar's open via gap-fill when
-        // the open is past the trigger. Dropping wrong-sided legs here
-        // would miss that.
-        if (!order._isPersistent && !cofMarkedThisPass) {
-            if (absSl !== undefined) {
-                const slValid = isLong ? absSl < avgEntry : absSl > avgEntry;
-                if (!slValid) absSl = undefined;
-            }
-            if (absTp !== undefined) {
-                const tpValid = isLong ? absTp > avgEntry : absTp < avgEntry;
-                if (!tpValid) absTp = undefined;
-            }
-        }
-
+        // Absolute legs are kept as captured. 2444 (TV ledger
+        // tv-vin95-b/2444) refutes the ephemeral wrong-side suppression:
+        // its sparse exit call (gated `close > mct`) places a stop BELOW
+        // the current close but ABOVE the pyramided position average
+        // (avg 102.93 < stop 104.53); TV fills it at the stop on the
+        // crossing bar (b363 @104.53). The drop was never oracle-anchored
+        // (legacy heuristic), and the broker emulator fills any absolute
+        // level the assumed intrabar path crosses — there is no
+        // wrong-side-vs-entry concept in TV's fill engine. Levels remain
+        // subject to the path/gap rules below.
 
         // Trailing-stop state.
         // Two arming modes:
@@ -2531,7 +2514,6 @@ export function processExitOrders(
                     slHit = isLong ? touchedAtOrBelow(sl, lowPrice) : touchedAtOrAbove(sl, highPrice);
                 }
             }
-
             // OCO per trade: when both legs are reachable, the first one
             // along the executable portion of the assumed path wins.
             let kind: 'profit' | 'loss' | null = null;

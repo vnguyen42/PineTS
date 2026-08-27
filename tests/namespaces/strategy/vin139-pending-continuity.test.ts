@@ -154,8 +154,15 @@ if strategy.position_size > 0
         expect(pendingExit(context)).toMatchObject({ stop: 110, _isPersistent: false });
 
         setBar(context, 4, 111, 112, 109, 110);
-        expect(processExitOrders(context)).toBe(0);
-        expect(context.strategy!.closedtrades).toHaveLength(0);
+        // A sparse (non-persistent) stop is still a live broker order: once
+        // placed it stays pending until filled or cancelled, and the assumed
+        // path crossing its level fills it. The legacy "wrong-side vs entry"
+        // suppression is refuted by the 2444 ledger (stop above the pyramided
+        // average — TV fills at the crossing bar). Persistence only governs
+        // which call refreshes the level, not whether the order exists.
+        expect(processExitOrders(context)).toBe(1);
+        expect(context.strategy!.closedtrades).toHaveLength(1);
+        expect(context.strategy!.closedtrades[0].exit_price).toBe(110);
     });
 
     it('preserves persistence through two same-bar refreshes while the last definition wins', () => {
@@ -186,8 +193,12 @@ if strategy.position_size > 0
         expect(pendingExit(context)).toMatchObject({ stop: 110, _isPersistent: false });
 
         setBar(context, 2, 111, 112, 109, 110);
-        expect(processExitOrders(context)).toBe(0);
-        expect(context.strategy!.closedtrades).toHaveLength(0);
+        // The recreated stop is a live broker order whose level the bar's
+        // path crosses => it fills at 110 (2444: crossing beats the legacy
+        // wrong-side suppression).
+        expect(processExitOrders(context)).toBe(1);
+        expect(context.strategy!.closedtrades).toHaveLength(1);
+        expect(context.strategy!.closedtrades[0].exit_price).toBe(110);
     });
 
     it('does not inherit persistence after the old same-id order filled', () => {
@@ -204,8 +215,11 @@ if strategy.position_size > 0
         refreshExit(context, 'x', { stop: 110 }, 'new-lifecycle-site');
         expect(pendingExit(context)).toMatchObject({ stop: 110, _isPersistent: false });
         setBar(context, 3, 111, 112, 109, 110);
-        expect(processExitOrders(context)).toBe(0);
-        expect(context.strategy!.closedtrades).toHaveLength(1);
+        // The new lifecycle's stop crosses the bar's path and fills — the
+        // order is live regardless of persistence (2444 rule).
+        expect(processExitOrders(context)).toBe(1);
+        expect(context.strategy!.closedtrades).toHaveLength(2);
+        expect(context.strategy!.closedtrades[1].exit_price).toBe(110);
     });
 
     it('rounds stock stops toward market and limits away from market by position direction', () => {
