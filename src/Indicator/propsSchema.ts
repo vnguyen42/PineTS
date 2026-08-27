@@ -5,6 +5,24 @@ import type { IPineProp } from './types';
 import { defaultStrategyMargin } from '../namespaces/strategy/defaults';
 
 /**
+ * Normalise les constantes Pine de `commission_type` vers la valeur moteur.
+ *
+ * TradingView définit la famille strategy.commission.* sous deux notations :
+ *   - forme doc Pine v5/v6  : strategy.commission.percent / .cash_per_contract / .cash_per_order
+ *   - forme interne TV       : strategy.commission_percent etc. — la valeur que TV
+ *     restitue dans metaInfo.inputs (09-settings-effective.json du run 2575 :
+ *     "strategy.commission_percent") et accepte dans le code Pine (script 2575).
+ * Les deux notations mappent vers la même option runtime ; toute autre valeur
+ * est rendue telle quelle et reste refusée par la whitelist `options` (un
+ * commission_type inconnu doit rester une erreur — pas de repli silencieux).
+ */
+export function normalizeCommissionType(value: unknown): unknown {
+    if (typeof value !== 'string') return value;
+    const m = /^strategy\.commission[._](percent|cash_per_contract|cash_per_order)$/.exec(value);
+    return m ? m[1] : value;
+}
+
+/**
  * Schema for `indicator()` / `strategy()` declaration arguments.
  *
  * Curated from the Pine v6 reference. Each entry includes a one-line comment
@@ -103,6 +121,12 @@ export const STRATEGY_PROPS: IPineProp[] = [
     // >= 0 — default trade quantity in units determined by default_qty_type
     { name: 'default_qty_value', type: 'float', defval: 1, minval: 0, mutable: true, appliesTo: 'strategy' },
 
+    // 'percent' | 'cash_per_contract' | 'cash_per_order' — corresponds to strategy.commission.percent / .cash_per_contract / .cash_per_order
+    { name: 'commission_type', type: 'enum', defval: 'percent',
+      options: ['percent', 'cash_per_contract', 'cash_per_order'],
+      normalize: normalizeCommissionType,
+      mutable: true, appliesTo: 'strategy' },
+
     // >= 0 — starting capital in `currency` units
     { name: 'initial_capital', type: 'float', defval: 1000000, minval: 0, mutable: true, appliesTo: 'strategy' },
 
@@ -113,11 +137,6 @@ export const STRATEGY_PROPS: IPineProp[] = [
 
     // 0..N — slippage in ticks applied against fill direction
     { name: 'slippage', type: 'int', defval: 0, minval: 0, mutable: true, appliesTo: 'strategy' },
-
-    // 'percent' | 'cash_per_contract' | 'cash_per_order' — corresponds to strategy.commission.percent / .cash_per_contract / .cash_per_order
-    { name: 'commission_type', type: 'enum', defval: 'percent',
-      options: ['percent', 'cash_per_contract', 'cash_per_order'],
-      mutable: true, appliesTo: 'strategy' },
 
     // >= 0 — commission per leg in units determined by commission_type
     { name: 'commission_value', type: 'float', defval: 0, minval: 0, mutable: true, appliesTo: 'strategy' },

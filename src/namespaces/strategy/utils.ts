@@ -5,6 +5,7 @@ import { Order, StrategyState, Trade } from './types';
 import { Series } from '../../Series';
 import { defaultStrategyMargin } from './defaults';
 import { convertAccountToSymbol, currentBarTimeMs } from './currency';
+import { normalizeCommissionType } from '../../Indicator/propsSchema';
 
 /**
  * Parse strategy() function arguments
@@ -3338,6 +3339,13 @@ export function unwrapSeriesConfig<T extends object>(config: T): T {
     for (const key of Object.keys(record)) {
         const value = record[key];
         if (value instanceof Series) record[key] = value.get(0);
+    }
+    // Constantes Pine de commission_type (strategy.commission.percent /
+    // strategy.commission_percent — famille normalisée dans propsSchema, script
+    // 2575) → valeur moteur au point de fusion unique de la config. Même règle
+    // que le proxy .prop : l'engine de commission compare la forme canonique.
+    if (typeof record.commission_type === 'string') {
+        record.commission_type = normalizeCommissionType(record.commission_type);
     }
     return config;
 }

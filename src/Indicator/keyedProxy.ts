@@ -37,6 +37,11 @@ export interface KeyedSchemaEntry {
      * reading or writing via an alias hits the same slot.
      */
     aliases?: string[];
+    /**
+     * Per-entry value normalisation (e.g. Pine-namespace constant forms →
+     * runtime option) applied on write, before validation and storage.
+     */
+    normalize?: (value: unknown) => unknown;
 }
 
 export interface BuildKeyedProxyResult {
@@ -92,8 +97,12 @@ export function buildKeyedProxy(
             if (!entry) {
                 throw new Error(`[${label}] unknown ${keyNoun} "${prop}". Known: ${[...entryByKey.keys()].join(', ') || '(none)'}`);
             }
-            validate(entry, value, label);
-            target[entry.key] = value; // store under canonical key
+            // Per-entry normalisation (e.g. Pine-namespace constant forms →
+            // runtime option) BEFORE validation and storage: the read-back and
+            // every downstream consumer see the canonical value.
+            const normalized = entry.normalize ? entry.normalize(value) : value;
+            validate(entry, normalized, label);
+            target[entry.key] = normalized; // store under canonical key
             onSet?.(entry.key);
             return true;
         },

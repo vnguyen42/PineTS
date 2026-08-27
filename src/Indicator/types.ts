@@ -104,6 +104,7 @@ export interface IPineProp {
     type:        PinePropType;
     defval:      unknown;                     // Pine-spec default
     options?:    unknown[];                   // enum: accepted runtime values
+    normalize?:  (value: unknown) => unknown; // enum: Pine-namespace constant forms → runtime option (see propsSchema)
     minval?:     number;
     maxval?:     number;
     mutable:     boolean;                     // false for title/shorttitle
