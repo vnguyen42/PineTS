@@ -1527,11 +1527,24 @@ export function transformFunctionDeclaration(node: any, scopeManager: ScopeManag
         // This ensures they:
         // 1. Stay as plain identifiers (no renaming to $.let.scoped_name)
         // 2. Get $.get() wrapping when used (e.g., X1.size() → $.get(X1, 0).size())
-        node.params.forEach((param: any) => {
-            if (param.type === 'Identifier') {
-                scopeManager.addLocalSeriesVar(param.name);
-            }
-        });
+        //
+        // Params with a Pine type annotation or a default value arrive as
+        // AssignmentPattern nodes (`float src = close`, `int length = 21`);
+        // their left Identifier must be registered too. Without it, reads of
+        // the param inside a dynamic history index (`src[length - 1 - i]`)
+        // fall through the `isLocalSeriesVar` early-returns and get scoped to
+        // the global context (`$.let.src`/`$.let.length` — both undefined),
+        // because a named fn param is never registered in any scope map:
+        // `getVariable` falls back to `[name, 'let']` and the scoping
+        // branches treat it as a global that must be context-wrapped.
+        // Result: every weighted term became NA (corpus id 2280,
+        // DYNAMIC_HISTORY_INDEX_FN_PARAMS). Plain `Identifier` params already
+        // worked — this closes the same hole for typed/default params.
+        const paramNames: (string | undefined)[] = node.params.map((param: any) =>
+            param.type === 'AssignmentPattern' ? param.left?.name : param.name);
+        for (const name of paramNames) {
+            if (name) scopeManager.addLocalSeriesVar(name);
+        }
 
         // Scope-locally register any UDT-typed parameters (per
         // `funcName.__pineParamTypes__` markers populated by AnalysisPass)
@@ -1562,11 +1575,9 @@ export function transformFunctionDeclaration(node: any, scopeManager: ScopeManag
         c(node.body, scopeManager);
 
         // Clean up: remove function parameters from local series vars after exiting function scope
-        node.params.forEach((param: any) => {
-            if (param.type === 'Identifier') {
-                scopeManager.removeLocalSeriesVar(param.name);
-            }
-        });
+        for (const name of paramNames) {
+            if (name) scopeManager.removeLocalSeriesVar(name);
+        }
         if (paramTypes) {
             for (const paramName of Object.keys(paramTypes)) {
                 scopeManager.unmarkVariableAsUdtInstance(paramName);
