@@ -2275,7 +2275,6 @@ export function processExitOrders(
         const closeOnly =
             closePhase
             && order.bar === context.idx
-            && order._isPersistent === true
             && order._exit_refreshed !== true;
         if (closePhase && order.bar === context.idx && !closeOnly) continue;
 
