@@ -3340,10 +3340,14 @@ export function unwrapSeriesConfig<T extends object>(config: T): T {
         const value = record[key];
         if (value instanceof Series) record[key] = value.get(0);
     }
-    // Constantes Pine de commission_type (strategy.commission.percent /
-    // strategy.commission_percent — famille normalisée dans propsSchema, script
-    // 2575) → valeur moteur au point de fusion unique de la config. Même règle
-    // que le proxy .prop : l'engine de commission compare la forme canonique.
+    // Forme DOC pointée de commission_type (strategy.commission.percent /
+    // strategy.commission.cash_per_contract / strategy.commission.cash_per_order —
+    // 259 + 7 + 15 occurrences réelles, commissions non nulles chez TV : 1719,
+    // 1740) → option runtime au point de fusion UNIQUE de la config. Le proxy
+    // .prop ne normalise rien (les seeds de source contournent son trap set) ;
+    // la forme plate strategy.commission_percent (2575) n'est PAS mappée — TV la
+    // garde verbatim et facture zéro, l'engine de commission ne facture que les
+    // options runtime connues.
     if (typeof record.commission_type === 'string') {
         record.commission_type = normalizeCommissionType(record.commission_type);
     }

@@ -36,7 +36,6 @@ export function buildPropProxy(
             options: p.options,
             minval: p.minval,
             maxval: p.maxval,
-            normalize: p.normalize,
         });
     }
     const { proxy, values } = buildKeyedProxy(entries, 'Indicator.prop', onSet, sourceArgs);

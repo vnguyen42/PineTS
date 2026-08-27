@@ -5,20 +5,25 @@ import type { IPineProp } from './types';
 import { defaultStrategyMargin } from '../namespaces/strategy/defaults';
 
 /**
- * Normalise les constantes Pine de `commission_type` vers la valeur moteur.
+ * Normalise la forme DOC pointée de `commission_type` vers l'option runtime.
  *
- * TradingView définit la famille strategy.commission.* sous deux notations :
- *   - forme doc Pine v5/v6  : strategy.commission.percent / .cash_per_contract / .cash_per_order
- *   - forme interne TV       : strategy.commission_percent etc. — la valeur que TV
- *     restitue dans metaInfo.inputs (09-settings-effective.json du run 2575 :
- *     "strategy.commission_percent") et accepte dans le code Pine (script 2575).
- * Les deux notations mappent vers la même option runtime ; toute autre valeur
- * est rendue telle quelle et reste refusée par la whitelist `options` (un
- * commission_type inconnu doit rester une erreur — pas de repli silencieux).
+ * Mesures TV (campagnes orchestrées, 279 settings capturés) :
+ *   - la forme plate `strategy.commission_percent` (script 2575, seul cas réel)
+ *     n'est PAS convertie par TV : elle est restituée verbatim dans
+ *     09-settings-effective.json et facture ZÉRO commission (commissionPaid = 0,
+ *     ledger sans commission) — le moteur la garde telle quelle, et l'engine de
+ *     commission ne facture que les options runtime connues.
+ *   - seule la forme DOC pointée (strategy.commission.percent / .cash_per_contract /
+ *     .cash_per_order — 259 + 7 + 15 occurrences réelles dans les sources) porte
+ *     une commission non nulle chez TV (1719 : 0.075 → 2823.13 ; 1740 : 0.2 →
+ *     11380.08). Cette normalisation s'applique au point de fusion de la config
+ *     strategy (namespaces/strategy/utils.ts), PAS au proxy .prop : les seeds de
+ *     source contournent le trap set (keyedProxy) et la relecture du proxy n'est
+ *     pas canonique.
  */
 export function normalizeCommissionType(value: unknown): unknown {
     if (typeof value !== 'string') return value;
-    const m = /^strategy\.commission[._](percent|cash_per_contract|cash_per_order)$/.exec(value);
+    const m = /^strategy\.commission\.(percent|cash_per_contract|cash_per_order)$/.exec(value);
     return m ? m[1] : value;
 }
 
@@ -121,10 +126,14 @@ export const STRATEGY_PROPS: IPineProp[] = [
     // >= 0 — default trade quantity in units determined by default_qty_type
     { name: 'default_qty_value', type: 'float', defval: 1, minval: 0, mutable: true, appliesTo: 'strategy' },
 
-    // 'percent' | 'cash_per_contract' | 'cash_per_order' — corresponds to strategy.commission.percent / .cash_per_contract / .cash_per_order
+    // Chaîne OUVERTE — 'percent' | 'cash_per_contract' | 'cash_per_order' (options
+    // runtime) ou toute autre chaîne, acceptée et facturant ZÉRO commission (forme
+    // plate strategy.commission_percent du script 2575, mesurée chez TV : restituée
+    // verbatim, commissionPaid = 0). La forme doc pointée strategy.commission.percent
+    // est normalisée au point de fusion de config (normalizeCommissionType); aucune
+    // whitelist ici : un commission_type inconnu n'est pas une erreur, il est
+    // simplement non facturant.
     { name: 'commission_type', type: 'enum', defval: 'percent',
-      options: ['percent', 'cash_per_contract', 'cash_per_order'],
-      normalize: normalizeCommissionType,
       mutable: true, appliesTo: 'strategy' },
 
     // >= 0 — starting capital in `currency` units
