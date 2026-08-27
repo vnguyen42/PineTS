@@ -41,6 +41,10 @@ f(float src = close, int length = 5, float mult = 1.0) =>
 plot(f(close, 5, 1.0), title="out")
 plot(close, title="c")
 `;
+const EXPECTED_TYPED_DEFAULT_BODY = `function f(n = 5) {
+    const $$ = $.peekCtx();
+    return $.precision($.get(n, 0) + 1);
+  }`;
 
 describe('Dynamic history index referencing function params (FIX-1, 2280)', () => {
     it('lowers src[length - 1 - i] to the local params, not $.let.src/$.let.length', () => {
@@ -85,6 +89,36 @@ plot(f(close))`;
         expect(js).not.toContain('$.get(x, $.get(g, 0) - 1 - i)');
     });
 
+    it('emits the byte-stable body for a typed default parameter without a global', () => {
+        const source = `//@version=5
+indicator("scalar-default")
+f(int n = 5) =>
+    n + 1
+plot(f(), title="out")`;
+        const js = transpile(source).toString();
+
+        expect(js).toContain(EXPECTED_TYPED_DEFAULT_BODY);
+        expect(js).not.toContain('$.let.n');
+    });
+
+    it('keeps a typed default parameter local when it shadows a global', () => {
+        const source = `//@version=5
+indicator("shadow-default")
+n = 99
+f(int n = 5) =>
+    n + 1
+plot(f(), title="out")
+plot(n, title="global")`;
+        const js = transpile(source).toString();
+
+        // The function body reads its local parameter, while the global
+        // declaration and the later global plot remain scoped to glb1_n.
+        expect(js).toContain(EXPECTED_TYPED_DEFAULT_BODY);
+        expect(js).not.toContain('$.precision($.get($.let.glb1_n, 0) + 1)');
+        expect(js).toContain('$.let.glb1_n = $.init($.let.glb1_n, 99);');
+        expect(js).toMatch(/plot\.param\(\$\.let\.glb1_n, undefined/);
+    });
+
     it('computes finite values at runtime for the typed/default-param function', async () => {
         // Provider.Mock 60-min BTC closes — the FRAMA-like windowed sum must
         // be finite on every bar once the window is full (before the fix every
@@ -102,7 +136,7 @@ plot(f(close))`;
         expect(tail.every((v: unknown) => Number.isFinite(Number(v)))).toBe(true);
         // Reference: with mult=1.0 the weights collapse to exp(0)=1, so the
         // value is the 5-bar arithmetic mean of closes.
-                const closes = plots['c']!.data.map((p: { value: unknown }) => Number(p.value));
+        const closes = plots['c']!.data.map((p: { value: unknown }) => Number(p.value));
         expect(values[5]).toBeCloseTo(
             (closes[1] + closes[2] + closes[3] + closes[4] + closes[5]) / 5,
             6,
