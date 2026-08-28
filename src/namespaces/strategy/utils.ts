@@ -184,13 +184,12 @@ function snapDisplayOhlc(prices: OhlcPrices, mintick: number): OhlcPrices {
 }
 
 /**
- * Pine's `na` price literal reaches the strategy runtime as `NaN`.
- * Normalize it only when the sibling price level is also part of the call.
- * A lone `stop=na`/`limit=na` keeps the legacy non-executable order shape;
- * explicit `limit=na, stop=na` becomes a market order.
+ * Pine's `na` price literal reaches the strategy runtime as `NaN` directly or
+ * through the `NAHelper` object's `__value`. Normalize explicit `na` to
+ * `undefined` so a lone or paired `limit=na`/`stop=na` becomes a market order.
+ * An omitted level is already `undefined` and remains unchanged.
  */
-export function normalizeOrderLevel<T>(value: T, pairedLevelProvided: boolean): T | undefined {
-    if (!pairedLevelProvided) return value;
+export function normalizeOrderLevel<T>(value: T, _pairedLevelProvided: boolean): T | undefined {
     if (typeof value === 'number' && Number.isNaN(value)) return undefined;
     if (typeof value === 'object' && value !== null && '__value' in value) {
         const pineValue = value.__value;
@@ -1669,7 +1668,7 @@ function openProfitAt(context: any, price: number): number {
  * trades closed mid-bar by TP / SL are reflected as realized P&L (rather
  * than as a phantom intra-bar excursion against the bar's raw H/L).
  */
-function markToMarket(context: any, currentPrice: number): void {
+export function markToMarket(context: any, currentPrice: number): void {
     const strategy: StrategyState = context.strategy;
     const unrealizedPnL = openProfitAt(context, currentPrice);
     strategy.openprofit = unrealizedPnL;

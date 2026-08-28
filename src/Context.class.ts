@@ -57,6 +57,8 @@ export class Context {
     public pineVersion: number | null = null; // Pine source version; drives version-specific runtime defaults.
     /** Strategy series referenced through Pine's history operator in the transpiled source. */
     public _strategyHistorySeries?: string[];
+    /** Absolute bar index represented by the most recent strategy history snapshot. */
+    public _strategyHistorySnapshotBar?: number;
 
     public __maxLoops: number = 500000;
     public NA: any = NaN;

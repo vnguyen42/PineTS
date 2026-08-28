@@ -418,8 +418,9 @@ export interface StrategyState {
     // `calc_on_order_fills = true` (see CofBarState). Set at the start of
     // each bar by the execution loop, null outside the COF processing.
     _cof?: CofBarState | null;
-    // Finalized values of Pine's `series`-qualified strategy variables,
-    // appended once after all broker-emulator phases for each bar.
+    // Values of Pine's series-qualified strategy variables at the last script
+    // execution for each bar. POC snapshots are taken before a non-COF close
+    // fill; a COF post-fill recalculation replaces its current-bar snapshot.
     _series_history?: Record<string, unknown[]>;
 
     // Internal: mark-to-market equity at each calendar month's last bar,

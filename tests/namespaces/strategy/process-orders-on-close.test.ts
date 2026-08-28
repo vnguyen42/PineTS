@@ -154,7 +154,7 @@ plot(strategy.position_size, 'current_position')`;
         expect(context.strategy?._series_history).toBeUndefined();
     });
 
-    it('snapshots strategy history after the process-on-close fill phase', async () => {
+    it('snapshots strategy history before the process-on-close fill phase', async () => {
         const source = `
 //@version=5
 strategy('POC history', process_orders_on_close=true, default_qty_type=strategy.fixed, default_qty_value=1)
@@ -167,9 +167,9 @@ plot(strategy.opentrades[1], 'previous_open_trades')`;
         const context = await engine.run(source);
         const values = (name: string) => context.plots[name].data.map((point: { value: number }) => point.value);
 
-        expect(values('previous_position')).toEqual([NaN, 1]);
-        expect(values('previous_average')).toEqual([NaN, 100]);
-        expect(values('previous_open_trades')).toEqual([NaN, 1]);
+        expect(values('previous_position')).toEqual([NaN, 0]);
+        expect(values('previous_average')).toEqual([NaN, NaN]);
+        expect(values('previous_open_trades')).toEqual([NaN, 0]);
     });
 
     it('snapshots strategy history after the final calc-on-order-fills pass', async () => {

@@ -178,11 +178,14 @@ export class Strategy {
     }
 
     /**
-     * Capture the finalized strategy variables once per bar. The execution
-     * loop calls this after all broker-emulator phases, including the
-     * process-on-close fill and the final calc-on-order-fills recalculation.
+     * Capture the strategy variables exposed by history references at the
+     * last script execution for the current bar.
+     *
+     * `replace` is retained at the COF call site as an explicit replacement
+     * marker; the snapshot-bar metadata is authoritative and also deduplicates
+     * default-mode snapshots during updateTail re-execution.
      */
-    snapshotSeries(): void {
+    snapshotSeries(replace = false): void {
         const strategy = this.context.strategy;
         const requested: string[] | undefined = this.context._strategyHistorySeries;
         if (!strategy || !requested?.length) return;
@@ -191,9 +194,14 @@ export class Strategy {
         for (const name of requested) {
             const current = this.seriesGetters[name]?.();
             const value = current !== null && typeof current === 'object' ? current.valueOf() : current;
-            strategy._series_history[name] ??= [];
-            strategy._series_history[name].push(value);
+            const history = (strategy._series_history[name] ??= []);
+            if (this.context._strategyHistorySnapshotBar === this.context.idx && history.length > 0) {
+                history[history.length - 1] = value;
+            } else {
+                history.push(value);
+            }
         }
+        this.context._strategyHistorySnapshotBar = this.context.idx;
     }
 }
 

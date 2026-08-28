@@ -329,36 +329,36 @@ describe('strategy stop-entries — TV fill semantics (VIN-95)', () => {
     });
 
     const loneNaCases = [
-        { name: 'stop', levels: { stop: Number.NaN }, type: 'stop', field: 'stop' },
-        { name: 'limit', levels: { limit: Number.NaN }, type: 'limit', field: 'limit' },
+        { name: 'stop', levels: { stop: Number.NaN }, type: 'market', field: 'stop' },
+        { name: 'limit', levels: { limit: Number.NaN }, type: 'market', field: 'limit' },
     ] as const;
 
-    it.each(loneNaCases)('keeps a lone na $name entry non-executable', (testCase) => {
+    it.each(loneNaCases)('executes a lone na $name entry as a market order', (testCase) => {
         const context = makeContext();
         entry(context)('lone-na', 'long', testCase.levels);
 
         const pending = context.strategy.pending_orders[0];
         expect(pending.type).toBe(testCase.type);
-        expect(Number.isNaN(pending[testCase.field])).toBe(true);
+        expect(pending[testCase.field]).toBeUndefined();
         setBar(context, 1, 101, 102, 100, 101);
-        expect(processStrategyOrders(context)).toBe(0);
-        expect(context.strategy.position_size).toBe(0);
+        expect(processStrategyOrders(context)).toBe(1);
+        expect(context.strategy.position_size).toBe(1);
     });
 
-    it.each(loneNaCases)('keeps a lone na strategy.order $name non-executable', (testCase) => {
+    it.each(loneNaCases)('executes a lone na strategy.order $name as a market order', (testCase) => {
         const context = makeContext();
         order(context)({ id: 'lone-na', direction: 'long', ...testCase.levels });
 
         const pending = context.strategy.pending_orders[0];
         expect(pending.type).toBe(testCase.type);
-        expect(Number.isNaN(pending[testCase.field])).toBe(true);
+        expect(pending[testCase.field]).toBeUndefined();
         setBar(context, 1, 101, 102, 100, 101);
-        expect(processStrategyOrders(context)).toBe(0);
-        expect(context.strategy.position_size).toBe(0);
+        expect(processStrategyOrders(context)).toBe(1);
+        expect(context.strategy.position_size).toBe(1);
     });
 
-    // Famille : entry(limit=na, stop=na) — ids 2359/2114, fork 1036df3 : limit=na ET stop=na
-    // explicites ENSEMBLE → market ; na SEUL → ordre non exécutable inchangé.
+    // Famille : entry(limit=na, stop=na) — ids 2359/2114, fork 1036df3 :
+    // explicit limit=na et stop=na ensemble, ou un seul niveau na, → market.
     it('fills an entry with limit=na and stop=na as a market order', () => {
         const context = makeContext();
         entry(context)('market', 'long', { limit: Number.NaN, stop: Number.NaN });
@@ -382,11 +382,11 @@ describe('strategy stop-entries — TV fill semantics (VIN-95)', () => {
         entry(context)('undefined-sibling', 'long', { limit: Number.NaN, stop: undefined });
 
         const pending = context.strategy.pending_orders[0];
-        expect(pending.type).toBe('limit');
-        expect(Number.isNaN(pending.limit)).toBe(true);
+        expect(pending.type).toBe('market');
+        expect(pending.limit).toBeUndefined();
         setBar(context, 1, 101, 102, 100, 101);
-        expect(processStrategyOrders(context)).toBe(0);
-        expect(context.strategy.position_size).toBe(0);
+        expect(processStrategyOrders(context)).toBe(1);
+        expect(context.strategy.position_size).toBe(1);
     });
 
     it('normalizes explicit NAHelper levels for strategy.order', () => {

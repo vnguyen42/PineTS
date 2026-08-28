@@ -5,7 +5,7 @@ import { Context } from './Context.class';
 import { splitTickerModifier, stripTickerModifier, transformHeikinAshi, transformHeikinAshiCandle, withTickerModifier } from './tickerModifier';
 import { Series } from './Series';
 import { Indicator } from './Indicator';
-import { processStrategyOrders, processExitOrders, processMarginCall, finalizeStrategyBar, finalizeStrategyRun, isAdverseFirstBar, applyPendingCloseMarginCall, snapshotStrategyState, restoreStrategyState } from './namespaces/strategy/utils';
+import { processStrategyOrders, processExitOrders, processMarginCall, finalizeStrategyBar, finalizeStrategyRun, isAdverseFirstBar, applyPendingCloseMarginCall, snapshotStrategyState, restoreStrategyState, markToMarket } from './namespaces/strategy/utils';
 
 // ── Timeframe duration utility ──────────────────────────────────────
 //prettier-ignore
@@ -1035,6 +1035,7 @@ export class PineTS {
         // forming bar survive the rollback and fill as duplicates on the next
         // bar. Null for indicator contexts.
         snapshot.strategy = snapshotStrategyState(context.strategy);
+        snapshot.strategyHistorySnapshotBar = context._strategyHistorySnapshotBar;
 
         // Also snapshot result and data array lengths
         snapshot.resultLength = this._getResultLength(context.result);
@@ -1085,6 +1086,7 @@ export class PineTS {
         // indicators). Mutates context.strategy in place — its identity is
         // public API.
         restoreStrategyState(context.strategy, snapshot.strategy);
+        context._strategyHistorySnapshotBar = snapshot.strategyHistorySnapshotBar;
     }
 
     /**
@@ -1327,15 +1329,27 @@ export class PineTS {
             }
 
             const result = await transpiledFn(context);
+            const poc = context.strategy?.config.process_orders_on_close === true;
+            const cof = context.strategy?.config.calc_on_order_fills === true;
+            let closeFills = 0;
+
+            if (poc && !cof) {
+                // The close fill runs after this evaluation. Mark at the same
+                // close price used by the evaluation before capturing history;
+                // the entry/exit commissions of the pending close fill are not
+                // part of the pre-fill state.
+                markToMarket(context, Series.from(context.data.close).get(0));
+                context.pine?.strategy?.snapshotSeries();
+            }
+
             // process_orders_on_close is a fill phase after the normal
             // bar-close evaluation, not a second evaluation. Current-bar
             // market orders fill at the signal bar's close. When COF is also
             // enabled, the close is the final assumed intrabar tick: one
             // post-fill recalculation is allowed, but the intrabar loop is
             // never reopened and orders from that recalc remain deferred.
-            if (context.strategy?.config.process_orders_on_close === true) {
+            if (poc) {
                 const strategy = context.strategy;
-                const cof = strategy.config.calc_on_order_fills === true;
 
                 if (cof) {
                     const openPrice = Series.from(context.data.open).get(0);
@@ -1351,7 +1365,7 @@ export class PineTS {
                     };
                 }
 
-                let closeFills = processStrategyOrders(context, 'close');
+                closeFills = processStrategyOrders(context, 'close');
                 closeFills += processExitOrders(context, 'close');
 
                 if (cof && closeFills > 0) {
@@ -1368,6 +1382,10 @@ export class PineTS {
                     for (const [data, len] of plotLengths) {
                         if (data.length > len) data.length = len;
                     }
+                    // The post-fill execution is the last script execution
+                    // on this bar; replace its history entry, never append a
+                    // second bar entry.
+                    context.pine?.strategy?.snapshotSeries(true);
                 }
 
                 if (cof) strategy._cof = null;
@@ -1377,10 +1395,11 @@ export class PineTS {
                 finalizeStrategyBar(context);
             }
 
-            // History references on strategy variables observe the finalized
-            // bar, after every fill phase and the last COF recalculation.
-            context.pine?.strategy?.snapshotSeries();
-
+            // Non-POC paths have no earlier snapshot. For POC + COF without a
+            // close fill, the normal bar-close execution remains the last one.
+            if (!poc || (cof && closeFills === 0)) {
+                context.pine?.strategy?.snapshotSeries();
+            }
             //collect results
             if (typeof result === 'object') {
                 if (typeof context.result !== 'object') {
