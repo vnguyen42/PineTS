@@ -502,10 +502,13 @@ export function calculateOrderQty(context: any, specifiedQty: number | undefined
                 ? strategy.equity - strategy.openprofit + openProfitAt(context, sizingPrice)
                 : strategy.equity;
 
-            const positionValue = convertAccountToSymbol(context, (sizingEquity * qtyValue) / 100, currentBarTimeMs(context), 'identity');
             const commissionRate = strategy.config.commission_type === 'percent'
                 ? (Number(strategy.config.commission_value) || 0) / 100
                 : 0;
+            const commissionReserve = strategy.config.commission_type === 'cash_per_order'
+                ? Number(strategy.config.commission_value) || 0
+                : 0;
+            const positionValue = convertAccountToSymbol(context, (sizingEquity * qtyValue) / 100 - commissionReserve, currentBarTimeMs(context), 'identity');
             // VIN-2205: the equity notional is converted to CONTRACTS at the
             // symbol's contract multiplier. Futures price in units of
             // pointvalue × price (NYMEX:CL1! pointvalue=1000: TV computes
