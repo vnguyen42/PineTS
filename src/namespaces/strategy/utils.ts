@@ -577,7 +577,9 @@ export function processStrategyOrders(context: any, phase: 'open' | 'close' = 'o
     const { open: openPrice, high: highPrice, low: lowPrice, close: closePrice } = rawOhlc;
     const currentTime = Series.from(context.data.openTime).get(0);
     const mintick = context.pine?.syminfo?.mintick ?? 0.01;
-    const snapExecutionPrices = context.pine?.syminfo?.type === 'stock';
+    const assetType = context.pine?.syminfo?.type;
+    const snapExecutionPrices = assetType === 'stock';
+    const snapExecutionFills = snapExecutionPrices || assetType === 'crypto' || assetType === 'spot';
     const displayedOhlc = snapExecutionPrices ? snapDisplayOhlc(rawOhlc, mintick) : rawOhlc;
     const intrabarPath = assumedIntrabarPath(openPrice, highPrice, lowPrice, closePrice);
     const displayedIntrabarPath = snapExecutionPrices
@@ -851,14 +853,14 @@ export function processStrategyOrders(context: any, phase: 'open' | 'close' = 'o
                     : rawOhlc;
                 fillPrice = Math.min(clampOhlc.high, Math.max(clampOhlc.low, fillPrice));
             }
-            // On the proved stock surface, executions recorded on the
-            // nearest mintick after slippage are MARKET fills and OHLC-GAP
-            // fills (stop filled at the open / open tick / marketable at
-            // submission). An ordinary intrabar stop crossing keeps its
-            // trigger level — it is not an execution snap. Limit fills (an
-            // activated stop-limit is a limit by this point) retain their
-            // placement semantics.
-            if (snapExecutionPrices && gapExecution) {
+            // On the proved stock and crypto surfaces, executions recorded
+            // on the nearest mintick after slippage are MARKET fills and
+            // OHLC-GAP fills (stop filled at the open / open tick /
+            // marketable at submission). An ordinary intrabar stop crossing
+            // keeps its trigger level — it is not an execution snap. Limit
+            // fills (an activated stop-limit is a limit by this point) retain
+            // their placement semantics.
+            if (snapExecutionFills && (gapExecution || order.type === 'market')) {
                 fillPrice = snapExecutionPrice(fillPrice, mintick);
             }
 
@@ -2054,7 +2056,9 @@ export function processExitOrders(
     const rawClosePrice = rawOhlc.close;
     const currentTime = Series.from(context.data.openTime).get(0);
     const mintick = context.pine?.syminfo?.mintick ?? 0.01;
-    const snapExecutionPrices = context.pine?.syminfo?.type === 'stock';
+    const assetType = context.pine?.syminfo?.type;
+    const snapExecutionPrices = assetType === 'stock';
+    const snapExecutionFills = snapExecutionPrices || assetType === 'crypto' || assetType === 'spot';
     const displayedOhlc = snapExecutionPrices ? snapDisplayOhlc(rawOhlc, mintick) : rawOhlc;
     const { open: openPrice, high: highPrice, low: lowPrice, close: closePrice } = displayedOhlc;
     const cofTickPrice = cofState
@@ -2823,11 +2827,11 @@ export function processExitOrders(
         const nominalFillPrice = event.kind === 'market' || event.kind === 'profit'
             ? event.price
             : applySlippage(context, -event.direction, event.price);
-        // Market, close-phase, and OHLC-gap executions on the proved stock
-        // surface snap after slippage. Other asset classes retain their prior
+        // Market, close-phase, and OHLC-gap executions on the stock and crypto
+        // surfaces snap after slippage. Other asset classes retain their prior
         // execution representation until an equivalent oracle proves this
         // rule there.
-        const fillPrice = snapExecutionPrices
+        const fillPrice = snapExecutionFills
             && (event.kind === 'market' || event.gap === true || event.atClose === true)
             ? snapExecutionPrice(nominalFillPrice, mintick)
             : nominalFillPrice;

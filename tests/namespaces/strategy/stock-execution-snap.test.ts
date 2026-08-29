@@ -169,12 +169,12 @@ describe('stock execution snap — market and open-gap fills snap, intrabar stop
         expect(halfTick.context.strategy.opentrades[0].entry_price).toBe(19.66);
     });
 
-    it('NON-stock is unchanged: market open keeps its raw value', () => {
-        const context = makeContext({}, 'crypto');
+    it('NON-crypto/non-stock is unchanged: market open keeps its raw value', () => {
+        const context = makeContext({}, 'forex');
         entry(context)('M', 'long');
         setBar(context, 1, 101.037, 102, 100.5, 101.5);
         expect(processStrategyOrders(context)).toBe(1);
-        expect(context.strategy.opentrades[0].entry_price).toBe(101.037); // no snap on crypto
+        expect(context.strategy.opentrades[0].entry_price).toBe(101.037); // no snap on forex
     });
 
     it('NON-stock is unchanged: intrabar off-grid stop keeps its trigger', () => {
