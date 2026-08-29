@@ -1529,6 +1529,15 @@ export function closePartialPosition(context: any, qtyToClose: number, exitPrice
 
         const tradeQty = Math.abs(trade.size);
         const qtyClosing = Math.min(tradeQty, remainingQty);
+        // Discard only known-step fills whose residual is ULP-scale noise.
+        if (
+            quantizeToQtyStep(context, qtyClosing) === 0
+            && qtyClosing <= 16 * Number.EPSILON * Math.max(1, Math.abs(qtyToClose))
+        ) {
+            strategy.opentrades.push(trade);
+            remainingQty = 0;
+            continue;
+        }
         const tradeDirection = Math.sign(trade.size);
 
         const emitClosedRows = (qtyClosed: number) => {
