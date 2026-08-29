@@ -928,6 +928,16 @@ export function processStrategyOrders(context: any, phase: 'open' | 'close' = 'o
                     const reversing = oldSign !== 0 && oldSign !== direction;
                     order.qty = reversing ? Math.abs(oldSize) + order._base_qty : order._base_qty;
                 }
+                // VIN-1858: an inter-bar reversal keeps its requested base
+                // size while pending, not the close leg from placement time.
+                // If another order has made the live position flat or put it
+                // on the same side before this order fills, its stale close
+                // leg is no longer needed. Keep the original quantity while
+                // the position is still opposite: that preserves the
+                // documented deferred margin-call overshoot behavior.
+                if (order._isReversalEntry && order._base_qty !== undefined && !isReversal) {
+                    order.qty = order._base_qty;
+                }
                 // VIN-103: never open a zero-size lot. A COF percent_of_equity
                 // resize can shrink the fill qty to 0 (equity moved between
                 // placement and fill); TV does not book such fills. Orders

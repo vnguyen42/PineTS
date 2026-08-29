@@ -178,7 +178,14 @@ export function entry(context: any) {
         // combination, so its correct close-evaluation semantics cannot be
         // decided; the config guard is empirical, not a stated rule.
         const cofMode = strategy.config.calc_on_order_fills === true;
-        const qtySourceSize = !cofMode && pendingIndex >= 0 && !replacesPendingGroup
+        // A pending order from an earlier bar has not filled before this
+        // refresh. Projecting it would make an inter-bar reversal appear
+        // close-only (1858). The projection is only valid for a contiguous
+        // same-bar replacement, where the replaced market order is ahead in
+        // the queue and will fill before this call.
+        const pendingIsSameBar = pendingIndex >= 0
+            && strategy.pending_orders[pendingIndex].bar === context.idx;
+        const qtySourceSize = !cofMode && pendingIndex >= 0 && !replacesPendingGroup && pendingIsSameBar
             ? currentSize + parseDirection(strategy.pending_orders[pendingIndex].direction) * strategy.pending_orders[pendingIndex].qty
             : currentSize;
 

@@ -61,6 +61,9 @@ const NAMED_ARGS_PARAM_ORDER: Record<string, string[]> = {
     'color.new': ['color', 'transp'],
     'color.rgb': ['red', 'green', 'blue', 'transp'],
 };
+const NAMED_ARGS_BARE_PARAM_ORDER: Record<string, string[]> = {
+    nz: ['source', 'replacement'],
+};
 
 
 /**
@@ -2155,14 +2158,53 @@ export function transformCallExpression(node: any, scopeManager: ScopeManager, n
     }
     // Check if this is a regular function call (not a namespace method)
     else if (node.callee && node.callee.type === 'Identifier') {
-        // Transform arguments using $.param
-        node.arguments = node.arguments.map((arg: any) => {
-            // If argument is already a param call, don't wrap it again
-            if (arg._isParamCall) {
-                return arg;
+        const namedParams = NAMED_ARGS_BARE_PARAM_ORDER[node.callee.name];
+        if (namedParams && node.arguments.some((a) => a.type === 'ObjectExpression')) {
+            // Named-args bag (the parser collects ALL named args into one
+            // trailing ObjectExpression). Expand it into positional slots in
+            // Pine parameter order, merging with positional args.
+            const bagIndex = node.arguments.findIndex((a) => a.type === 'ObjectExpression');
+            const bag = node.arguments[bagIndex];
+            const positionals = node.arguments.filter((_, i) => i !== bagIndex);
+            const slots = new Array(namedParams.length);
+            for (const prop of bag.properties) {
+                if (prop?.key?.type !== 'Identifier') continue;
+                const idx = namedParams.indexOf(prop.key.name);
+                if (idx >= 0 && slots[idx] === undefined) slots[idx] = prop.value;
             }
-            return transformFunctionArgument(arg, CONTEXT_NAME, scopeManager);
-        });
+            let slotIdx = 0;
+            const extra = [];
+            for (const pos of positionals) {
+                while (slotIdx < slots.length && slots[slotIdx] !== undefined) slotIdx++;
+                if (slotIdx < slots.length) {
+                    slots[slotIdx] = pos;
+                    slotIdx++;
+                } else {
+                    extra.push(pos);
+                }
+            }
+            const newArgs = [];
+            for (const slot of slots) {
+                if (slot === undefined) {
+                    newArgs.push(UNDEFINED_ARG);
+                } else if (slot._isParamCall) {
+                    newArgs.push(slot);
+                } else {
+                    newArgs.push(transformFunctionArgument(slot, CONTEXT_NAME, scopeManager));
+                }
+            }
+            for (const e of extra) newArgs.push(e);
+            node.arguments = newArgs;
+        } else {
+            // Transform arguments using $.param
+            node.arguments = node.arguments.map((arg: any) => {
+                // If argument is already a param call, don't wrap it again
+                if (arg._isParamCall) {
+                    return arg;
+                }
+                return transformFunctionArgument(arg, CONTEXT_NAME, scopeManager);
+            });
+        }
 
         // Inject unique call ID for the function call only if it is a user-defined function
         // Built-in functions (like na, nz, bool) are context-bound and should not receive a call ID
