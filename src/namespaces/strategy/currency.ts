@@ -59,7 +59,8 @@ function previousDailyClose(context: any, pair: string, timeMs: number): number 
 
 function resolveConversion(
     context: any,
-    timeMs: number
+    timeMs: number,
+    warnWhenNoRate = true
 ): { factor: number; kind: 'same' | 'converted' | 'noRate' } {
     const symCur = context.pine?.syminfo?.currency;
     const acctCur = context.strategy?.account_currency ?? 'USD';
@@ -69,7 +70,7 @@ function resolveConversion(
     if (close !== undefined && Number.isFinite(close) && close !== 0) {
         return { factor: close, kind: 'converted' };
     }
-    warnOnce(context, pair);
+    if (warnWhenNoRate) warnOnce(context, pair);
     return { factor: 1, kind: 'noRate' };
 }
 
@@ -93,6 +94,23 @@ export function convertSymbolToAccount(context: any, value: number, timeMs: numb
     const { factor, kind } = resolveConversion(context, timeMs);
     if (kind === 'noRate' && noRateFallback === 'na') return NaN;
     return value * factor; // symbol USDT → account USD via close
+}
+
+/**
+ * VIN-136 — the ACCOUNT-currency conversion RESIDUAL of a symbol-currency
+ * amount: `convertSymbolToAccount(value) − value`, i.e. what the account
+ * currency adds to the raw symbol figure. Used by the percent_of_equity
+ * sizing equity, which TradingView composes in the account currency while
+ * the ledger keeps the symbol currency.
+ *
+ * Deliberately SILENT when no rate series is available: the residual is then
+ * exactly 0, so the caller behaves exactly as before the conversion existed
+ * and a "missing series" warning would be misinformation (the corpus scan,
+ * the witnesses and diff-engine provide no series).
+ */
+export function symbolToAccountResidual(context: any, value: number, timeMs: number): number {
+    const { factor } = resolveConversion(context, timeMs, false);
+    return value * factor - value;
 }
 
 /**

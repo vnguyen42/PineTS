@@ -118,7 +118,7 @@ describe('strategy percent_of_equity quantity sizing (VIN-89)', () => {
 });
 
 describe('strategy percent_of_equity quantity sizing with calc_on_order_fills', () => {
-    it('recomputes the fill quantity with the same reserve and five-decimal formula', () => {
+    it('fills the placement quantity instead of recomputing it at the fill price (VIN-C, 1643/2673)', () => {
         const context = makeContext({
             initial_capital: 10000,
             calc_on_order_fills: true,
@@ -139,7 +139,9 @@ describe('strategy percent_of_equity quantity sizing with calc_on_order_fills', 
         context.data.openTime = new Series([0, 86_400_000]);
 
         expect(processStrategyOrders(context)).toBe(1);
-        expect(context.strategy.opentrades[0].size).toBe(8.33166);
+        // The fork used to re-derive here (10000 × 10% / (120 × 1.0002) =
+        // 8.33166); TradingView locks the quantity when the order is created.
+        expect(context.strategy.opentrades[0].size).toBe(9.998);
     });
 });
 
@@ -241,7 +243,7 @@ describe('strategy percent_of_equity provider qty-step truncation (VIN-95)', () 
         expect(calculateOrderQty(invalid, undefined, 1, 100)).toBeNaN();
     });
 
-    it('COF reversal with a fill-time quantized-zero base cancels without closing the position', () => {
+    it('COF reversal keeps its PLACEMENT base when the fill price moves (VIN-C, 1643/2673)', () => {
         const context = makeContext({
             initial_capital: 1000,
             calc_on_order_fills: true,
@@ -261,8 +263,11 @@ describe('strategy percent_of_equity provider qty-step truncation (VIN-95)', () 
         entry(context)('S', 'short');
         expect(context.strategy.pending_orders[0].qty).toBe(2);
 
-        // At the next fill the price doubles, so the recalculated base is
-        // 0.5 share and quantizes to zero. The entire reversal must cancel.
+        // The fill price then doubles. The fork used to re-derive the base
+        // there (0.5 share → quantized to 0 → the whole reversal cancelled);
+        // TradingView locked the base at placement, so the reversal executes
+        // with its placement quantity. A base that quantizes to 0 is refused
+        // at SUBMISSION instead (see the entry-submission case below).
         context.idx = 1;
         context.data.open = new Series([100, 200]);
         context.data.high = new Series([101, 201]);
@@ -270,10 +275,9 @@ describe('strategy percent_of_equity provider qty-step truncation (VIN-95)', () 
         context.data.close = new Series([100, 200]);
         context.data.openTime = new Series([0, 86_400_000]);
 
-        expect(processStrategyOrders(context)).toBe(0);
-        expect(context.strategy.position_size).toBe(1);
-        expect(context.strategy.opentrades).toHaveLength(1);
-        expect(context.strategy.closedtrades).toHaveLength(0);
+        expect(processStrategyOrders(context)).toBe(1);
+        expect(context.strategy.position_size).toBe(-1);
+        expect(context.strategy.closedtrades).toHaveLength(1);
         expect(context.strategy.pending_orders).toHaveLength(0);
     });
     it('keeps positive-base and explicit-qty reversals intact', () => {
@@ -346,7 +350,7 @@ describe('strategy percent_of_equity provider qty-step truncation (VIN-95)', () 
         expect(context.strategy.position_size).toBe(0);
     });
 
-    it('COF fill-time resize applies the same qty-step truncation', () => {
+    it('the COF placement quantity carries the qty-step truncation to the fill (VIN-C)', () => {
         const context = makeContext({
             initial_capital: 10000,
             calc_on_order_fills: true,
@@ -368,9 +372,10 @@ describe('strategy percent_of_equity provider qty-step truncation (VIN-95)', () 
         context.data.close = new Series([100, 120]);
         context.data.openTime = new Series([0, 86_400_000]);
 
-        // Fill-time resize: 10% of 10000 = 1000 / 120 = 8.33 shares → 8.
+        // The step-truncated placement quantity fills unchanged (the removed
+        // fill-time resize gave 1000 / 120 = 8.33 → 8).
         expect(processStrategyOrders(context)).toBe(1);
-        expect(context.strategy.opentrades[0].size).toBe(8);
+        expect(context.strategy.opentrades[0].size).toBe(9);
     });
 
     it('missing qtyStep keeps fractional percent sizing; cash/fixed semantics unchanged', () => {
@@ -429,7 +434,7 @@ describe('strategy qty=0 orders are never submitted (VIN-103)', () => {
         expect(orderContext.strategy.pending_orders).toHaveLength(0);
     });
 
-    it('a COF percent_of_equity RESIZE that shrinks the fill qty to 0 cancels the order instead of opening a zero-size lot', () => {
+    it('a COF equity collapse between placement and fill no longer resizes the order (VIN-C) — the zero guard lives at submission', () => {
         const context = makeContext({
             initial_capital: 10000,
             calc_on_order_fills: true,
@@ -440,11 +445,11 @@ describe('strategy qty=0 orders are never submitted (VIN-103)', () => {
         entry(context)('L', 'long');
         expect(context.strategy.pending_orders[0].qty).toBe(10);
 
-        // By fill time the account has collapsed (realized losses) so the
-        // five-decimal equity sizing truncates to 0: equity = 10000 +
-        // netprofit(-9999.995) = 0.005 → baseQty = floor5(0.005×10% / 100)
-        // = 0. TV books no such fill; the order must be cancelled, not
-        // opened as a size-0 lot.
+        // The account then collapses (realized losses): the removed fill-time
+        // resize truncated the base to 0 and cancelled the order. TV locks the
+        // quantity when the order is created, so the placement size fills; a
+        // quantity that truncates to 0 is refused at SUBMISSION instead (first
+        // case of this describe).
         context.idx = 1;
         context.data.open = new Series([100, 100]);
         context.data.high = new Series([101, 101]);
@@ -453,9 +458,9 @@ describe('strategy qty=0 orders are never submitted (VIN-103)', () => {
         context.data.openTime = new Series([0, 86_400_000]);
         context.strategy.netprofit = -9999.995;
 
-        expect(processStrategyOrders(context)).toBe(0);
-        expect(context.strategy.opentrades).toHaveLength(0);
-        expect(context.strategy.position_size).toBe(0);
+        expect(processStrategyOrders(context)).toBe(1);
+        expect(context.strategy.opentrades).toHaveLength(1);
+        expect(context.strategy.position_size).toBe(10);
         expect(context.strategy.pending_orders).toHaveLength(0);
     });
 });
@@ -546,7 +551,7 @@ describe('strategy percent_of_equity pointvalue sizing (VIN-2205)', () => {
         expect(calculateOrderQty(noStep, undefined, 1, 74.23)).toBe(13.47164);
     });
 
-    it('shares the pointvalue notional across placement, COF fill resize, and strategy.default_entry_qty', () => {
+    it('shares the pointvalue notional across placement and strategy.default_entry_qty, and freezes it to the fill (VIN-C)', () => {
         const context = makeContext({
             initial_capital: 1_000_000,
             calc_on_order_fills: true,
@@ -563,9 +568,8 @@ describe('strategy percent_of_equity pointvalue sizing (VIN-2205)', () => {
         // strategy.default_entry_qty resolves the same pointvalue notional.
         expect(default_entry_qty(context)(100)).toBe(10);
 
-        // COF fill at 125: floor(1_000_000 / (125 × 1000)) = 8 — the fill
-        // resize re-derives at fill-time equity and fill price through the
-        // same central calculation.
+        // COF fill at 125: the placement contract count fills unchanged (the
+        // removed fill resize gave floor(1_000_000 / (125 × 1000)) = 8).
         context.idx = 1;
         context.data.open = new Series([100, 125]);
         context.data.high = new Series([101, 126]);
@@ -574,8 +578,8 @@ describe('strategy percent_of_equity pointvalue sizing (VIN-2205)', () => {
         context.data.openTime = new Series([0, 86_400_000]);
 
         expect(processStrategyOrders(context)).toBe(1);
-        expect(context.strategy.opentrades[0].size).toBe(8);
-        expect(context.strategy.position_size).toBe(8);
+        expect(context.strategy.opentrades[0].size).toBe(10);
+        expect(context.strategy.position_size).toBe(10);
     });
 
     it('leaves pointvalue-1 instruments (stocks/crypto) on the established notional', () => {

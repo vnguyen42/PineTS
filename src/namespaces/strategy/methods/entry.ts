@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright (C) 2026 LuxAlgo
 
-import { calculateOrderQty, normalizeOrderLevel, parseDirection, parseEntryDirection, wouldExceedPyramiding, roundToMintick } from '../utils';
+import { calculateOrderQty, cofCurrentTick, cryptoMarketSizingPrice, normalizeOrderLevel, parseDirection, parseEntryDirection, wouldExceedPyramiding, roundToMintick } from '../utils';
 import { Order } from '../types';
 import { Series } from '../../../Series';
 import { parseArgsForPineParams } from '../../utils';
@@ -193,16 +193,30 @@ export function entry(context: any) {
         // current position), Pine ADDS the absolute current position to the
         // requested qty so that one market order both flattens the prior
         // position AND opens a new one of the requested qty.
-        const currentPrice = stopValue === undefined
-            && limitValue === undefined
-            && context.strategy._cof
-            ? context.strategy._cof.ticks[Math.min(context.strategy._cof.pass, context.strategy._cof.ticks.length - 1)]
-            : Series.from(context.data.close).get(0);
+        let defaultQtyType = strategy.config.default_qty_type ?? 'fixed';
+        if (typeof defaultQtyType === 'function') defaultQtyType = (defaultQtyType as Function)();
+        // A MARKET order created by a live calc_on_order_fills recalculation
+        // is created — and therefore sized (VIN-C) — at the assumed intrabar
+        // tick that recalculation stands on; every other placement uses the
+        // signal bar's close.
+        const cofTick = stopValue === undefined && limitValue === undefined
+            ? cofCurrentTick(strategy)
+            : undefined;
+        const currentPrice = cofTick !== undefined ? cofTick : Series.from(context.data.close).get(0);
+        // VIN-B (1917/2594/2701): a DEFAULT percent_of_equity MARKET entry on
+        // a crypto/spot symbol is sized on the displayed reference built by
+        // cryptoMarketSizingPrice — signal close + directional slippage,
+        // quantized to the displayed tick. A declared limit/stop level keeps
+        // its raw VIN-89 sizing price, and stock / COF references are
+        // untouched (the helper is a no-op outside its scope).
+        const usesDefaultPercentSizing = qtyValue === undefined && defaultQtyType === 'percent_of_equity';
         const sizingPrice = stopValue !== undefined
             ? stopValue
             : limitValue !== undefined
               ? limitValue
-              : currentPrice;
+              : usesDefaultPercentSizing
+                ? cryptoMarketSizingPrice(context, dir, currentPrice)
+                : currentPrice;
         const baseQty = calculateOrderQty(context, qtyValue, dir, sizingPrice);
 
         // VIN-103: TV never submits an order whose calculated quantity is
@@ -212,17 +226,6 @@ export function entry(context: any) {
         // mis-close the position. Drop the order entirely — no pending
         // order, no fill, no zero-size lot. `!(x > 0)` also refuses NaN.
         if (!(baseQty > 0)) return;
-
-        // Flag non-stock orders whose qty came from the strategy() default
-        // under percent_of_equity (no explicit qty argument). Stock COF
-        // orders are sized from the current assumed tick above, which is
-        // already the fill-time/displayed reference TV uses.
-        let defaultQtyType = strategy.config.default_qty_type ?? 'fixed';
-        if (typeof defaultQtyType === 'function') defaultQtyType = (defaultQtyType as Function)();
-        const qtyFromDefaultEquity =
-            qtyValue === undefined
-            && defaultQtyType === 'percent_of_equity'
-            && context.pine?.syminfo?.type !== 'stock';
 
         const isReversal = qtySourceSize !== 0 && Math.sign(qtySourceSize) !== dir;
         const totalQty = isReversal ? Math.abs(qtySourceSize) + baseQty : baseQty;
@@ -301,7 +304,6 @@ export function entry(context: any) {
             // overshoot as two separate lots (xlsx 2021-10-02: 5 +
             // 0.263108 longs at the same fill).
             _base_qty: baseQty,
-            _qty_from_default_equity: qtyFromDefaultEquity,
         } as any;
 
         if (replacesPendingGroup) {

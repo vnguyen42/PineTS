@@ -4,7 +4,7 @@
 import { Order, StrategyState, Trade } from './types';
 import { Series } from '../../Series';
 import { defaultStrategyMargin } from './defaults';
-import { convertAccountToSymbol, currentBarTimeMs } from './currency';
+import { convertAccountToSymbol, currentBarTimeMs, symbolToAccountResidual } from './currency';
 
 /**
  * Parse strategy() function arguments
@@ -403,6 +403,62 @@ function quantizeToQtyStep(context: any, rawQty: number): number | undefined {
 }
 
 /**
+ * VIN-B (2594/1917/2096/2701): scope of the percent_of_equity CRYPTO sizing
+ * reference. TradingView sizes on the DISPLAYED price of an exchange-traded
+ * crypto/spot symbol, exactly like the fill path already does for every
+ * crypto/spot symbol (VIN-1592, snapExecutionFills below).
+ *
+ * Excluded: symbols whose syminfo is FABRICATED by a host file provider
+ * (`prefix` empty or 'FILE'). That exclusion is empirical, not a stated TV
+ * rule: the file-fed oracle witness 2808 (scripts/witness-run.mjs, prefix
+ * 'FILE') has a certified fork baseline built without this sizing reference,
+ * and no TV capture exists for a file-fed symbol to decide it. Perpetuals
+ * resolve as `type: 'futures'` and stay on the raw-price path.
+ */
+function isCryptoSpotSizingSymbol(context: any): boolean {
+    const type = context.pine?.syminfo?.type;
+    if (type !== 'crypto' && type !== 'spot') return false;
+    const prefix = String(context.pine?.syminfo?.prefix ?? '').toUpperCase();
+    return prefix !== '' && prefix !== 'FILE';
+}
+
+/**
+ * VIN-B: sizing reference of a DEFAULT percent_of_equity MARKET order on a
+ * crypto/spot symbol — the signal close moved by the configured slippage
+ * (direction-adjusted: 2701 OKX:CROUSDT fits 225/226 shorts with the minus
+ * sign, 177/405 with a always-positive slippage) and quantized to the
+ * DISPLAYED tick with Math.round on the binary quotient
+ * (2594: 15.5925/0.001 = 15592.499999999998 → 15.592, 311/311).
+ *
+ * Only the MARKET reference is transformed: a declared limit/stop level
+ * remains the raw sizing price proved by VIN-89, and calc_on_order_fills
+ * keeps sizing from its assumed tick (famille C, unchanged).
+ *
+ * ASYMMETRY vs the stock path (undecided by the data): the stock branch of
+ * calculateOrderQty re-marks the open position at the displayed price before
+ * composing the sizing equity, the crypto path does not. Every measured
+ * entry of 2594/1917/2096/2701 has openprofit = 0 (no overlapping position),
+ * so no capture discriminates the two readings.
+ */
+export function cryptoMarketSizingPrice(context: any, direction: number, marketPrice: number): number {
+    if (context.strategy?._cof || !isCryptoSpotSizingSymbol(context)) return marketPrice;
+    return snapDisplayPrice(applySlippage(context, direction, marketPrice), context.pine?.syminfo?.mintick ?? 0);
+}
+
+/**
+ * Price of the assumed intrabar tick a live calc_on_order_fills recalculation
+ * is standing on, or `undefined` outside the COF intrabar sequencing (the
+ * ordinary bar-close evaluation included — the execution loop clears `_cof`
+ * before it). Single source of the "current tick" notion shared by the order
+ * placement reference (entry) and the sizing equity below.
+ */
+export function cofCurrentTick(strategy: StrategyState): number | undefined {
+    const cof = strategy._cof;
+    if (cof == null) return undefined;
+    return cof.ticks[Math.min(cof.pass, cof.ticks.length - 1)];
+}
+
+/**
  * Calculate order quantity based on strategy configuration
  */
 export function calculateOrderQty(context: any, specifiedQty: number | undefined, direction: number, fillPrice: number): number {
@@ -481,9 +537,9 @@ export function calculateOrderQty(context: any, specifiedQty: number | undefined
             // and previous-daily temporal convention as the cash branch
             // (VIN-113); without a rate series provided by the host the
             // notional passes through unconverted, preserving the
-            // pre-VIN-134 corpus behavior. The calc_on_order_fills fill
-            // resize and strategy.default_entry_qty share this function, so
-            // they convert through the same single point.
+            // pre-VIN-134 corpus behavior. Every placement path and
+            // strategy.default_entry_qty share this function, so they convert
+            // through the same single point.
             // VIN-130: TradingView sizes percent_of_equity on the DISPLAYED
             // symbol prices — stock references use the displayed nearest tick
             // with the canonical magnitude-relative pre-snap tolerance, then
@@ -491,15 +547,67 @@ export function calculateOrderQty(context: any, specifiedQty: number | undefined
             // from roundToMintick(), whose order-level contract remains
             // reference-directed and away from zero.
             // VIN-130: TV applies this displayed-price path to stock symbols.
-            // Non-stock paths retain the established sizing semantics
-            // (witness 2825 / crypto).
+            // VIN-B: the crypto/spot displayed reference is built by the
+            // CALLER for market orders only (cryptoMarketSizingPrice), so a
+            // declared limit/stop level keeps the raw VIN-89 sizing price.
             const stockTickSizing = context.pine?.syminfo?.type === 'stock';
             const sizingPrice = stockTickSizing
                 ? snapDisplayPrice(fillPrice, context.pine?.syminfo?.mintick ?? 0)
                 : fillPrice;
-            const sizingEquity = stockTickSizing
-                ? strategy.equity - strategy.openprofit + openProfitAt(context, sizingPrice)
+            // VIN-C (1643 BINANCE:ICPUSDT 120, 2673 same symbol 60): the price
+            // at which the OPEN position is marked inside the sizing equity is
+            // the instant the order is created, not the last markToMarket of
+            // the bar. Under a calc_on_order_fills recalculation that instant
+            // is the current assumed intrabar tick, while `strategy.equity`
+            // still carries the previous mark (processStrategyOrders marks at
+            // the bar's open, and closes it out at the bar's close). 1643 bar
+            // 2599 is the discriminating measurement: the recalculation that
+            // follows the reversal fill at the open tick 8.04 sizes on
+            // 234040.54354 (position marked AT 8.04 → openprofit 0) → qty
+            // floor3(234040.54354/8.04) = 29109.520 = TV, where the bar-close
+            // mark (8.01) gave 29001.171. Whole-ledger fit: 357/357 and
+            // 150/150 full keys.
+            // The stock branch keeps marking at its own DISPLAYED reference
+            // (VIN-130), which is that same tick quantized.
+            //
+            // ACTED CHOICE (scope, not proved by any capture): the tick mark
+            // applies to EVERY percent_of_equity sizing evaluated during a COF
+            // pass — market entries, declared limit/stop levels, strategy.order
+            // and strategy.default_entry_qty alike. The proof set covers MARKET
+            // entries only (1643/2673). Rationale: the account equity is a
+            // property of the INSTANT, not of the order type — and the sizing
+            // PRICE of those other paths is untouched (a declared level keeps
+            // its level, strategy.order keeps the signal close). A TV capture
+            // combining COF with a percent-sized limit/stop entry, or with
+            // strategy.order, is required to decide it.
+            const sizingMarkPrice = stockTickSizing ? sizingPrice : cofCurrentTick(strategy);
+            const sizingUnrealized = sizingMarkPrice !== undefined ? openProfitAt(context, sizingMarkPrice) : strategy.openprofit;
+            const sizingEquity = sizingMarkPrice !== undefined
+                ? strategy.equity - strategy.openprofit + sizingUnrealized
                 : strategy.equity;
+            const sizingTimeMs = currentBarTimeMs(context);
+            // VIN-136: TradingView composes the sizing equity in the ACCOUNT
+            // currency — each closed trade's P&L (and its commissions) is
+            // converted at the previous-daily rate of the day it is realized
+            // (VIN-113 convention), and the open position's mark-to-market is
+            // held in the account currency too, before the notional is
+            // converted back to the symbol currency below. MINIMAL SURFACE
+            // (acted choice): only the sizing equity is corrected, through the
+            // cumulated conversion residual of the realized P&L —
+            // `strategy.netprofit` and the per-trade ledger rows keep the
+            // SYMBOL currency, which is the unit the harness comparator
+            // converts itself (correcting them too would convert twice).
+            // Both terms are EXACTLY 0 without a host FX series, so the
+            // pre-VIN-113 corpus behaviour stays byte-identical.
+            // The realized part comes from the markToMarket snapshot, so the
+            // equity and its residual are always taken at the SAME instant;
+            // the stock branch (and the COF tick mark) re-derive their
+            // unrealized part exactly like `sizingEquity` does above (review M1).
+            const accountCurrencyResidual = sizingMarkPrice !== undefined
+                ? strategy._equity_account_residual
+                    - symbolToAccountResidual(context, strategy.openprofit, sizingTimeMs)
+                    + symbolToAccountResidual(context, sizingUnrealized, sizingTimeMs)
+                : strategy._equity_account_residual;
 
             const commissionRate = strategy.config.commission_type === 'percent'
                 ? (Number(strategy.config.commission_value) || 0) / 100
@@ -507,17 +615,38 @@ export function calculateOrderQty(context: any, specifiedQty: number | undefined
             const commissionReserve = strategy.config.commission_type === 'cash_per_order'
                 ? Number(strategy.config.commission_value) || 0
                 : 0;
-            const positionValue = convertAccountToSymbol(context, (sizingEquity * qtyValue) / 100 - commissionReserve, currentBarTimeMs(context), 'identity');
+            const cashPerContract = strategy.config.commission_type === 'cash_per_contract'
+                ? Number(strategy.config.commission_value) || 0
+                : 0;
+            const positionValue = convertAccountToSymbol(context, ((sizingEquity + accountCurrencyResidual) * qtyValue) / 100 - commissionReserve, sizingTimeMs, 'identity');
+            // VIN-B-2096: cash_per_contract is an amount per contract with no
+            // pointValue factor (same unit contract as computeLegCommission),
+            // so it belongs to the per-contract cost of the denominator:
+            // rawQty = N / (price + c) is directly proved on 2096 SEIUSDT
+            // (1000/(0.1501+0.1) = 3998.400, 190/190).
+            // TWO UNPROVEN EXTENSIONS, both measurement-neutral today:
+            //  - the general pointValue ≠ 1 form (no capture combines
+            //    cash_per_contract with a contract multiplier);
+            //  - the account→symbol conversion of `c`. It is dimensionally
+            //    required here (positionValue is in SYMBOL currency) but it
+            //    contradicts the VIN-136/M2 acted choice, which treats a cash
+            //    commission as an ACCOUNT-currency amount carrying no
+            //    conversion residual. Both readings coincide on every proved
+            //    target (currency=NONE → convertAccountToSymbol is identity)
+            //    and without a host FX series. A TV capture combining
+            //    cash_per_contract with a non-account symbol currency is
+            //    required to decide it.
+            const commissionPerContract = convertAccountToSymbol(context, cashPerContract, sizingTimeMs, 'identity');
             // VIN-2205: the equity notional is converted to CONTRACTS at the
             // symbol's contract multiplier. Futures price in units of
             // pointvalue × price (NYMEX:CL1! pointvalue=1000: TV computes
             // floor(1_000_000 / (74.23 × 1000)) = 13 contracts; omitting the
             // multiplier booked 13,471 → P&L −8,756,150, equity −7,756,150,
             // 1,042 trades masked). pointvalue=1 (stocks/crypto) leaves the
-            // established notional unchanged. Placement sizing, the COF fill
-            // resize and strategy.default_entry_qty all share this function.
+            // established notional unchanged. Placement sizing and
+            // strategy.default_entry_qty both share this function.
             const pointValue = context.pine?.syminfo?.pointvalue ?? 1;
-            rawQty = positionValue / (sizingPrice * pointValue * (1 + commissionRate));
+            rawQty = positionValue / (sizingPrice * pointValue * (1 + commissionRate) + commissionPerContract);
             qtyPrecision = PERCENT_QTY_PRECISION;
             // VIN-95: TV truncates percent_of_equity quantities at the same
             // instrument qty step as cash (integer shares on stocks: a 0.41
@@ -833,7 +962,7 @@ export function processStrategyOrders(context: any, phase: 'open' | 'close' = 'o
         }
 
         if (shouldFill) {
-            // Risk rules run below, after any fill-time quantity re-sizing.
+            // Risk rules run below, after the reversal close-qty adjustments.
 
             // TV applies strategy slippage to market and stop fills, but not
             // limit fills. A stop-limit becomes a limit after activation and
@@ -888,37 +1017,18 @@ export function processStrategyOrders(context: any, phase: 'open' | 'close' = 'o
                 const oldSize = strategy.position_size;
                 const oldSign = Math.sign(oldSize);
                 const isReversal = oldSign !== 0 && oldSign !== direction;
-                // calc_on_order_fills mode: TV sizes percent_of_equity default
-                // orders at FILL ("position sizes will be calculated as a
-                // percentage of the available equity when the trade opens" —
-                // Strategy properties help article). The placement-time size
-                // (equity at the placement bar's close / that close) times a
-                // higher fill open spuriously trips the margin rejection below
-                // (notional = qty × fill > equity) for orders TV accepts —
-                // observed on 2205/FLOWUSDT 4h: 3 entries rejected by the
-                // fork, filled by TV. Re-derive the qty at fill using the
-                // fill-time equity and the fill price. Explicit qty arguments
-                // and other default_qty_type modes are never re-scaled.
-                if (cof && order._qty_from_default_equity) {
-                    let qtyType = strategy.config.default_qty_type ?? 'fixed';
-                    if (typeof qtyType === 'function') qtyType = (qtyType as Function)();
-                    if (qtyType === 'percent_of_equity') {
-                        // Same sizing function as placement/default_entry_qty
-                        // (VIN-95: qty-step truncation included), evaluated at
-                        // fill-time equity and fill price.
-                        const baseQty = calculateOrderQty(context, undefined, direction, fillPrice);
-                        // A quantized-zero/non-finite default base cancels the
-                        // whole pending entry. Check before adding the old
-                        // position's close leg for a reversal: otherwise a
-                        // zero requested base would still close the position.
-                        if (!(baseQty > 0) || !Number.isFinite(baseQty)) {
-                            order.status = 'cancelled';
-                            continue;
-                        }
-                        order._base_qty = baseQty;
-                        order.qty = isReversal ? Math.abs(oldSize) + baseQty : baseQty;
-                    }
-                }
+                // VIN-C (1643, 2673): a default percent_of_equity quantity is
+                // FROZEN AT PLACEMENT under calc_on_order_fills — TradingView
+                // locks it when the order is created (equity marked at the
+                // creation instant, that instant's price as sizing price), not
+                // when it fills. The fork re-derived it at the fill price and
+                // fill-time equity, which reproduced its OWN ledger 357/357
+                // but only 246/357 of the TV ledger; freezing the placement
+                // quantity brings both targets to 357/357 and 150/150 full
+                // keys. An order genuinely created by a post-fill
+                // recalculation needs no re-derivation: it was already sized
+                // at the current tick when `entry` created it (1643 trade 161,
+                // bar 8642, open tick 10.596).
                 // VIN-110: a same-tick reversal entry was sized at placement
                 // against the position BEFORE the same-tick market-exit
                 // drain. TV re-derives the reversal at fill against the
@@ -940,17 +1050,17 @@ export function processStrategyOrders(context: any, phase: 'open' | 'close' = 'o
                 if (order._isReversalEntry && order._base_qty !== undefined && !isReversal) {
                     order.qty = order._base_qty;
                 }
-                // VIN-103: never open a zero-size lot. A COF percent_of_equity
-                // resize can shrink the fill qty to 0 (equity moved between
-                // placement and fill); TV does not book such fills. Orders
-                // whose placement qty was <= 0 were already refused at
-                // submission (entry/order).
+                // VIN-103: never open a zero-size lot. Defensive guard since
+                // VIN-C removed the fill-time resize: the submitted quantity
+                // is > 0 (refused at submission otherwise) and the reversal
+                // adjustments above only ever substitute `_base_qty`, itself
+                // > 0. It still covers a host-mutated pending order.
                 if (!(order.qty > 0)) {
                     order.status = 'cancelled';
                     continue;
                 }
-                // Risk rules are evaluated at the fill, after dynamic
-                // percent_of_equity sizing. max_position_size truncates only
+                // Risk rules are evaluated at the fill, after the reversal
+                // close-qty adjustments. max_position_size truncates only
                 // the leg that increases the absolute position; a reducing
                 // order remains at its requested quantity.
                 if (isOrderBlockedByRisk(strategy, order)) {
@@ -1340,6 +1450,18 @@ export function openTrade(
     if (entryCommission > 0) {
         strategy.netprofit -= entryCommission;
         strategy.grossloss += entryCommission;
+        // VIN-136: the account-currency sizing equity charges the entry
+        // commission at the rate of ITS OWN entry day (proved on 1841 idx104,
+        // whose TV P&L is gross×R_exit − entryComm×R_entry − exitComm×R_exit).
+        // PERCENT ONLY (review M2): a cash_per_order / cash_per_contract fee is
+        // already an ACCOUNT-currency amount (see computeLegCommission, and the
+        // cash_per_order reserve subtracted in account space in
+        // calculateOrderQty), so it carries no conversion residual. TradingView's
+        // treatment of cash commissions on a foreign-currency symbol is NOT
+        // proved by any capture — the only fitted captures are percent or 0.
+        if (commTypeOpen === 'percent') {
+            strategy._netprofit_account_residual -= symbolToAccountResidual(context, entryCommission, time);
+        }
     }
 
     // Per-trade fill-bar excursion: capture this bar's intra-bar H/L against
@@ -1572,7 +1694,18 @@ export function closePartialPosition(context: any, qtyToClose: number, exitPrice
             };
             if (closeInfo?.triggerKind === 'loss') row.max_runup = 0;
             if (closeInfo?.triggerKind === 'profit') row.max_drawdown = entryCommission;
-            strategy.netprofit += gross - exitCommission;
+            const realizedIncrement = gross - exitCommission;
+            strategy.netprofit += realizedIncrement;
+            // VIN-136: the same increment, converted at the EXIT day's rate,
+            // is what the account-currency sizing equity accumulates. The
+            // gross always converts; the exit commission only when it is a
+            // PERCENT fee (review M2 — a cash fee is already an account-currency
+            // amount, and TV's cash-on-foreign-symbol behaviour is unproved).
+            strategy._netprofit_account_residual += symbolToAccountResidual(
+                context,
+                commType === 'percent' ? realizedIncrement : gross,
+                exitTime,
+            );
             strategy.grossloss -= entryCommission;
             if (row.profit! > 0) {
                 strategy.grossprofit += row.profit!;
@@ -1694,6 +1827,13 @@ export function markToMarket(context: any, currentPrice: number): void {
     const unrealizedPnL = openProfitAt(context, currentPrice);
     strategy.openprofit = unrealizedPnL;
     strategy.equity = strategy.initial_capital + strategy.netprofit + unrealizedPnL;
+    // VIN-136: the ACCOUNT-currency residual of that same equity, snapshotted
+    // at the SAME instant (review M1) — `strategy.equity` is frozen between
+    // markToMarket calls while the realized accumulator moves at every fill,
+    // so reading the live accumulator from the sizing path would mix two
+    // instants. Exactly 0 without a host FX series.
+    strategy._equity_account_residual =
+        strategy._netprofit_account_residual + symbolToAccountResidual(context, unrealizedPnL, currentBarTimeMs(context));
 }
 
 /**
@@ -3437,6 +3577,8 @@ export function initializeStrategy(context: any, config: any): void {
         account_currency: finalConfig.currency || 'USD',
         equity: initialCapital,
         netprofit: 0,
+        _netprofit_account_residual: 0,
+        _equity_account_residual: 0,
         grossprofit: 0,
         grossloss: 0,
         openprofit: 0,

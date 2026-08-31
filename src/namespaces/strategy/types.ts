@@ -253,21 +253,12 @@ export interface Order {
     _excluded_activation_trade_ids?: string[];
     _excluded_consumed_trade_ids?: string[];
 
-    // Internal: set on `strategy.entry` orders whose qty was derived from the
-    // strategy() default (no explicit qty argument) under
-    // `default_qty_type = strategy.percent_of_equity`. With
-    // `calc_on_order_fills = true`, TV sizes percent_of_equity orders at
-    // FILL ("position sizes will be calculated as a percentage of the
-    // available equity when the trade opens" — Strategy properties help
-    // article); the engine re-derives the qty at fill for those orders (see
-    // processStrategyOrders). Explicit qty arguments are never re-scaled.
-    _qty_from_default_equity?: boolean;
-
     // Internal: ordered base size (before the reversal close-qty addition).
     // executeOrder uses it to split a reversal OVERSHOOT into its own lot
     // when a deferred close-margin-call shrank the position between queue
-    // and fill (see entry.ts). Re-derived at fill for percent_of_equity
-    // defaults in calc_on_order_fills mode.
+    // and fill (see entry.ts). Frozen at placement: VIN-C removed the
+    // calc_on_order_fills fill-time re-derivation of percent_of_equity
+    // default quantities (TV locks them when the order is created).
     _base_qty?: number;
 }
 
@@ -337,6 +328,21 @@ export interface StrategyState {
     account_currency: string;
     equity: number;
     netprofit: number; // realized only
+    // VIN-136 (internal): cumulated ACCOUNT-currency conversion residual of
+    // the realized P&L — the sum, over every increment `netprofit` received,
+    // of (increment converted at the previous-daily FX rate of the day it is
+    // realized − the increment itself): the entry commission at its own entry
+    // day (percent fees only), gross − exit commission at the exit day.
+    // `netprofit` and the ledger rows stay in the SYMBOL currency (the harness
+    // comparator converts them itself). EXACTLY 0 when no FX series is
+    // provided, so the pre-VIN-113 behaviour is untouched.
+    _netprofit_account_residual: number;
+    // VIN-136 (internal): the residual of `equity` — the realized residual
+    // above plus the open mark-to-market's residual, snapshotted BY
+    // markToMarket at the same instant as `equity` itself. This is what the
+    // percent_of_equity sizing reads, so the equity and its residual always
+    // come from the same instant. EXACTLY 0 without an FX series.
+    _equity_account_residual: number;
     grossprofit: number;
     grossloss: number;
     openprofit: number; // unrealized P&L of open positions

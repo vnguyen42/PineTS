@@ -28,10 +28,10 @@ import { Order } from '../../../src/namespaces/strategy/types';
  * The engine mirrors this with the per-bar COF loop in PineTS.class.ts
  * (process orders → re-run the script after any fill → drain same-tick market
  * exits → repeat, max 4 ticks) plus the same-bar guards lifted in
- * processStrategyOrders / processExitOrders and the fill-time sizing of
- * percent_of_equity default quantities (TV: "position sizes will be
- * calculated as a percentage of the available equity when the trade opens" —
- * Strategy properties help article).
+ * processStrategyOrders / processExitOrders. The default percent_of_equity
+ * quantity is locked when the order is CREATED (VIN-C, 1643/2673): at the
+ * current assumed tick for an order a recalculation creates, at the signal
+ * bar's close otherwise — never re-derived at the fill.
  *
  * Familles défendues par ce fichier (identification passe A_VERIFIER) :
  * - VIN-72 (calc_on_order_fills) — paramètre mort → séquençage intrabar 4 ticks (fork 6959522)
@@ -69,7 +69,6 @@ describe('strategy calc_on_order_fills — same-bar sequencing', () => {
         // Entry queued on bar 0 (fills at bar 1's open).
         entry(context)('L', 'long');
         expect(context.strategy.pending_orders.length).toBe(1);
-        expect(context.strategy.pending_orders[0]._qty_from_default_equity).toBe(false);
 
         // Bar 1: open 100, high 110, low 95, close 105 (open closer to low
         // → assumed ticks open → low → high → close).
@@ -738,7 +737,7 @@ describe('strategy calc_on_order_fills — same-bar sequencing', () => {
         expect(context.strategy.pending_orders[0]).toMatchObject({ id: 'L', type: 'stop', stop: 105, bar: 0 });
     });
 
-    it('percent_of_equity default quantity is re-sized at FILL in COF mode (TV: "when the trade opens") — and no-COF fills at placement size (v5 margin 0: no rejection)', () => {
+    it('percent_of_equity default quantity is FROZEN AT PLACEMENT in COF mode (VIN-C, 1643/2673) — exactly like the no-COF path (v5 margin 0: no rejection)', () => {
         const make = () => {
             const context = makeContext({
                 calc_on_order_fills: true,
@@ -751,10 +750,10 @@ describe('strategy calc_on_order_fills — same-bar sequencing', () => {
             entry(context)('L', 'long');
             const order = context.strategy.pending_orders[0];
             expect(order.qty).toBe(100);
-            expect(order._qty_from_default_equity).toBe(true);
-            // Fill bar opens at 11: placement qty × 11 = 1100 > equity 1000
-            // → the placement-time size would be margin-rejected. TV sizes at
-            // fill: qty = 1000 / 11 → required = 1000 → equality → fills.
+            // Fill bar opens at 11. The fork used to re-derive the quantity
+            // here (1000 / 11 = 90.90909); TV locks it when the order is
+            // created — proved on 1643/2673 (357/357 and 150/150 full keys),
+            // see percent-equity-cof-placement-freeze-1643-2673.test.ts.
             context.idx = 1;
             context.data.open = new Series([10, 11]);
             context.data.high = new Series([10, 11.5]);
@@ -768,15 +767,14 @@ describe('strategy calc_on_order_fills — same-bar sequencing', () => {
         cof.strategy._cof = { pass: 0, ticks: [11, 11.5, 10.5, 11] };
         const fills = processStrategyOrders(cof);
         expect(fills).toBe(1);
-        // floor(1000/11 × 1e6)/1e6
-        expect(cof.strategy.position_size).toBe(Math.floor((1000 / 11) * 1e6) / 1e6);
+        expect(cof.strategy.position_size).toBe(100);
 
-        // no-COF: the placement-time qty (100) fills at the open (11) →
+        // no-COF: same placement-time qty (100) filling at the open (11) →
         // notional 1100 > equity 1000. The fork's old 100%-margin default
         // rejected this entry ("notional exceeds equity"); TV's v5 default
         // margin is 0 (no margin requirement) so the entry fills at the
-        // placement-time size — the fork divergence is gone. The COF-vs-noCOF
-        // contrast (fill-time re-size vs placement-time size) still holds.
+        // placement-time size — the fork divergence is gone. COF and no-COF
+        // now share the placement-time size (VIN-C).
         // VIN-74 — gate de marge : la jambe no-COF ci-dessous (notionnel 1100 >
         // equity 1000) ne remplit QUE si le défaut margin v5 = 0 (fork 792f0f0).
         const plain = makeContext({
