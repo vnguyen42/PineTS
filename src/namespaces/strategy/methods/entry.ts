@@ -45,6 +45,30 @@ const ENTRY_ARGS_TYPES = {
     when: 'series',
 };
 
+/**
+ * A market exit order queued on the CURRENT bar by strategy.close() /
+ * strategy.close_all(): pending, bound to call-time trade IDs, and free of
+ * conditional exit legs (profit/loss/limit/stop/trail). Conditional
+ * strategy.exit() orders carry at least one of those legs, and a stale
+ * close from an earlier bar has o.bar !== barIdx — neither qualifies.
+ */
+function isPendingMarketClose(o: Order, barIdx: number): boolean {
+    return (
+        o.status === 'pending'
+        && o.bar === barIdx
+        && (o.category ?? 'entry') === 'exit'
+        && o.type === 'market'
+        && o.profit === undefined
+        && o.loss === undefined
+        && o.limit === undefined
+        && o.stop === undefined
+        && o.trail_price === undefined
+        && o.trail_points === undefined
+        && Array.isArray(o._intended_trade_ids)
+        && o._intended_trade_ids.length > 0
+    );
+}
+
 export function entry(context: any) {
     return (...args: any[]) => {
         if (!context.strategy) {
@@ -140,10 +164,110 @@ export function entry(context: any) {
             }
         }
 
+        // A same-bar close()/close_all() is filled after market entries, but
+        // its snapshot still covers only the call-time trades. Project those
+        // trades for entry classification and pyramiding without changing the
+        // live book. calc_on_order_fills is deliberately excluded: its
+        // same-tick recalculations have their own fill-time state (2027).
+        let projectedSameSideTradeCount: number | undefined;
+        if (strategy.config.calc_on_order_fills !== true) {
+            let hasPendingMarketClose = false;
+            for (const o of strategy.pending_orders) {
+                if (isPendingMarketClose(o, context.idx)) {
+                    hasPendingMarketClose = true;
+                    break;
+                }
+            }
+
+            if (hasPendingMarketClose) {
+                const projectedTrades = strategy.opentrades.map((trade) => ({
+                    id: trade.id,
+                    entry_id: trade.entry_id,
+                    size: trade.size,
+                }));
+
+                // Entries fill before exits, matching processStrategyOrders →
+                // processExitOrders. Keep the replaced same-ID order out of
+                // the projection, as currentSize does above.
+                for (let i = 0; i < strategy.pending_orders.length; i++) {
+                    if (i === pendingIndex) continue;
+                    const o = strategy.pending_orders[i];
+                    if (o.bar !== context.idx || o.category !== 'entry' || o.type !== 'market') continue;
+
+                    const direction = parseDirection(o.direction);
+                    let remainingQty = o.qty;
+                    for (const trade of projectedTrades) {
+                        if (remainingQty <= 0 || Math.sign(trade.size) === 0 || Math.sign(trade.size) === direction) continue;
+                        const tradeQty = Math.abs(trade.size);
+                        const qtyToClose = Math.min(tradeQty, remainingQty);
+                        trade.size -= Math.sign(trade.size) * qtyToClose;
+                        remainingQty -= qtyToClose;
+                    }
+                    if (remainingQty > 0) {
+                        projectedTrades.push({
+                            id: `__pending_entry_${i}`,
+                            entry_id: o.id,
+                            size: direction * remainingQty,
+                        });
+                    }
+                }
+
+                // Apply each close snapshot once. A quantity smaller than a
+                // lot leaves that activation alive; only a fully consumed lot
+                // releases a pyramiding slot.
+                for (const o of strategy.pending_orders) {
+                    if (!isPendingMarketClose(o, context.idx)) continue;
+
+                    const intendedTradeIds = o._intended_trade_ids;
+                    const matchingTrades = projectedTrades.filter(
+                        (trade) =>
+                            trade.size !== 0
+                            && intendedTradeIds.includes(trade.id)
+                            && (!o.from_entry || trade.entry_id === o.from_entry),
+                    );
+                    if (Math.sign(matchingTrades[0]?.size ?? 0) !== dir) continue;
+                    const matchingQty = matchingTrades.reduce((sum, trade) => sum + Math.abs(trade.size), 0);
+                    let qtyToClose = matchingQty;
+                    if (o._explicit_qty_cap || (o.qty && o.qty > 0)) {
+                        qtyToClose = Math.min(o.qty, matchingQty);
+                    } else if (typeof o.qty_percent === 'number' && o.qty_percent > 0) {
+                        qtyToClose = matchingQty * (o.qty_percent / 100);
+                    }
+
+                    for (const trade of matchingTrades) {
+                        if (qtyToClose <= 0) break;
+                        const tradeQty = Math.abs(trade.size);
+                        const qtyClosed = Math.min(tradeQty, qtyToClose);
+                        trade.size = qtyClosed >= tradeQty - 1e-9
+                            ? 0
+                            : trade.size - Math.sign(trade.size) * qtyClosed;
+                        qtyToClose -= qtyClosed;
+                    }
+                }
+
+                currentSize = projectedTrades.reduce((sum, trade) => sum + trade.size, 0);
+                // The projected pyramiding count covers ONLY the trades
+                // derived from opentrades (after the same-bar closes). The
+                // synthetic __pending_entry_* rows added by same-bar market
+                // ENTRY orders are not open activations — the parent counted
+                // only opentrades — so they must not consume a pyramiding
+                // slot; currentSize keeps them for the reversal/add
+                // classification above.
+                projectedSameSideTradeCount = projectedTrades.reduce(
+                    (count, trade) => count
+                        + (trade.id.startsWith('__pending_entry_') ? 0 : Math.sign(trade.size) === dir ? 1 : 0),
+                    0,
+                );
+            }
+        }
+
         // Pyramiding cap: only enforced when ADDING to a same-direction position
         // (not when opening from flat or reversing). Pine's semantic.
         const isAddingSameSide = Math.sign(currentSize) === dir && currentSize !== 0;
-        if (isAddingSameSide && pendingIndex < 0 && wouldExceedPyramiding(strategy, dir)) {
+        const exceedsPyramiding = projectedSameSideTradeCount === undefined
+            ? wouldExceedPyramiding(strategy, dir)
+            : projectedSameSideTradeCount >= (strategy.config.pyramiding ?? 1);
+        if (isAddingSameSide && pendingIndex < 0 && exceedsPyramiding) {
             return; // no-op
         }
 
