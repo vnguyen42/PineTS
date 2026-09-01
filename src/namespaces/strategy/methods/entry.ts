@@ -225,7 +225,7 @@ export function entry(context: any) {
                             && intendedTradeIds.includes(trade.id)
                             && (!o.from_entry || trade.entry_id === o.from_entry),
                     );
-                    if (Math.sign(matchingTrades[0]?.size ?? 0) !== dir) continue;
+                    if (Math.sign(matchingTrades[0]?.size ?? 0) !== dir && stopValue === undefined) continue;
                     const matchingQty = matchingTrades.reduce((sum, trade) => sum + Math.abs(trade.size), 0);
                     let qtyToClose = matchingQty;
                     if (o._explicit_qty_cap || (o.qty && o.qty > 0)) {
