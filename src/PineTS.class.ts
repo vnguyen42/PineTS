@@ -1307,6 +1307,9 @@ export class PineTS {
                     // the raw H/L).
                     finalizeStrategyBar(context);
                 } else {
+                    // Deferred market closes execute at the open before any
+                    // price-based candidate later on the assumed path.
+                    processExitOrders(context, 'intrabar', true);
                     processStrategyOrders(context);
                     // Margin checkpoints along the intra-bar path (TV broker
                     // emulator): first at the OPEN right after entries fill;

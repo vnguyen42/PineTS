@@ -4,13 +4,15 @@
 import { Order } from '../types';
 import { Series } from '../../../Series';
 import { parseArgsForPineParams } from '../../utils';
+import { resolveWhenGate } from '../utils';
 
 /**
  * Close all trades opened by entries with the given id at market.
  *
  * Pine signature:
- *   strategy.close(id, comment, qty, qty_percent, alert_message,
- *                  immediately, disable_alert) → void
+ *   v4: strategy.close(id, when, qty, qty_percent, comment, ...) → void
+ *   v5: strategy.close(id, comment, qty, qty_percent, alert_message,
+ *                      immediately, disable_alert) → void
  *
  * Behavior:
  *   - Queues a market exit order tagged with the matching entry id and an
@@ -20,7 +22,18 @@ import { parseArgsForPineParams } from '../../utils';
  *   - `qty` and `qty_percent` apply to the SUM of contracts open from the
  *     matching entries (FIFO across multiple stacked entries with same id).
  */
-const CLOSE_SIGNATURES = [['id', 'comment', 'qty', 'qty_percent', 'alert_message', 'immediately', 'disable_alert', 'when']];
+// Deux signatures, la STRICTE d'abord : la forme v4 `close(id, when, ...)` et la
+// forme v5 `close(id, comment, ...)` ne se distinguent que par le TYPE du 2e
+// positionnel. Le slot positionnel v4 porte le nom interne `when_positional`
+// typé 'boolean' (ni string, ni number, ni Series) — le parser n'a qu'une seule
+// table de types pour toutes les signatures, donc deux noms sont nécessaires
+// pour deux types. Conséquence : `strategy.close(id, "XL")` rejette sigA et
+// retombe sur sigB (comment), `strategy.close(id, cond)` booléen rejette sigB
+// (comment est une string) et prend sigA.
+const CLOSE_SIGNATURES = [
+    ['id', 'when_positional', 'qty', 'qty_percent', 'comment', 'alert_message', 'immediately', 'disable_alert'],
+    ['id', 'comment', 'qty', 'qty_percent', 'alert_message', 'immediately', 'disable_alert', 'when'],
+];
 const CLOSE_ARGS_TYPES = {
     id: 'string',
     comment: 'string',
@@ -30,6 +43,7 @@ const CLOSE_ARGS_TYPES = {
     immediately: 'boolean',
     disable_alert: 'boolean',
     when: 'series',
+    when_positional: 'boolean',
 };
 
 export function close(context: any) {
@@ -38,8 +52,7 @@ export function close(context: any) {
             throw new Error('strategy.close() called before strategy() declaration');
         }
         const parsed = parseArgsForPineParams<any>(args, CLOSE_SIGNATURES, CLOSE_ARGS_TYPES);
-        const whenValue = parsed.when instanceof Series ? parsed.when.get(0) : parsed.when;
-        if (Object.prototype.hasOwnProperty.call(parsed, 'when') && !whenValue) return;
+        if (!resolveWhenGate(parsed, ['when', 'when_positional'])) return;
         const targetId = parsed.id;
         if (targetId === undefined || targetId === null) return;
 

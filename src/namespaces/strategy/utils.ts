@@ -284,7 +284,9 @@ function entryFillPathPosition(
                 : 1,
         };
     }
-    if (order.type === 'market') return { pathSegment: -1, distanceAlongSegment: 0 };
+    if (order.type === 'market' || order._stop_marketable) {
+        return { pathSegment: -1, distanceAlongSegment: 0 };
+    }
 
     const level = order.type === 'stop' ? order.stop : order.limit;
     if (level === undefined) return { pathSegment: -1, distanceAlongSegment: 0 };
@@ -301,7 +303,7 @@ function entryFillPathPosition(
         isTriggered,
         { pathSegment: -1, distanceAlongSegment: 0 },
         path[0],
-    )?.position ?? { pathSegment: -1, distanceAlongSegment: 0 };
+    )?.position ?? { pathSegment: Number.MAX_SAFE_INTEGER, distanceAlongSegment: 0 };
 }
 
 /**
@@ -748,8 +750,30 @@ export function processStrategyOrders(context: any, phase: 'open' | 'close' = 'o
     // at the bar's end.
     markToMarket(context, closePhase ? closePrice : openPrice);
 
-    // Process each pending order that was placed on a previous bar
-    for (const order of pending_orders) {
+    // Outside COF, all entry fills compete along the broker emulator's
+    // assumed OHLC path. Queue order is only the final tie-breaker.
+    const ordersToProcess = cof || closePhase
+        ? pending_orders
+        : pending_orders
+            .map((order, sequence) => ({
+                order,
+                sequence,
+                position: entryFillPathPosition(
+                    order,
+                    parseDirection(order.direction),
+                    snapExecutionPrices && order.type === 'stop' ? displayedIntrabarPath : intrabarPath,
+                    null,
+                    false,
+                ),
+            }))
+            .sort((left, right) =>
+                comparePathPositions(left.position, right.position)
+                || left.sequence - right.sequence,
+            )
+            .map(({ order }) => order);
+
+    // Process each pending order that was placed on a previous bar.
+    for (const order of ordersToProcess) {
         if (order.status !== 'pending') continue;
 
         // Skip exit-category orders — processExitOrders handles them.
@@ -1056,6 +1080,19 @@ export function processStrategyOrders(context: any, phase: 'open' | 'close' = 'o
                 // adjustments above only ever substitute `_base_qty`, itself
                 // > 0. It still covers a host-mutated pending order.
                 if (!(order.qty > 0)) {
+                    order.status = 'cancelled';
+                    continue;
+                }
+                // strategy.entry() checks pyramiding at placement, but another
+                // candidate earlier on this bar's path may consume the last
+                // slot before this order fills. strategy.order() has no
+                // `_base_qty` marker and remains exempt by Pine design.
+                if (
+                    !cof
+                    && order._base_qty !== undefined
+                    && oldSign === direction
+                    && wouldExceedPyramiding(strategy, direction)
+                ) {
                     order.status = 'cancelled';
                     continue;
                 }
@@ -2395,18 +2432,15 @@ export function processExitOrders(
             // unless the existing COF same-bar path is active.
             if (order.bar >= context.idx && !cof && !closePhase) continue;
 
-            // Determine fill price; immediately=true (when supported) would fire
-            // at current close; default is current bar's open. In
-            // calc_on_order_fills mode a same-bar close fills at the current
-            // assumed intrabar tick's OHLC value. The process-on-close phase
-            // overrides that only for a current-bar market close.
+            // A current-bar close fills at the close only in the explicit
+            // process-on-close phase. Deferred closes — including orders
+            // carrying immediately=true without POC — fill at the next open.
+            // COF same-bar closes keep their current assumed tick.
             let fillPrice = closePhase && order.bar === context.idx
                 ? rawClosePrice
                 : cofState && order.bar === context.idx
                   ? cofState.ticks[Math.min(cofState.pass, cofState.ticks.length - 1)]
-                  : order.immediately
-                    ? rawClosePrice
-                    : rawOpenPrice;
+                  : rawOpenPrice;
             // Apply slippage against the close direction (opposite of position direction).
             fillPrice = applySlippage(context, -matchingDir, fillPrice);
 
@@ -3713,4 +3747,35 @@ export function restoreStrategyState(strategy: StrategyState | undefined, snapsh
     for (const key of Object.keys(snapshot.fields)) {
         (strategy as any)[key] = clonePlainValue(snapshot.fields[key]);
     }
+}
+
+/**
+ * Résout la garde `when` d'un appel strategy.* déjà passé par
+ * parseArgsForPineParams. Quatre appelants en lockstep : cancel, cancel_all,
+ * close, close_all — la sémantique TV est identique partout (slot absent →
+ * exécution inconditionnelle ; slot présent et falsy → no-op complet, évalué
+ * AVANT toute mutation d'état).
+ *
+ * Le déréférencement couvre toutes les formes que le transpileur peut
+ * produire : primitive, `na` (NAHelper, dont le getter `__value` rend NaN et
+ * dont l'instance nue est TRUTHY — piège), Series, fonction paresseuse,
+ * tableau de série, objet exposant `get()`.
+ *
+ * `slots` liste les noms de paramètres portant la garde, par ordre de
+ * priorité : close a deux slots (`when` nommé, `when_positional` pour la
+ * forme v4 positionnelle) car le parser n'a qu'une table de types globale.
+ */
+export function resolveWhenGate(parsed: Record<string, any>, slots: string[] = ['when']): boolean {
+    const slot = slots.find((name) => Object.prototype.hasOwnProperty.call(parsed, name));
+    if (slot === undefined) return true;
+
+    const val = parsed[slot];
+    if (val === undefined || val === null) return false;
+    if (typeof val === 'string' || typeof val === 'number' || typeof val === 'boolean') return !!val;
+    if (typeof val === 'function') return !!val();
+    if (val instanceof Series) return !!val.get(0);
+    if (Array.isArray(val)) return !!val[val.length - 1];
+    if (typeof val === 'object' && '__value' in val) return !!val.__value;
+    if (typeof val === 'object' && val.get !== undefined) return !!val.get(0);
+    return !!val;
 }

@@ -4,6 +4,7 @@
 import { Order } from '../types';
 import { Series } from '../../../Series';
 import { parseArgsForPineParams } from '../../utils';
+import { resolveWhenGate } from '../utils';
 
 /**
  * Close ALL open positions at market, regardless of which entry opened them.
@@ -51,18 +52,7 @@ export function close_all(context: any) {
         );
         if (hasPositionalWhen) parsed.when = first;
 
-        const extractValue = (val: any) => {
-            if (val === undefined || val === null) return val;
-            if (typeof val === 'string' || typeof val === 'number' || typeof val === 'boolean') return val;
-            if (typeof val === 'function') return val();
-            if (val instanceof Series) return val.get(0);
-            if (Array.isArray(val)) return val[val.length - 1];
-            if (typeof val === 'object' && '__value' in val) return val.__value;
-            if (typeof val === 'object' && val.get !== undefined) return val.get(0);
-            return val;
-        };
-        const whenValue = Object.prototype.hasOwnProperty.call(parsed, 'when') ? extractValue(parsed.when) : true;
-        if (!whenValue) return;
+        if (!resolveWhenGate(parsed)) return;
 
         // TV semantic: strategy.close_all() called with no open positions is
         // a no-op. Without this guard, the queued order survives to the next
