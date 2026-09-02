@@ -772,6 +772,24 @@ export function processStrategyOrders(context: any, phase: 'open' | 'close' = 'o
             )
             .map(({ order }) => order);
 
+    // VIN-2640: a LIMIT order submitted during the current bar's evaluation
+    // whose limit is ALREADY marketable against that bar's CLOSE fills on
+    // THIS bar, at the close — TV's broker emulator confronts the fresh order
+    // with the close it was placed on before deferring it. The armed test is
+    // the CLOSE, never the low/high: a level pierced intrabar BEFORE the
+    // order existed cannot trigger it (2640 deal 17199: the low pierces the
+    // five safety-order limits, TV fills all five at the close 5.082).
+    // Measured surface: the plain process-on-close path (2640: POC true, COF
+    // false). Under COF the close is the last assumed intrabar tick; both the
+    // entry and exit branches retain their existing COF crossing semantics.
+    const closeMarketableLimit = (order: Order): boolean =>
+        closePhase
+        && cofState === null
+        && order.bar === context.idx
+        && order.type === 'limit'
+        && order.limit !== undefined
+        && (parseDirection(order.direction) === 1 ? closePrice <= order.limit : closePrice >= order.limit);
+
     // Process each pending order that was placed on a previous bar.
     for (const order of ordersToProcess) {
         if (order.status !== 'pending') continue;
@@ -801,10 +819,11 @@ export function processStrategyOrders(context: any, phase: 'open' | 'close' = 'o
         } else {
             // Orders placed on bar N can only fill on bar N+1 or later.
             // Skip current-bar orders outside the COF intrabar path, except
-            // for current-bar MARKET orders in the explicit process-on-close
-            // phase.
+            // for current-bar MARKET orders — and close-marketable LIMIT
+            // orders — in the explicit process-on-close phase.
             const currentBarOrder = order.bar >= context.idx;
-            const sameBarEligible = (cof && !closePhase) || (closePhase && order.type === 'market');
+            const sameBarEligible = (cof && !closePhase)
+                || (closePhase && (order.type === 'market' || closeMarketableLimit(order)));
             if (currentBarOrder && !sameBarEligible) {
                 continue;
             }
@@ -864,7 +883,12 @@ export function processStrategyOrders(context: any, phase: 'open' | 'close' = 'o
                             }
                         } else if (lowPrice <= order.limit) {
                             shouldFill = true;
-                            fillPrice = openPrice <= order.limit ? openPrice : order.limit;
+                            // VIN-2640: a limit submitted on THIS bar and
+                            // already marketable at its close fills AT that
+                            // close, not at the level.
+                            fillPrice = closeMarketableLimit(order)
+                                ? closePrice
+                                : openPrice <= order.limit ? openPrice : order.limit;
                         }
                     } else if (tickPrice !== undefined) {
                         const executable = cofState.pass === 0 || newlyActivated
@@ -876,7 +900,9 @@ export function processStrategyOrders(context: any, phase: 'open' | 'close' = 'o
                         }
                     } else if (highPrice >= order.limit) {
                         shouldFill = true;
-                        fillPrice = openPrice >= order.limit ? openPrice : order.limit;
+                        fillPrice = closeMarketableLimit(order)
+                            ? closePrice
+                            : openPrice >= order.limit ? openPrice : order.limit;
                     }
                 }
                 break;
@@ -2551,11 +2577,14 @@ export function processExitOrders(
         // Older orders already had their full OHLC pass; future-dated
         // orders cannot execute in this phase.
         if (closePhase && order.bar > context.idx) continue;
-        const closeOnly =
-            closePhase
-            && order.bar === context.idx
-            && order._exit_refreshed !== true;
-        if (closePhase && order.bar === context.idx && !closeOnly) continue;
+        // VIN-2640 (twin of the entry rule): a bracket placed OR REFRESHED
+        // during the current bar's evaluation is confronted with that bar's
+        // close. 2640 re-calls strategy.exit on every bar, so every bracket
+        // carried `_exit_refreshed` and stayed inert in the close phase —
+        // exiting one bar late at the next open instead of at the close TV
+        // used. The refreshed levels never existed during this bar's intrabar
+        // pass, so only the close (never the replayed high/low) can trigger.
+        const closeOnly = closePhase && order.bar === context.idx && (cofState === null || order._exit_refreshed !== true);
 
         // ---- Conditional exits from exit() ----
         // PER-TRADE exit brackets (TV broker-emulator semantics): when a
