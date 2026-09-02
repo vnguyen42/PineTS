@@ -114,14 +114,21 @@ describe('percent_of_equity crypto sizing price (2594 / 1917 / 2096)', () => {
         expect(strategyOf(short).pending_orders[0].qty).toBe(641.477);
     });
 
-    it('keeps a declared crypto limit level on the raw sizing price (VIN-89)', () => {
+    it('sizes a declared crypto limit level at the rounded effective level (VIN-137)', () => {
         const context = makeContext(20, 0.001, 'spot');
 
         entry(context)('L', 'long', { limit: 15.5925 });
 
-        // The declared level is NOT quantized to the displayed tick: 641.354
-        // would be the snapped reference, 641.333 is the raw level.
-        expect(strategyOf(context).pending_orders[0].qty).toBe(641.333);
+        // VIN-137 (proved on 1565 NYSE:BE trade 1, extended by the same
+        // broker rule): TradingView sizes a price-based order against the
+        // order's EFFECTIVE execution level — the level rounded to the
+        // displayed mintick as recorded on the order — not the raw user
+        // expression. 15.5925/0.001 is 15592.499999999998 in JS, so the
+        // rounded level is 15.592 and qty = 10000/15.592 = 641.354. The raw
+        // level (15.5925 → 641.333) was the pre-VIN-137 VIN-89 acted choice;
+        // no discriminating TV capture exists for a crypto price-based
+        // percent order (flag: L1 review may want to capture one).
+        expect(strategyOf(context).pending_orders[0].qty).toBe(641.354);
     });
 
     it('exercises the four canonical rounding cases through the modified sizing path', () => {

@@ -334,10 +334,21 @@ export function entry(context: any) {
         // its raw VIN-89 sizing price, and stock / COF references are
         // untouched (the helper is a no-op outside its scope).
         const usesDefaultPercentSizing = qtyValue === undefined && defaultQtyType === 'percent_of_equity';
-        const sizingPrice = stopValue !== undefined
-            ? stopValue
-            : limitValue !== undefined
-              ? limitValue
+        // Snap limit/stop to the mintick grid AWAY from current price (the
+        // broker-emulator convention — see roundToMintick) BEFORE sizing:
+        // TradingView sizes a price-based order against the order's EFFECTIVE
+        // execution level — the ROUNDED level recorded on the order — not the
+        // raw user expression (VIN-137: 1565 NYSE:BE trade 1 — raw stop
+        // 21.62 / rounded 21.61 changes qty floor(50000/21.62)=2312 →
+        // floor(50000/21.61)=2313, the TV quantity). For market orders this
+        // is a no-op (roundToMintick on a close reference).
+        const mintick = context.pine?.syminfo?.mintick ?? 0;
+        const limitValueRounded = limitValue !== undefined ? roundToMintick(limitValue, currentPrice, mintick) : undefined;
+        const stopValueRounded  = stopValue  !== undefined ? roundToMintick(stopValue,  currentPrice, mintick) : undefined;
+        const sizingPrice = stopValueRounded !== undefined
+            ? stopValueRounded
+            : limitValueRounded !== undefined
+              ? limitValueRounded
               : usesDefaultPercentSizing
                 ? cryptoMarketSizingPrice(context, dir, currentPrice)
                 : currentPrice;
@@ -356,20 +367,13 @@ export function entry(context: any) {
 
         // Determine order type from limit/stop presence
         let orderType: 'market' | 'limit' | 'stop' | 'stop-limit' = 'market';
-        if (limitValue !== undefined && stopValue !== undefined) {
+        if (limitValueRounded !== undefined && stopValueRounded !== undefined) {
             orderType = 'stop-limit';
-        } else if (limitValue !== undefined) {
+        } else if (limitValueRounded !== undefined) {
             orderType = 'limit';
-        } else if (stopValue !== undefined) {
+        } else if (stopValueRounded !== undefined) {
             orderType = 'stop';
         }
-
-        // Snap limit/stop to the mintick grid AWAY from current price (the
-        // broker-emulator convention — see roundToMintick). For market
-        // orders this is a no-op.
-        const mintick = context.pine?.syminfo?.mintick ?? 0;
-        const limitValueRounded = limitValue !== undefined ? roundToMintick(limitValue, currentPrice, mintick) : undefined;
-        const stopValueRounded  = stopValue  !== undefined ? roundToMintick(stopValue,  currentPrice, mintick) : undefined;
 
         // A stop already beyond the signal bar's close is marketable at
         // submission (VIN-95): it keeps its level for sizing — the qty was

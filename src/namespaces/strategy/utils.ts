@@ -98,7 +98,16 @@ export function roundToMintick(
     return price > referencePrice ? Math.ceil(ticks) * mintick : Math.floor(ticks) * mintick;
 }
 /**
- * Snap a nominal market execution price to the nearest symbol tick.
+ * Snap a nominal market execution price to the nearest symbol tick —
+ * LEGACY composition A, kept byte-for-byte for crypto/spot (81fcb5c's
+ * proved path: snap AFTER the float slippage, 1-ulp noise and all).
+ * HIGH-1/MEDIUM-1 (VIN-2479 re-review): rule B (tick space, snap BEFORE
+ * slippage) is only proved on the stock-like classes (stock/etf/fund,
+ * R3 4525/4525); no oracle exists for crypto/spot at slippage ≠ 0, so
+ * those classes keep this A composition exactly, including its ulp noise.
+ * R3's discriminating evidence on stock: 211.615/0.01 → 21161.499999999996
+ * rounds to 21161 (→ 211.61, wrong on TV) while (round(211.605/0.01)+1)
+ * lands on 21162 × 0.01 = 211.62.
  *
  * This intentionally differs from roundToMintick(): execution uses Pine's
  * nearest-grid rule with JavaScript's exact Math.round division behavior,
@@ -127,6 +136,50 @@ function snapExecutionPrice(price: number, mintick: number): number {
     // representation — a RangeError must never abort an execution. And
     // Math.round's exact signed-zero result must survive normalization:
     // (-0).toFixed(2) → "0.00" → +0 would erase the mandated -0 fill.
+    const mintickNotation = mintick.toString().toLowerCase();
+    const [coefficient, exponentText] = mintickNotation.split('e');
+    const exponent = exponentText === undefined ? 0 : Number(exponentText);
+    const decimalPlaces = Math.max(0, (coefficient.split('.')[1]?.length ?? 0) - exponent);
+    if (decimalPlaces > 100 || Object.is(snapped, -0)) return snapped;
+    return Number(snapped.toFixed(decimalPlaces));
+}
+/**
+ * Compose a market/gap execution fill on the mintick grid IN TICK SPACE —
+ * rule R3 (VIN-2479, fit 4525/4525 on the archived TradingView ledgers):
+ * the BASE price snaps to the nearest tick BEFORE the directional slippage
+ * is added:
+ *
+ *   fill = (Math.round(basePrice / mintick) + slipTicks) × mintick
+ *
+ * Division by mintick, never ×100; slippage is counted in ticks, never
+ * added as a float price first. The old round((close + slip·mt)/mt) order
+ * mis-snapped half-tick closes (211.605 + 1 tick → 211.61 instead of
+ * TV's 211.62) and its pre-snap float sum leaked 1-ulp noise into the
+ * record (203.89 + 1 tick → 203.89999999999998). In tick space both
+ * defects disappear, and a snapped fill is ALWAYS normalized to the
+ * mintick's decimal places so strict ledgers never see multiplication
+ * noise (9696 × 0.01 → 96.96000000000001 must be 96.96; same convention
+ * as roundTrailLevel). toFixed is only defined for 0–100 decimals; beyond
+ * that (minticks smaller than ~1e-100) the raw finite product is already
+ * the best representation — a RangeError must never abort an execution.
+ * And Math.round's exact signed-zero result must survive normalization:
+ * (-0).toFixed(2) → "0.00" → +0 would erase the mandated -0 fill.
+ *
+ * This intentionally differs from roundToMintick(): execution uses Pine's
+ * nearest-grid rule with JavaScript's exact Math.round division behavior,
+ * while order placement rounds conservatively away from its reference price.
+ */
+function snapExecutionPriceInTicks(basePrice: number, mintick: number, slipTicks: number): number {
+    if (!Number.isFinite(basePrice) || !Number.isFinite(mintick) || mintick <= 0) return basePrice;
+    // IEEE-754 quirk: -0 + 0 === +0, so a zero slippage must NOT flow
+    // through the addition or Math.round's signed zero (-0.005/0.01 → -0)
+    // would be erased into +0 before the Object.is(-0) guard below.
+    const roundedBase = Math.round(basePrice / mintick);
+    const ticks = slipTicks === 0 ? roundedBase : roundedBase + slipTicks;
+    const snapped = ticks * mintick;
+    // A non-finite quotient (basePrice/mintick overflow) or product must
+    // not fabricate an execution price — return the original nominal value.
+    if (!Number.isFinite(ticks) || !Number.isFinite(snapped)) return basePrice;
     const mintickNotation = mintick.toString().toLowerCase();
     const [coefficient, exponentText] = mintickNotation.split('e');
     const exponent = exponentText === undefined ? 0 : Number(exponentText);
@@ -582,7 +635,28 @@ export function calculateOrderQty(context: any, specifiedQty: number | undefined
             // its level, strategy.order keeps the signal close). A TV capture
             // combining COF with a percent-sized limit/stop entry, or with
             // strategy.order, is required to decide it.
-            const sizingMarkPrice = stockTickSizing ? sizingPrice : cofCurrentTick(strategy);
+            // VIN-137 (2615 NYSE:HD, 1565 NYSE:BE): OUTSIDE a COF pass the open
+            // position is marked at the DISPLAYED SIGNAL CLOSE — the placement
+            // instant's market price — not at the order's execution level.
+            // TradingView sizes a default percent_of_equity order against the
+            // live strategy.equity of the evaluation: initial_capital +
+            // netprofit (entry commissions of open trades already charged) +
+            // the open position marked at the CURRENT close. The fork marked
+            // the open book at `sizingPrice`, which is the stop/limit LEVEL
+            // for price-based orders (VIN-89 level-based sizing price) — a
+            // stale reference that discounts the unrealized leg by the full
+            // level gap (2615 trade 1: mark at stop 57.95 → equity
+            // 1,012,196.07 → qty 4362, TV marks at close 56.44 → equity
+            // 1,018,378.01 → qty 4388). For MARKET orders the displayed
+            // reference IS the displayed close, so only price-based entries
+            // change. Under COF the acted choice above (tick mark) is kept
+            // verbatim; the crypto/spot path (VIN-B) is untouched.
+            const cofTick = cofCurrentTick(strategy);
+            const sizingMarkPrice = stockTickSizing
+                ? cofTick !== undefined
+                    ? sizingPrice
+                    : snapDisplayPrice(Series.from(context.data.close).get(0), context.pine?.syminfo?.mintick ?? 0)
+                : cofTick;
             const sizingUnrealized = sizingMarkPrice !== undefined ? openProfitAt(context, sizingMarkPrice) : strategy.openprofit;
             const sizingEquity = sizingMarkPrice !== undefined
                 ? strategy.equity - strategy.openprofit + sizingUnrealized
@@ -712,7 +786,25 @@ export function processStrategyOrders(context: any, phase: 'open' | 'close' = 'o
     const mintick = context.pine?.syminfo?.mintick ?? 0.01;
     const assetType = context.pine?.syminfo?.type;
     const snapExecutionPrices = assetType === 'stock';
-    const snapExecutionFills = snapExecutionPrices || assetType === 'crypto' || assetType === 'spot';
+    // VIN-2479 (preuve R3, 4519/4519 lignes de ledgers TV archivés) : les
+    // ETF/funds suivent la règle d'exécution des actions. syminfo.type vaut
+    // « fund » sur SPY/VXX (symbol_resolved TV repris par engine-replay) et
+    // « etf » sur les feeds FMP du lab. Fills MARKET et gap OHLC → mintick
+    // le plus proche APRÈS slippage, par division par mintick (bord : close
+    // 225.515 + 1 tick → 225.52, jamais 225.53). Seul le snap des fills est
+    // étendu : l'OHLC affiché, les stops intrabar (niveau de déclencheur) et
+    // les limites (prix de placement) gardent leur sémantique.
+    const snapExecutionFills = snapExecutionPrices || assetType === 'crypto' || assetType === 'spot'
+        || assetType === 'etf' || assetType === 'fund';
+    // HIGH-1/MEDIUM-1 (re-revue VIN-2479) : la composition EN ESPACE TICKS
+    // (règle B — snap AVANT slippage, slipTicks = dir·slippage) n'est
+    // prouvée que sur les classes stock-like — stock/etf/fund, R3
+    // 4525/4525. crypto/spot CONSERVENT leur composition A héritée
+    // (81fcb5c : snap APRÈS slippage en espace prix, bruit ulp compris) :
+    // A/B HEAD vs working tree mesure 9 deltas à slippage 1 dont
+    // 211.605 → HEAD 211.61 vs B 211.62, et aucun oracle crypto à
+    // slippage ≠ 0 ne justifie B là-bas.
+    const tickSpaceFills = snapExecutionPrices || assetType === 'etf' || assetType === 'fund';
     const displayedOhlc = snapExecutionPrices ? snapDisplayOhlc(rawOhlc, mintick) : rawOhlc;
     const intrabarPath = assumedIntrabarPath(openPrice, highPrice, lowPrice, closePrice);
     const displayedIntrabarPath = snapExecutionPrices
@@ -1039,27 +1131,32 @@ export function processStrategyOrders(context: any, phase: 'open' | 'close' = 'o
             // limit fills. A stop-limit becomes a limit after activation and
             // therefore also bypasses slippage here.
             const direction = parseDirection(order.direction);
-            fillPrice = order.type === 'limit'
+            const executionBase = fillPrice;
+            const nominalFillPrice = order.type === 'limit'
                 ? fillPrice
                 : applySlippage(context, direction, fillPrice);
             // A price-based fill, including slippage, cannot exist outside
             // the bar that filled it. Stock intrabar stops are evaluated
             // against displayed OHLC, so use that same range for the
             // non-gap clamp. Gap fills retain raw OHLC here and are snapped
-            // after this block.
+            // after this block — the snap must NOT lift the fill out of the
+            // bar's range (HIGH-2: a buy-stop crossed at the gap with
+            // open=high=102 and slippage 1 fills at 102, never 102.01).
+            const clampOhlc = snapExecutionPrices && order.type === 'stop' && !gapExecution
+                ? displayedOhlc
+                : rawOhlc;
             if (order.type === 'limit' || order.type === 'stop') {
-                const clampOhlc = snapExecutionPrices && order.type === 'stop' && !gapExecution
-                    ? displayedOhlc
-                    : rawOhlc;
-                fillPrice = Math.min(clampOhlc.high, Math.max(clampOhlc.low, fillPrice));
+                fillPrice = Math.min(clampOhlc.high, Math.max(clampOhlc.low, nominalFillPrice));
+            } else {
+                fillPrice = nominalFillPrice;
             }
             // On the proved stock and crypto surfaces, executions recorded
-            // on the nearest mintick after slippage are MARKET fills and
-            // OHLC-GAP fills (stop filled at the open / open tick /
-            // marketable at submission). An ordinary intrabar stop crossing
-            // keeps its trigger level — it is not an execution snap. Limit
-            // fills (an activated stop-limit is a limit by this point) retain
-            // their placement semantics.
+            // on the nearest mintick are MARKET fills and OHLC-GAP fills
+            // (stop filled at the open / open tick / marketable at
+            // submission). An ordinary intrabar stop crossing keeps its
+            // trigger level — it is not an execution snap. Limit fills (an
+            // activated stop-limit is a limit by this point) retain their
+            // placement semantics.
             // The pre-trade margin gate below checks the required margin at
             // the execution price BEFORE this mintick snap (2841): the snap
             // rounds the RECORD, not the money at risk — TV admits an entry
@@ -1068,7 +1165,42 @@ export function processStrategyOrders(context: any, phase: 'open' | 'close' = 'o
             // booked fill price below stays snapped (81fcb5c intact).
             const preSnapFillPrice = fillPrice;
             if (snapExecutionFills && (gapExecution || order.type === 'market')) {
-                fillPrice = snapExecutionPrice(fillPrice, mintick);
+                if (tickSpaceFills) {
+                    // R3 (VIN-2479, fit 4525/4525 sur les ledgers TV archivés) :
+                    // composition en ESPACE TICKS, snap AVANT slippage —
+                    // fill = (round(base/mintick) + dir·slipTicks)·mintick, où
+                    // base = le prix d'exécution pré-slippage ci-dessus. La
+                    // somme flottante slip·mintick n'entre jamais dans le
+                    // record (203.89 + 1 tick → 203.9 exact, pas
+                    // 203.89999999999998) et les closes demi-tick suivent TV
+                    // (211.605 + 1 tick → 211.62, jamais 211.61).
+                    fillPrice = snapExecutionPriceInTicks(
+                        executionBase,
+                        mintick,
+                        (context.strategy.config.slippage ?? 0) * direction,
+                    );
+                    // HIGH-2 : le prix snappé ne doit pas sortir du range de
+                    // la barre — le range sur lequel TV évalue les triggers.
+                    // La composition B part du prix pré-clamp (executionBase) ;
+                    // le clamp est donc ré-appliqué au résultat sur l'OHLC
+                    // AFFICHÉ pour les stops (les triggers de stops sont
+                    // évalués contre displayedOhlc) : buy-stop gappé
+                    // open=high=102, slippage 1 → 102, jamais 102.01
+                    // au-dessus du high ; high brut 1-5e-10 affiché 1 → fill
+                    // 1 (le niveau), jamais 1-5e-10 (2bad8f1 vin136). Les
+                    // limits restent au prix de placement (jamais snappées
+                    // ici — pas de chemin gap) et les market fills gardent
+                    // leur prix composé (HEAD : jamais clampés en gap).
+                    if (order.type === 'stop') {
+                        fillPrice = Math.min(displayedOhlc.high, Math.max(displayedOhlc.low, fillPrice));
+                    }
+                } else {
+                    // MEDIUM-1 : crypto/spot conservent EXACTEMENT leur
+                    // composition A héritée (81fcb5c) — snap APRÈS le
+                    // slippage en espace prix, sur le prix déjà clampé, y
+                    // compris son bruit ulp éventuel.
+                    fillPrice = snapExecutionPrice(preSnapFillPrice, mintick);
+                }
             }
 
             // Pre-trade margin check (Pine broker emulator). When the
@@ -1182,7 +1314,20 @@ export function processStrategyOrders(context: any, phase: 'open' | 'close' = 'o
                     // negative-equity account can still open (infinite-leverage
                     // mode). Guard explicitly so an equity < 0 edge cannot
                     // resurrect a rejection under margin 0.
-                    if (marginPct > 0 && requiredMargin > availableEquity) {
+                    //
+                    // Noise-tolerant admission (magnitude-relative, never an
+                    // absolute EPS): a strictly-greater comparison cancelled
+                    // ~4.5 % of draws at the 100 % margin frontier on a
+                    // 200 000-draw probe (JOURNAL.md 2026-09-02, MEDIUM of the
+                    // 6280977 L1 review) by a single rounding ulp — e.g.
+                    // qty = trunc6(100 / 4882.8125) = 0.02048 × price × 100 %
+                    // evaluates to 100.00000000000001 = nextUp(equity) while
+                    // the exact arithmetic is exactly 100. The tolerance
+                    // 1e-12 × max(1, |availableEquity|) absorbs that 1-ulp
+                    // noise; a REAL deficit (requiredMargin above the
+                    // tolerance) is still rejected identically.
+                    const marginTolerance = 1e-12 * Math.max(1, Math.abs(availableEquity));
+                    if (marginPct > 0 && requiredMargin > availableEquity + marginTolerance) {
                         // TV broker emulator: the margin check only guards the
                         // OPEN leg. On a reversal, the close leg always
                         // executes (it frees margin / realizes the position) —
@@ -2370,7 +2515,16 @@ export function processExitOrders(
     const mintick = context.pine?.syminfo?.mintick ?? 0.01;
     const assetType = context.pine?.syminfo?.type;
     const snapExecutionPrices = assetType === 'stock';
-    const snapExecutionFills = snapExecutionPrices || assetType === 'crypto' || assetType === 'spot';
+    // VIN-2479 (preuve R3, 4519/4519) : même extension du snap des fills
+    // market/gap aux classes stock-like que dans processStrategyOrders —
+    // « fund » (symbol_resolved TV : SPY 2479, VXX 2676) et « etf » (FMP).
+    const snapExecutionFills = snapExecutionPrices || assetType === 'crypto' || assetType === 'spot'
+        || assetType === 'etf' || assetType === 'fund';
+    // HIGH-1/MEDIUM-1 (re-revue VIN-2479) : la composition EN ESPACE TICKS
+    // (règle B) n'est prouvée que sur les classes stock-like ; crypto/spot
+    // conservent leur composition A héritée (81fcb5c, 9 deltas mesurés à
+    // slippage 1 si on les bascule — 211.605 → HEAD 211.61 vs B 211.62).
+    const tickSpaceFills = snapExecutionPrices || assetType === 'etf' || assetType === 'fund';
     const displayedOhlc = snapExecutionPrices ? snapDisplayOhlc(rawOhlc, mintick) : rawOhlc;
     const { open: openPrice, high: highPrice, low: lowPrice, close: closePrice } = displayedOhlc;
     const cofTickPrice = cofState
@@ -2567,17 +2721,22 @@ export function processExitOrders(
             // unless the existing COF same-bar path is active.
             if (order.bar >= context.idx && !cof && !closePhase) continue;
 
-            // A current-bar close fills at the close only in the explicit
-            // process-on-close phase. Deferred closes — including orders
-            // carrying immediately=true without POC — fill at the next open.
-            // COF same-bar closes keep their current assumed tick.
+            // HIGH-1 (re-revue VIN-2479) : the event carries the RAW
+            // pre-slippage price — slippage is composed at consumption, in
+            // tick space for the stock-like classes (rule B, exactly like
+            // the gap 'loss' exits: raw price + slipTicks = -direction ×
+            // slippage) and in price space (applySlippage, legacy
+            // composition A) for crypto/spot and the non-snap classes.
+            // Emitting the slipped price here made the market close
+            // recompose as round((base + slip·mt)/mt)·mt — composition A
+            // inverted — 211.605 short exit → 211.61 instead of TV's
+            // 211.62, and the 225.515 long close → 225.51 instead of
+            // R3's 225.50.
             let fillPrice = closePhase && order.bar === context.idx
                 ? rawClosePrice
                 : cofState && order.bar === context.idx
                   ? cofState.ticks[Math.min(cofState.pass, cofState.ticks.length - 1)]
                   : rawOpenPrice;
-            // Apply slippage against the close direction (opposite of position direction).
-            fillPrice = applySlippage(context, -matchingDir, fillPrice);
 
             let qtyToClose = matchingQty;
             if (order._explicit_qty_cap || (order.qty && order.qty > 0)) qtyToClose = Math.min(order.qty, matchingQty);
@@ -3134,18 +3293,34 @@ export function processExitOrders(
         if (liveQty <= 1e-9) continue;
         const qtyThis = Math.min(event.qty === Infinity ? liveQty : event.qty, remainingCap, liveQty);
         // Profit events are limit take-profits and do not receive slippage.
-        // Market, loss/stop, and trailing events retain the configured
-        // strategy slippage.
-        const nominalFillPrice = event.kind === 'market' || event.kind === 'profit'
+        // Market (close/close_all/close leg), loss/stop, and trailing events
+        // retain the configured strategy slippage. Market events carry the
+        // RAW pre-slippage price (HIGH-1, emitted untouched) — their
+        // directional slippage is composed here exactly like the loss/trailing
+        // legs: slipTicks = -direction × slippage in tick space on the
+        // stock-like classes (rule B), applySlippage in price space elsewhere
+        // (legacy composition A, including crypto/spot — 81fcb5c).
+        const nominalFillPrice = event.kind === 'profit'
             ? event.price
             : applySlippage(context, -event.direction, event.price);
-        // Market, close-phase, and OHLC-gap executions on the stock and crypto
-        // surfaces snap after slippage. Other asset classes retain their prior
-        // execution representation until an equivalent oracle proves this
-        // rule there.
+        // Market, close-phase, and OHLC-gap executions on the STOCK-LIKE
+        // surfaces (stock/etf/fund) compose in TICK SPACE — rule R3: the
+        // base price snaps to the nearest tick BEFORE the directional
+        // slippage ticks are added. crypto/spot keep their proved legacy
+        // composition A (snap AFTER the float slippage, ulp noise and all,
+        // MEDIUM-1); other asset classes retain their prior execution
+        // representation until an equivalent oracle proves a rule there.
         const fillPrice = snapExecutionFills
             && (event.kind === 'market' || event.gap === true || event.atClose === true)
-            ? snapExecutionPrice(nominalFillPrice, mintick)
+            ? tickSpaceFills
+                ? snapExecutionPriceInTicks(
+                    event.price,
+                    mintick,
+                    event.kind === 'profit'
+                        ? 0
+                        : -event.direction * (context.strategy.config.slippage ?? 0),
+                )
+                : snapExecutionPrice(nominalFillPrice, mintick)
             : nominalFillPrice;
         const sizesBefore = new Map(strategy.opentrades.map((trade) => [trade.id, Math.abs(trade.size)]));
         const exitComment = event.kind === 'profit'
@@ -3355,7 +3530,23 @@ export function processMarginCall(context: any, checkpoint: 'open' | 'extreme' |
     const equityAtAdverse = computeEquityAtPrice(context, adversePrice);
     const requiredMarginAtAdverse = computeRequiredMargin(totalQty, adversePrice, marginPct, pointValue);
 
-    if (equityAtAdverse < requiredMarginAtAdverse) {
+    // Noise-tolerant admission (magnitude-relative, never an absolute EPS):
+    // the mirror of the pre-trade gate in processStrategyOrders (MEDIUM of
+    // the 6280977 L1 review, JOURNAL.md 2026-09-02). On the frontier
+    // "percent_of_equity 100 % + margin 100 %" the float chain of
+    // computeRequiredMargin lands one ulp ABOVE the equity for an exactly
+    // in-budget entry — e.g. qty trunc6(100 / 4882.8125) = 0.02048 has an
+    // exact notional of 100 but evaluates to 100.00000000000001 =
+    // nextUp(100) at the adverse point. The strict `<` comparison then
+    // liquidated a PHANTOM margin call 4×(1 ulp)/price = 1.16e-17 at the
+    // entry bar, shaving the admitted position (E2E scenario of the review:
+    // 1 "Margin call" fabricated on a position TV keeps whole). Only the
+    // ADMISSION at the adverse point is toleranced — the liquidation
+    // sequence itself (closePartialPosition / 4× cover / _mc_exit_lock,
+    // TV semantics) is untouched, and a REAL deficit (requiredMargin above
+    // the tolerance) still triggers identically.
+    const marginTolerance = 1e-12 * Math.max(1, Math.abs(requiredMarginAtAdverse));
+    if (equityAtAdverse < requiredMarginAtAdverse - marginTolerance) {
         // PARTIAL liquidation (TV broker-emulator rule): compute the margin
         // deficit at the adverse extreme, convert it to contracts at that
         // price, and liquidate 4× that amount — the 4× buffer prevents the

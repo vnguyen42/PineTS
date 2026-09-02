@@ -491,7 +491,7 @@ describe('strategy percent_of_equity stock displayed-price sizing (VIN-130)', ()
         }
     });
 
-    it('revalues an open stock lot at the snapped sizing price', () => {
+    it('revalues an open stock lot at the DISPLAYED SIGNAL CLOSE, not the order level (VIN-137)', () => {
         const context = makeContext({
             default_qty_type: 'percent_of_equity',
             default_qty_value: 100,
@@ -514,10 +514,16 @@ describe('strategy percent_of_equity stock displayed-price sizing (VIN-130)', ()
             status: 'open',
         }];
 
-        // Raw 101.003 snaps to the nearest displayed tick, 101.00, so the
-        // open lot contributes 1.00 rather than the raw-marked 1.003 to the
-        // sizing equity.
-        expect(calculateOrderQty(context, undefined, 1, 101.003)).toBe(9.91089);
+        // VIN-137 (2615 NYSE:HD, 1565 NYSE:BE): OUTSIDE a COF pass the open
+        // position is marked at the DISPLAYED SIGNAL CLOSE of the placement
+        // bar — the live market reference TradingView sizes against — not at
+        // the order's (snapped) level. This context closes at 100, so the
+        // open lot contributes 0 here; marking at the order level 101.00
+        // would contribute 1.00 (the pre-VIN-137 expectation 9.91089). The
+        // sizing DENOMINATOR is unchanged: the order level snaps to the
+        // nearest displayed tick (101.003 -> 101.00), so
+        // qty = (1001 - 1 + 0) / 101.00 = 9.90099.
+        expect(calculateOrderQty(context, undefined, 1, 101.003)).toBe(9.90099);
     });
 });
 
