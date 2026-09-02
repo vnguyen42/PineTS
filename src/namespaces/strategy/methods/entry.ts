@@ -390,10 +390,13 @@ export function entry(context: any) {
         // non-zero, else the position at the pass's start (the same-tick
         // market-exit drain may have flattened it to 0 before the entry was
         // created — 1539: close drains first, then the opposite entry fills
-        // at the same trigger price). Fresh and same-direction re-entries
-        // (2205 round-trips, 1502 adds) never carry it — they advance to the
-        // next OHLC point. The engine's same-tick drain fills marked orders
-        // at the triggering price.
+        // at the same trigger price). Fresh entries from flat have their own
+        // dedicated same-tick marker (VIN-135 _cof_fresh_same_tick); only
+        // same-direction adds on a NON-flat position keep the next OHLC
+        // point (1502 adds). A re-entry placed after the position was
+        // flattened at the SAME tick (2205 round-trips) is "fresh" and is
+        // drained same-tick, not deferred. The engine's same-tick drain
+        // fills marked orders at the triggering price.
         const cofSameTickReversal = context.strategy._cof != null
             && orderType === 'market'
             && (() => {
@@ -403,6 +406,21 @@ export function entry(context: any) {
                     : (context.strategy._cof.tickStartSign ?? 0);
                 return referenceSign !== 0 && Math.sign(dir) !== referenceSign;
             })();
+
+        // VIN-135 (oracle 1502): a MARKET entry emitted by a COF
+        // recalculation that OPENS FROM FLAT is also same-tick — TV fills it
+        // at the triggering fill's price, at the current assumed point. The
+        // measured case: a pre-existing exit (close_all etc.) fills at the
+        // bar's open, the recalculation re-enters on the same signal — TV
+        // books that lot at the OPEN, the first fill point of the path; the
+        // engine used to defer it to the first extreme, shifting the whole
+        // stack by one crate ({low, high, close} instead of {open, low,
+        // high}). Reversals keep their own marker; same-direction adds keep
+        // next-point semantics (2205/1502).
+        const cofSameTickFresh = context.strategy._cof != null
+            && orderType === 'market'
+            && !cofSameTickReversal
+            && Math.abs(context.strategy.position_size) < 1e-9;
 
         const orderObj: Order = {
             id: idValue,
@@ -421,6 +439,7 @@ export function entry(context: any) {
             _isReversalEntry: isReversal,
             _stop_marketable: stopMarketable,
             _cof_reversal_same_tick: cofSameTickReversal,
+            _cof_fresh_same_tick: cofSameTickFresh,
             // Ordered base size (before the reversal close-qty addition).
             // executeOrder uses it to split a reversal OVERSHOOT into its
             // own lot when a deferred close-margin-call shrank the

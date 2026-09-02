@@ -671,11 +671,13 @@ export function calculateOrderQty(context: any, specifiedQty: number | undefined
 /**
  * Process pending orders and execute them
  *
- * `reversalEntriesOnly` (VIN-110): the COF same-tick drain mode, symmetric
- * to `marketExitsOnly` in processExitOrders. Only REVERSAL MARKET entries
- * created by the current-bar recalculation (`_cof_reversal_same_tick`) fill,
- * at the current assumed intrabar tick. Fresh/pyramiding market entries and
- * price-based orders keep their next-tick/path semantics.
+ * `reversalEntriesOnly` (VIN-110 + VIN-135): the COF same-tick drain mode,
+ * symmetric to `marketExitsOnly` in processExitOrders. Only MARKET entries
+ * created by the current-bar recalculation and marked same-tick
+ * (`_cof_reversal_same_tick` reversals, `_cof_fresh_same_tick` opens from
+ * flat) fill, at the current assumed intrabar tick. Pyramiding
+ * (same-direction) market entries and price-based orders keep their
+ * next-tick/path semantics.
  */
 export function processStrategyOrders(context: any, phase: 'open' | 'close' = 'open', reversalEntriesOnly = false): number {
     if (!context.strategy) return 0;
@@ -797,17 +799,21 @@ export function processStrategyOrders(context: any, phase: 'open' | 'close' = 'o
         // Skip exit-category orders — processExitOrders handles them.
         if ((order.category ?? 'entry') === 'exit') continue;
 
-        // VIN-110 same-tick drain: only reversal MARKET entries created by
-        // the current-bar recalculation fill at the current tick. One fill
-        // per logical order id per pass — the recalculation re-emits the
-        // same reversal on every drain iteration (TV books it once; without
-        // the guard the drain would oscillate the position forever).
+        // VIN-110/VIN-135 same-tick drain: only REVERSAL MARKET entries and
+        // MARKET entries opening FROM FLAT (1502) created by the current-bar
+        // recalculation fill at the current tick. One fill per logical order
+        // id per pass — the recalculation re-emits the same order on every
+        // drain iteration (TV books it once; without the guard the drain
+        // would oscillate the position forever). Same-direction adds on a
+        // NON-flat position keep next-point semantics (1502 adds; a re-entry
+        // after a same-tick flatten — 2205 round-trips — is "fresh" and
+        // drains same-tick).
         if (reversalEntriesOnly) {
             if (
                 cofState === null
                 || order.bar !== context.idx
                 || order.type !== 'market'
-                || !order._cof_reversal_same_tick
+                || (!order._cof_reversal_same_tick && !order._cof_fresh_same_tick)
             ) {
                 continue;
             }
@@ -845,6 +851,21 @@ export function processStrategyOrders(context: any, phase: 'open' | 'close' = 'o
                 // mode, same-bar orders fill on the next assumed intrabar tick.
                 // The process_orders_on_close phase is the one exception:
                 // current-bar market orders fill at the signal bar's close.
+                // VIN-135 (oracle 1502): the CLOSE is the TERMINAL point of the
+                // assumed intrabar path, not a fill point — a same-bar market
+                // entry still pending at the last tick stays pending (the
+                // bar-close evaluation coalesces it same-ID and it fills at the
+                // next bar's open, as TV does: 1502's 4th order never fills
+                // intrabar). The explicit process-on-close phase is unaffected
+                // (current-bar market orders fill at the signal bar's close);
+                // earlier ticks fill as usual; price-based orders
+                // and the exit side keep their close-tick semantics. The
+                // same-tick drain (reversalEntriesOnly, VIN-110/VIN-135) is
+                // exempt: a marked reversal/fresh entry created by the
+                // recalculation still drains at the terminal tick.
+                if (!reversalEntriesOnly && cofState && !closePhase && !processOnClose && order.bar === context.idx && cofState.pass === cofState.ticks.length - 1) {
+                    continue;
+                }
                 shouldFill = true;
                 gapExecution = true;
                 fillPrice = closePhase && order.bar === context.idx
@@ -1039,6 +1060,13 @@ export function processStrategyOrders(context: any, phase: 'open' | 'close' = 'o
             // keeps its trigger level — it is not an execution snap. Limit
             // fills (an activated stop-limit is a limit by this point) retain
             // their placement semantics.
+            // The pre-trade margin gate below checks the required margin at
+            // the execution price BEFORE this mintick snap (2841): the snap
+            // rounds the RECORD, not the money at risk — TV admits an entry
+            // whose snapped price pushes the notional a sub-tick past the
+            // available equity and trims the excess by a margin call. The
+            // booked fill price below stays snapped (81fcb5c intact).
+            const preSnapFillPrice = fillPrice;
             if (snapExecutionFills && (gapExecution || order.type === 'market')) {
                 fillPrice = snapExecutionPrice(fillPrice, mintick);
             }
@@ -1147,7 +1175,7 @@ export function processStrategyOrders(context: any, phase: 'open' | 'close' = 'o
                         heldMarginRemaining = computeHeldMargin(context, closePhase ? closePrice : openPrice);
                     }
                     const availableEquity = strategy.equity - heldMarginRemaining;
-                    const requiredMargin = computeRequiredMargin(newOpenQty, fillPrice, marginPct, pointValue);
+                    const requiredMargin = computeRequiredMargin(newOpenQty, preSnapFillPrice, marginPct, pointValue);
 
                     // marginPct === 0 (the v5 default): no margin requirement,
                     // TV never rejects — requiredMargin is 0 and even a

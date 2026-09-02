@@ -206,13 +206,22 @@ export interface Order {
     // position at CREATION (before the same-tick market-exit drain flattens
     // it) and sticks to the order for the current tick: the engine's
     // same-tick drain fills marked orders at the triggering fill price.
-    // Fresh/pyramiding entries and price-based orders never carry it — they
-    // advance to the next OHLC point (1502 same-bar groups). At fill, the
-    // order qty is re-derived against the CURRENT position (close what
-    // remains, open the requested base size), so a close drained first in
-    // the same tick cannot leave a stale close-qty in the open leg (TV
-    // 1539: close 1, open 1 — not 2).
+    // Fresh-from-flat entries have their own same-tick marker (VIN-135
+    // _cof_fresh_same_tick); pyramiding (same-direction) entries and
+    // price-based orders never carry it — they advance to the next OHLC
+    // point (1502 same-bar groups). At fill, the order qty is re-derived
+    // against the CURRENT position (close what remains, open the requested
+    // base size), so a close drained first in the same tick cannot leave a
+    // stale close-qty in the open leg (TV 1539: close 1, open 1 — not 2).
     _cof_reversal_same_tick?: boolean;
+
+    // Internal (VIN-135, oracle 1502): a MARKET entry created by a COF
+    // recalculation that OPENS FROM FLAT (position exactly 0 at creation).
+    // TV fills it at the current assumed tick — the same-tick class next to
+    // the reversal marker — while same-direction adds keep next-point
+    // semantics (1502: after a close_all fills at the open, the re-entry is
+    // booked at the OPEN, the first fill point).
+    _cof_fresh_same_tick?: boolean;
 
     // Internal (VIN-120): pass-scoped marker for a FRESH single-trade exit
     // bracket created by a COF fill recalculation — the new instance only,
@@ -300,9 +309,15 @@ export interface Order {
 //   2. a REVERSAL market entry created by that recalculation (VIN-110) —
 //      marked `_cof_reversal_same_tick`, filled at the triggering fill price,
 //      one fill per logical order id per pass (anti-loop: the script re-emits
-//      the same reversal on every recalculation; TV books it once).
-// Same-bar fresh/pyramiding market entries and price-based orders retain
+//      the same reversal on every recalculation; TV books it once); and
+//   3. a MARKET entry created by that recalculation while the position is
+//      exactly FLAT (VIN-135, oracle 1502) — marked `_cof_fresh_same_tick`,
+//      also filled at the current tick (1502: after a close_all takes the
+//      open, the re-entry is booked at the OPEN, the first fill point).
+// Pyramiding (same-direction) market entries and price-based orders retain
 // their next-tick/path semantics (1502 same-bar groups prove it).
+// The bar-close evaluation runs with `_cof === null` (only a fill
+// recalculation has a pass), so the close-time POC phase is unaffected.
 export interface CofBarState {
     pass: number; // current tick index (0..3)
     ticks: number[]; // [open, tick2, tick3, close]
