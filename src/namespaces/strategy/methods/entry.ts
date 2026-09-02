@@ -428,6 +428,9 @@ export function entry(context: any) {
             // overshoot as two separate lots (xlsx 2021-10-02: 5 +
             // 0.263108 longs at the same fill).
             _base_qty: baseQty,
+            // 1519 TV lot-split gate: proven only for the DEFAULT cash
+            // sizing, never for an explicit qty argument.
+            _qty_explicit: qtyValue !== undefined && qtyValue !== null,
         } as any;
 
         if (replacesPendingGroup) {

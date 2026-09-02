@@ -1164,7 +1164,7 @@ export function processStrategyOrders(context: any, phase: 'open' | 'close' = 'o
                 ? displayedIntrabarPath
                 : intrabarPath;
             const fillPathPosition = entryFillPathPosition(order, direction, fillPath, cofState, fillsAtClose);
-            executeOrder(context, order, fillPrice, currentTime, fillPathPosition);
+            executeOrder(context, order, fillPrice, currentTime, fillPathPosition, fillsAtClose);
             order.status = 'filled';
             order.fill_price = fillPrice;
             order.fill_bar = context.idx;
@@ -1425,6 +1425,7 @@ export function openTrade(
     entryComment?: string,
     isReversalOpen?: boolean,
     entryPathPosition?: IntrabarPathPosition,
+    tvSplitExcess?: number,
 ): void {
     const strategy: StrategyState = context.strategy;
     const tradeNum = strategy.opentrades.length + strategy.closedtrades.length;
@@ -1458,6 +1459,9 @@ export function openTrade(
         max_drawdown: 0,
         max_runup: 0,
         status: 'open',
+        ...(tvSplitExcess !== undefined && tvSplitExcess > 1e-9
+            ? { _tv_split_excess: tvSplitExcess }
+            : {}),
     };
 
     strategy.opentrades.push(trade);
@@ -1587,6 +1591,7 @@ function executeOrder(
     fillPrice: number,
     fillTime: number,
     entryPathPosition?: IntrabarPathPosition,
+    pocFill = false,
 ): void {
     const strategy: StrategyState = context.strategy;
     const direction = parseDirection(order.direction);
@@ -1637,7 +1642,52 @@ function executeOrder(
         }
     } else {
         // We are increasing position or opening fresh
-        openTrade(context, order.id, direction, order.qty, fillPrice, fillTime, order.comment, undefined, entryPathPosition);
+        //
+        // TV ledger convention (1519, FX:EURGBP — proven on 83 closed
+        // groups): a process_orders_on_close MARKET entry sized by the
+        // DEFAULT cash sizing (never an explicit qty) that pyramids onto an
+        // open position is reported by TV as TWO closed rows at the same
+        // entry bar/price — the excess of the ordered quantity over the
+        // OLDEST open lot, then that oldest lot's size (ex. b164: 149 +
+        // 11664 = 11813, where 11664 is the lot from b158). The split is a
+        // CLOSE-TIME booking artifact — 83/83 captured groups close at
+        // identical exitTime/exitPrice — so the engine keeps ONE logical
+        // open row and emits the two closed rows in closePartialPosition
+        // (see Trade._tv_split_excess). While open, strategy.opentrades
+        // counts signals: one row per pyramiding entry.
+        const tvSplitProvenSizing =
+            pocFill
+            && order.type === 'market'
+            && (order as any)._qty_explicit !== true
+            && (strategy.config.default_qty_type ?? 'fixed') === 'cash';
+        const tvAnchorQty = Math.abs(
+            strategy.opentrades.find((trade) => Math.sign(trade.size) === direction)?.size ?? 0,
+        );
+        const tvSplitExcess = tvSplitProvenSizing && tvAnchorQty > 1e-9 && order.qty > tvAnchorQty + 1e-9
+            ? order.qty - tvAnchorQty
+            : undefined;
+        let tvSplitRunKey: number | undefined;
+        if (tvSplitExcess !== undefined) {
+            // TV re-splits the WHOLE pyramiding run retroactively: once a
+            // later add fills, every still-open add of the run shares the
+            // LAST add's excess (1519 b3641+b3650 → [423, 13270] and
+            // [423, 13501]; b5375+b5380 → [369, 12472] and [369, 12641],
+            // while the run's first lot closes whole). Reuse the run id of
+            // the still-open split-adds (monotone, never a quantity — a
+            // later add whose anchor equals an old run key cannot resurrect
+            // a stale marker) and re-stamp their excess.
+            const existingRun = strategy.opentrades.find((open) => open._tv_split_run_key !== undefined);
+            tvSplitRunKey = existingRun?._tv_split_run_key
+                ?? (strategy._tv_split_run_seq = (strategy._tv_split_run_seq ?? 0) + 1);
+            for (const open of strategy.opentrades) {
+                if (open._tv_split_run_key === tvSplitRunKey) open._tv_split_excess = tvSplitExcess;
+            }
+        }
+        openTrade(context, order.id, direction, order.qty, fillPrice, fillTime, order.comment, undefined, entryPathPosition, tvSplitExcess);
+        if (tvSplitExcess !== undefined && tvSplitRunKey !== undefined) {
+            const opened = strategy.opentrades[strategy.opentrades.length - 1];
+            opened._tv_split_run_key = tvSplitRunKey;
+        }
     }
 }
 
@@ -1701,14 +1751,21 @@ export function closePartialPosition(context: any, qtyToClose: number, exitPrice
         }
         const tradeDirection = Math.sign(trade.size);
 
-        const emitClosedRows = (qtyClosed: number) => {
-            const commType = strategy.config.commission_type ?? 'percent';
-            const halveFlat = closeInfo?.isImplicitReversal && commType === 'cash_per_order';
-            const rawExitCommission = computeLegCommission(context, strategy, qtyClosed, exitPrice);
-            const exitCommission = halveFlat ? rawExitCommission / 2 : rawExitCommission;
-            const entryCommission = (trade.commission ?? 0) * (qtyClosed / tradeQty);
+        // Exit-leg commission of the WHOLE close, charged ONCE per broker
+        // order (cash_per_order is a flat per-call fee; percent scales with
+        // the closed qty). Computed on `qtyClosed` up front so a split row
+        // pair shares the single order's fee pro-rata — recomputing per part
+        // would charge the flat fee TWICE (review L1 round 2).
+        const commType = strategy.config.commission_type ?? 'percent';
+        const halveFlat = closeInfo?.isImplicitReversal && commType === 'cash_per_order';
+        const rawExitCommission = computeLegCommission(context, strategy, qtyClosing, exitPrice);
+        const exitCommissionTotal = halveFlat ? rawExitCommission / 2 : rawExitCommission;
+
+        const emitClosedRow = (sizeParts: number) => {
+            const exitCommission = exitCommissionTotal * (sizeParts / qtyClosing);
+            const entryCommission = (trade.commission ?? 0) * (sizeParts / tradeQty);
             const priceChange = tradeDirection === 1 ? exitPrice - trade.entry_price : trade.entry_price - exitPrice;
-            const gross = priceChange * qtyClosed * pointValue;
+            const gross = priceChange * sizeParts * pointValue;
             const row: Trade = {
                 id: `trade_${strategy.opentrades.length + strategy.closedtrades.length + tradesToClose.length}`,
                 entry_id: trade.entry_id,
@@ -1717,7 +1774,7 @@ export function closePartialPosition(context: any, qtyToClose: number, exitPrice
                 _bracket_entry: trade._bracket_entry,
                 entry_bar_index: trade.entry_bar_index,
                 entry_time: trade.entry_time,
-                size: tradeDirection * qtyClosed,
+                size: tradeDirection * sizeParts,
                 commission: entryCommission + exitCommission,
                 max_drawdown: trade.max_drawdown,
                 max_runup: trade.max_runup,
@@ -1757,6 +1814,24 @@ export function closePartialPosition(context: any, qtyToClose: number, exitPrice
             }
             strategy.closedtrades.push(row);
         };
+        const emitClosedRows = (qtyClosed: number) => {
+            // 1519 TV ledger convention (see Trade._tv_split_excess): a
+            // FULL close of a split-excess lot is reported by TV as TWO
+            // rows — the excess first, then the anchor — at the same
+            // entry/exit bars and prices. Financial totals are invariant
+            // (the two parts sum to the ordered quantity and the P&L
+            // splits pro-rata — including the SINGLE order's exit
+            // commission, split across the two rows). A PARTIAL close
+            // keeps a single row: no TV oracle covers a partially-closed
+            // split family.
+            const tvExcess = trade._tv_split_excess;
+            if (tvExcess !== undefined && qtyClosed >= tradeQty - 1e-9 && tvExcess > 1e-9 && tradeQty > tvExcess + 1e-9) {
+                emitClosedRow(tvExcess);
+                emitClosedRow(qtyClosed - tvExcess);
+                return;
+            }
+            emitClosedRow(qtyClosed);
+        };
 
         // Epsilon on the full-close decision: when the requested qty is a
         // float hair short of the trade's size (fractional margin-call
@@ -1777,8 +1852,14 @@ export function closePartialPosition(context: any, qtyToClose: number, exitPrice
             const entryCommissionShare = (trade.commission ?? 0) * (qtyClosing / tradeQty);
 
             // The remaining open portion keeps the residual entry commission share.
+            // The split markers no longer apply: no TV oracle covers a
+            // partially-closed split family, so the remainder closes as one
+            // row — and it leaves its run (its _tv_split_run_key dies with
+            // the excess, so a later add cannot re-split it).
             trade.size = tradeDirection * (tradeQty - qtyClosing);
             trade.commission = (trade.commission ?? 0) - entryCommissionShare;
+            delete trade._tv_split_excess;
+            delete trade._tv_split_run_key;
             strategy.opentrades.push(trade);
             remainingQty = 0;
         }

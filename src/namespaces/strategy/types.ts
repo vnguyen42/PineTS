@@ -88,6 +88,27 @@ export interface Trade {
     /** Position of this logical entry on its historical bar's assumed path. */
     _activation_entry_path_segment?: number;
     _activation_entry_path_distance?: number;
+    /**
+     * TV ledger convention (1519, FX:EURGBP — proven on 83 ledger groups):
+     * a process_orders_on_close MARKET entry sized by the DEFAULT CASH
+     * sizing that pyramids onto an open position is reported by TV as TWO
+     * closed rows at the SAME entry bar/price — the excess of the ordered
+     * quantity over the oldest open lot, then the oldest open lot's size.
+     * The split is a CLOSE-TIME booking artifact: all 83 captured groups
+     * close at identical exitTime/exitPrice, and while open TV shows one
+     * logical row (strategy.opentrades counts signals, not parts). The
+     * engine keeps ONE open row and emits the two closed rows on full
+     * close. Captured at fill: excess = order.qty − oldestSameSideQty.
+     */
+    _tv_split_excess?: number;
+    /**
+     * Identity of the pyramiding RUN this split-add belongs to (monotone
+     * strategy._tv_split_run_seq). Within a run, EVERY add is closed as
+     * [E, qty − E] where E is the LAST add's excess (updated as adds fill —
+     * TV re-splits the whole run retroactively, 1519 b3641+b3650 and
+     * b5375+b5380). Undefined on non-split rows.
+     */
+    _tv_split_run_key?: number;
     _activation_segments?: Array<{
         qty: number;
         id: string;
@@ -260,6 +281,10 @@ export interface Order {
     // calc_on_order_fills fill-time re-derivation of percent_of_equity
     // default quantities (TV locks them when the order is created).
     _base_qty?: number;
+    // True when strategy.entry received an EXPLICIT qty argument. The 1519
+    // TV lot-split (see Trade._tv_split_excess) is proven only for the
+    // DEFAULT cash sizing; an explicit qty keeps a single closed row.
+    _qty_explicit?: boolean;
 }
 
 // Per-bar intrabar-sequencing state for `calc_on_order_fills = true`
@@ -481,4 +506,8 @@ export interface StrategyState {
         activationTradeIds: string[];
         consumedTradeIds: string[];
     }>;
+    // Monotone counter for pyramiding-RUN ids (1519 TV lot-split family):
+    // a fresh run starts on the first split add after flat / after a close,
+    // and every later split add of the same run shares its excess.
+    _tv_split_run_seq?: number;
 }
