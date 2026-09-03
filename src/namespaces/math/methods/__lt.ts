@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 import { Series } from '../../../Series';
+import { relationalTolerance } from '../relational-tolerance';
 
 /**
  * Pine Script na-aware "less than" (`<`).
@@ -8,8 +9,9 @@ import { Series } from '../../../Series';
  * - If either operand is `na`, the result is `na` (matching TradingView:
  *   `na(na < 1)` is `true`). na is falsy, so branch/ternary outcomes are
  *   unchanged.
- * - Values equal within an absolute 1e-10 tolerance are treated as equal, so
- *   `<` is false — matching TradingView's relational tolerance.
+ * - Values equal within the magnitude-relative relational tolerance
+ *   (1e-10 × max(|a|, |b|), capped at the historical absolute 1e-10) are
+ *   treated as equal, so `<` is false — matching TradingView.
  */
 export function __lt(context: any) {
     return (a: any, b: any) => {
@@ -18,7 +20,7 @@ export function __lt(context: any) {
 
         if (typeof valA === 'number' && typeof valB === 'number') {
             if (isNaN(valA) || isNaN(valB)) return NaN;
-            if (Math.abs(valA - valB) < 1e-10) return false;
+            if (Math.abs(valA - valB) < relationalTolerance(valA, valB)) return false;
             return valA < valB;
         }
 

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 import { Series } from '../../../Series';
+import { relationalTolerance } from '../relational-tolerance';
 
 export function __eq(context: any) {
     return (a: any, b: any) => {
@@ -34,8 +35,11 @@ export function __eq(context: any) {
             // na propagates — use `na(x == y)` to test for it.
             if (isNaN(normalizedA) || isNaN(normalizedB)) return NaN;
 
-            // TradingView treats values equal within an absolute 1e-10 tolerance.
-            return Math.abs(normalizedA - normalizedB) < 1e-10;
+            // TradingView treats values equal within the magnitude-relative
+            // relational tolerance (1e-10 × max(|a|, |b|), capped at the
+            // historical absolute 1e-10) as equal. Exact equality (a === b)
+            // covers the tolerance 0 case (both operands ±0).
+            return normalizedA === normalizedB || Math.abs(normalizedA - normalizedB) < relationalTolerance(normalizedA, normalizedB);
         }
 
         return normalizedA === normalizedB;

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 import { Series } from '../../../Series';
+import { relationalTolerance } from '../relational-tolerance';
 
 /**
  * Pine Script na-aware inequality comparison.
@@ -44,8 +45,11 @@ export function __neq(context: any) {
             // Pine Script: any comparison with `na` evaluates to `na`.
             if (isNaN(normalizedA) || isNaN(normalizedB)) return NaN;
 
-            // TradingView treats values equal within an absolute 1e-10 tolerance.
-            return Math.abs(normalizedA - normalizedB) >= 1e-10;
+            // TradingView treats values equal within the magnitude-relative
+            // relational tolerance (1e-10 × max(|a|, |b|), capped at the
+            // historical absolute 1e-10) as equal. Exact equality (a === b)
+            // must stay unequal-free when the tolerance is 0 (both ±0).
+            return normalizedA !== normalizedB && Math.abs(normalizedA - normalizedB) >= relationalTolerance(normalizedA, normalizedB);
         }
 
         return normalizedA !== normalizedB;

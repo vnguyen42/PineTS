@@ -327,13 +327,17 @@ export function entry(context: any) {
             ? cofCurrentTick(strategy)
             : undefined;
         const currentPrice = cofTick !== undefined ? cofTick : Series.from(context.data.close).get(0);
-        // VIN-B (1917/2594/2701): a DEFAULT percent_of_equity MARKET entry on
-        // a crypto/spot symbol is sized on the displayed reference built by
-        // cryptoMarketSizingPrice — signal close + directional slippage,
-        // quantized to the displayed tick. A declared limit/stop level keeps
-        // its raw VIN-89 sizing price, and stock / COF references are
-        // untouched (the helper is a no-op outside its scope).
-        const usesDefaultPercentSizing = qtyValue === undefined && defaultQtyType === 'percent_of_equity';
+        // VIN-B (1917/2594/2701) + SIZING_CASH_PRIX_NON_QUANTIFIE_TICK (1622):
+        // a DEFAULT MARKET entry (no explicit qty) on a crypto/spot symbol is
+        // sized on the displayed reference built by cryptoMarketSizingPrice —
+        // signal close + directional slippage, quantized to the displayed
+        // tick — for every price-dependent default qty type (percent_of_equity
+        // and cash). A declared limit/stop level keeps its raw VIN-89 sizing
+        // price, and stock / COF references are untouched (the helper is a
+        // no-op outside its scope). 'fixed' stays on the raw close: its qty
+        // is a contract count and never divides by a price.
+        const usesDefaultPriceSizing = qtyValue === undefined
+            && (defaultQtyType === 'percent_of_equity' || defaultQtyType === 'cash');
         // Snap limit/stop to the mintick grid AWAY from current price (the
         // broker-emulator convention — see roundToMintick) BEFORE sizing:
         // TradingView sizes a price-based order against the order's EFFECTIVE
@@ -349,7 +353,7 @@ export function entry(context: any) {
             ? stopValueRounded
             : limitValueRounded !== undefined
               ? limitValueRounded
-              : usesDefaultPercentSizing
+              : usesDefaultPriceSizing
                 ? cryptoMarketSizingPrice(context, dir, currentPrice)
                 : currentPrice;
         const baseQty = calculateOrderQty(context, qtyValue, dir, sizingPrice);
