@@ -1488,11 +1488,22 @@ export function transformReturnStatement(node: any, scopeManager: ScopeManager):
                 });
             }
 
-            const precisionCall = ASTFactory.createCallExpression(
-                ASTFactory.createMemberExpression(ASTFactory.createContextIdentifier(), ASTFactory.createIdentifier('precision')),
-                [node.argument]
-            );
-            node.argument = precisionCall;
+            // Famille EXPLICIT_QTY_QUANTIZATION (2485 FX:USDCHF, 2026-09-02) :
+            // les fonctions dont le retour alimente une quantité d'ordre
+            // explicite sont évaluées en pleine précision (règle TV établie
+            // sur le ledger 2485 : floor(100·stop/(entry·|entry−stop|))
+            // 807/807 sans aucun arrondi intermédiaire) — le wrap
+            // `$.precision` (round 10 décimales) est sauté pour elles
+            // uniquement. Toute autre fonction garde le wrap historique.
+            const fnName = scopeManager.getCurrentFnName();
+            const skipPrecisionWrap = fnName !== undefined && scopeManager.isQtyPrecisionFunction(fnName);
+            if (!skipPrecisionWrap) {
+                const precisionCall = ASTFactory.createCallExpression(
+                    ASTFactory.createMemberExpression(ASTFactory.createContextIdentifier(), ASTFactory.createIdentifier('precision')),
+                    [node.argument]
+                );
+                node.argument = precisionCall;
+            }
         }
     }
 }
@@ -1571,8 +1582,18 @@ export function transformFunctionDeclaration(node: any, scopeManager: ScopeManag
             }
         }
 
+        // Track the current user function so transformReturnStatement can
+        // skip the `$.precision` wrap for functions feeding an explicit
+        // order quantity (famille EXPLICIT_QTY_QUANTIZATION, 2485). Saved
+        // and restored around the body walk: nested function declarations
+        // recurse through this handler and must not leak their name upward.
+        const prevFnName = scopeManager.getCurrentFnName();
+        scopeManager.setCurrentFnName(node.id?.name);
+
         // Just delegate to the callback to continue the recursion
         c(node.body, scopeManager);
+
+        scopeManager.setCurrentFnName(prevFnName);
 
         // Clean up: remove function parameters from local series vars after exiting function scope
         for (const name of paramNames) {

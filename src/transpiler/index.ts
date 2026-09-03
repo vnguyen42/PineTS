@@ -52,7 +52,7 @@ import ScopeManager from './analysis/ScopeManager';
 import { injectImplicitImports } from './transformers/InjectionTransformer';
 import { normalizeNativeImports } from './transformers/NormalizationTransformer';
 import { wrapInContextFunction } from './transformers/WrapperTransformer';
-import { transformNestedArrowFunctions, preProcessContextBoundVars, preProcessUdtRegistry, runAnalysisPass, renameMethodVariants, renameFunctionArityVariants } from './analysis/AnalysisPass';
+import { transformNestedArrowFunctions, preProcessContextBoundVars, preProcessUdtRegistry, runAnalysisPass, renameMethodVariants, renameFunctionArityVariants, markExplicitQtyPrecisionFunctions } from './analysis/AnalysisPass';
 import { runTypeInferencePass } from './analysis/TypeInferencePass';
 import { runTransformationPass, transformEqualityChecks, propagateAsyncAwait } from './transformers/MainTransformer';
 import { extractPineScriptVersion, pineToJS } from './pineToJS/pineToJS.index';
@@ -183,6 +183,13 @@ export function transpile(source: string | Function, options: { debug: boolean; 
     // identifiers / `input.int(...)` / literals); the main pass then lowers
     // operand subtrees inside any emitted helper call.
     runTypeInferencePass(ast, scopeManager, pineVersion, versionlessFallback);
+
+    // Famille EXPLICIT_QTY_QUANTIZATION (2485) : marque les fonctions
+    // utilisateur dont le retour alimente une quantité d'ordre explicite —
+    // leur wrap `$.precision` sera sauté (pleine précision, règle TV).
+    // Doit tourner APRÈS les renommages (clés = noms JS courants) et AVANT
+    // la transformation (le wrap est émis à ce moment-là).
+    markExplicitQtyPrecisionFunctions(ast, scopeManager);
 
     // Second pass: transform the code
     runTransformationPass(ast, scopeManager, originalParamName, options, sourceLines);

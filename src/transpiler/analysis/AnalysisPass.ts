@@ -701,6 +701,205 @@ export function renameMethodVariants(ast: any, scopeManager: ScopeManager): void
  * dispatcher resolves ties toward the last declared variant; type sniffing is
  * out of scope (documented in the dispatcher emitter).
  */
+/**
+ * Famille EXPLICIT_QTY_QUANTIZATION (2485 FX:USDCHF tf 240, session
+ * 2026-09-02) — marquage des fonctions utilisateur dont le retour alimente
+ * une QUANTITÉ D'ORDRE EXPLICITE.
+ *
+ * Règle TV établie sur le ledger canonique 2485
+ * (oracle-archives/symboles-manquants-lot2-20260827/, 08-tv-ledger-canonical
+ * .json) : la quantité explicite d'un strategy.entry est évaluée en PLEINE
+ * précision — qty_TV = floor(100·stop/(entry·|entry−stop|)) reproduit
+ * 807/807, et la même expression arrondie à 10 décimales sur les retours de
+ * fonctions utilisateur (le wrap `$.precision` historique du transpiler)
+ * reproduit le moteur 670/807. Les 137 lignes déviantes sont le bruit des
+ * DEUX wraps (`percent2money`, `calcPositionSize`) : |Δqty| jusqu'à 104 sur
+ * 3.33e6, 100% du faux montant = quantité.
+ *
+ * Cette passe marque, transitivement à travers les variables locales et les
+ * appels imbriqués, toutes les fonctions dont une valeur de retour peut
+ * aboutir dans l'argument qty d'un strategy.entry/strategy.order/
+ * strategy.exit (positionnel 3e argument, ou propriété `qty` d'un argument
+ * objet). Le wrap `$.precision` est ensuite sauté pour ces fonctions
+ * EXACTEMENT (transformReturnStatement) ; toute autre fonction — sizing
+ * percent_of_equity/cash/fixed, indicateurs, helpers d'affichage — garde le
+ * comportement historique (corpus inchangé hors du motif qty-explicite).
+ *
+ * Mise en œuvre : une passe structurelle sur l'AST PRE-transformation (après
+ * les renommages d'arity, avant runTransformationPass). Frames de scope
+ * (programme + fonctions + blocs) pour résoudre les identifiants locaux
+ * vers leurs expressions d'assignation ; worklist jusqu'au point fixe.
+ * Frames qui ne sont PAS dans le chemin (appel hors bloc, shadowing) =
+ * comportement historique conservé.
+ */
+export function markExplicitQtyPrecisionFunctions(ast: any, scopeManager: ScopeManager): void {
+    interface Frame {
+        parent: Frame | null;
+        assigns: Map<string, any[]>;
+    }
+    const rootFrame: Frame = { parent: null, assigns: new Map() };
+
+    // Déclarations de fonctions utilisateur (clé = nom JS courant post-rename)
+    // avec leur frame locale (les paramètres n'y figurent pas : un param n'est
+    // jamais résolu — seules les assignations locales le sont).
+    const fnByJsName = new Map<string, { node: any; frame: Frame }>();
+
+    // Expressions qty explicites collectées, chacune avec la frame du site d'appel.
+    const qtyExprs: { expr: any; frame: Frame }[] = [];
+
+    const isStrategyOrderCall = (node: any): string | null => {
+        const callee = node.callee;
+        if (callee?.type !== 'MemberExpression') return null;
+        if (callee.object?.type !== 'Identifier' || callee.object.name !== 'strategy') return null;
+        const method = callee.property?.name;
+        return method === 'entry' || method === 'exit' || method === 'order' ? method : null;
+    };
+
+    const collectQtyFromCall = (node: any, frame: Frame): void => {
+        const args = node.arguments ?? [];
+        for (let i = 0; i < args.length; i++) {
+            const arg = args[i];
+            if (arg?.type === 'ObjectExpression') {
+                for (const prop of arg.properties ?? []) {
+                    if ((prop.key?.name ?? prop.key?.value) === 'qty' && prop.value) {
+                        qtyExprs.push({ expr: prop.value, frame });
+                    }
+                }
+            } else if (i === 2 && arg) {
+                // qty positionnel (entry/order/exit : 3e argument)
+                qtyExprs.push({ expr: arg, frame });
+            }
+        }
+    };
+
+    const walkCollect = (node: any, frame: Frame): void => {
+        if (!node || typeof node !== 'object') return;
+        switch (node.type) {
+            case 'FunctionDeclaration': {
+                if (node.id?.name && node.body?.type === 'BlockStatement') {
+                    const child: Frame = { parent: frame, assigns: new Map() };
+                    fnByJsName.set(node.id.name, { node, frame: child });
+                    for (const stmt of node.body.body) walkCollect(stmt, child);
+                    return; // corps traité ci-dessus, pas de récursion générique
+                }
+                break;
+            }
+            case 'VariableDeclaration': {
+                for (const decl of node.declarations ?? []) {
+                    if (decl.id?.type === 'Identifier' && decl.init) {
+                        const list = frame.assigns.get(decl.id.name) ?? [];
+                        list.push(decl.init);
+                        frame.assigns.set(decl.id.name, list);
+                    }
+                }
+                break;
+            }
+            case 'AssignmentExpression': {
+                if (node.left?.type === 'Identifier' && node.right) {
+                    const list = frame.assigns.get(node.left.name) ?? [];
+                    list.push(node.right);
+                    frame.assigns.set(node.left.name, list);
+                }
+                break;
+            }
+            case 'BlockStatement': {
+                const child: Frame = { parent: frame, assigns: new Map() };
+                for (const stmt of node.body ?? []) walkCollect(stmt, child);
+                return;
+            }
+            case 'CallExpression': {
+                if (isStrategyOrderCall(node)) collectQtyFromCall(node, frame);
+                break; // récursion générique ci-dessous pour les arguments
+            }
+        }
+        for (const key of Object.keys(node)) {
+            if (key === 'parent') continue;
+            const value = (node as any)[key];
+            if (Array.isArray(value)) {
+                for (const item of value) walkCollect(item, frame);
+            } else {
+                walkCollect(value, frame);
+            }
+        }
+    };
+    walkCollect(ast, rootFrame);
+
+    const marked = new Set<string>();
+
+    // Résout un identifiant vers les expressions qui lui sont assignées dans
+    // la chaîne de frames (de la plus interne à la racine). Inconnu → [].
+    const resolveAssigns = (name: string, frame: Frame): any[] => {
+        for (let f: Frame | null = frame; f !== null; f = f.parent) {
+            const list = f.assigns.get(name);
+            if (list && list.length > 0) return list;
+        }
+        return [];
+    };
+
+    // Scan d'une expression : marque les appels de fonctions utilisateur et
+    // suit les identifiants locaux vers leurs assignations (worklist).
+    const queue: { expr: any; frame: Frame }[] = [...qtyExprs];
+    // Terminaison : l'AST est un arbre (chaque noeud a un parent unique), mais
+    // les assignations peuvent se re-référencer (`a = a + 1`, `a = b; b = a`)
+    // — un même noeud d'init serait re-poussé indéfiniment. Chaque OBJET est
+    // traité au plus une fois ; la résolution d'un identifiant suit l'objet
+    // de son init, jamais son nom (un nom réassigné re-scanne son nouvel
+    // init — objet distinct).
+    const scanned = new Set<object>();
+    const scan = (expr: any, frame: Frame): void => {
+        if (!expr || typeof expr !== 'object') return;
+        if (scanned.has(expr)) return;
+        scanned.add(expr);
+        switch (expr.type) {
+            case 'CallExpression': {
+                const callee = expr.callee;
+                if (callee?.type === 'Identifier' && fnByJsName.has(callee.name)) {
+                    if (!marked.has(callee.name)) {
+                        marked.add(callee.name);
+                        const fn = fnByJsName.get(callee.name)!;
+                        // Le corps entier de la fonction marquée est scanné
+                        // (appels imbriqués → marquage transitif). Les retours
+                        // seront évalués sans le wrap precision.
+                        for (const stmt of fn.node.body?.body ?? []) queue.push({ expr: stmt, frame: fn.frame });
+                    }
+                    for (const arg of expr.arguments ?? []) queue.push({ expr: arg, frame });
+                    return;
+                }
+                // Callee membre (math.abs, str.tostring, obj.method…) : scanner
+                // l'objet et les arguments.
+                if (callee?.type === 'MemberExpression') {
+                    queue.push({ expr: callee.object, frame });
+                }
+                for (const arg of expr.arguments ?? []) queue.push({ expr: arg, frame });
+                return;
+            }
+            case 'Identifier': {
+                // Variables locales assignées → suivre leurs expressions.
+                // Context-bound (close, low…), paramètres et globaux inconnus
+                // → rien (le moteur les évalue déjà en pleine précision).
+                for (const assigned of resolveAssigns(expr.name, frame)) queue.push({ expr: assigned, frame });
+                return;
+            }
+        }
+        // Récursion générique (binaires, membres, ternaires, déclarations…).
+        for (const key of Object.keys(expr)) {
+            if (key === 'parent') continue;
+            const value = (expr as any)[key];
+            if (Array.isArray(value)) {
+                for (const item of value) queue.push({ expr: item, frame });
+            } else {
+                queue.push({ expr: value, frame });
+            }
+        }
+    };
+
+    for (let i = 0; i < queue.length; i++) {
+        scan(queue[i].expr, queue[i].frame);
+    }
+
+    for (const name of marked) scopeManager.markQtyPrecisionFunction(name);
+}
+
 export function renameFunctionArityVariants(ast: any, scopeManager: ScopeManager): void {
     const program = ast.body?.[0]?.expression?.body;
     if (!program || program.type !== 'BlockStatement' || !Array.isArray(program.body)) return;

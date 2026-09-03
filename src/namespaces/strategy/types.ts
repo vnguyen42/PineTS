@@ -67,6 +67,14 @@ export interface Trade {
     exit_time?: number;
     exit_comment?: string;
     size: number; // SIGNED — positive long, negative short
+    /**
+     * Unsigned quantity of the ENTRY ORDER that opened this lot, latched at
+     * fill and never reduced by partial closes. TV computes qty_percent
+     * exits against this entry-order quantity (constant fraction per exit,
+     * qty-percent-exit-base, 1739), not against the shrinking residual
+     * position — openTrade stores it because each trade IS one entry order.
+     */
+    _entry_order_qty?: number;
     profit?: number; // realized P&L on close; undefined while open
     commission?: number; // commission charged on this trade
     max_drawdown?: number; // per-trade peak drawdown from entry

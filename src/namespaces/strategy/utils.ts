@@ -1654,6 +1654,7 @@ export function openTrade(
         _activation_entry_path_segment: entryPathPosition?.pathSegment,
         _activation_entry_path_distance: entryPathPosition?.distanceAlongSegment,
         size: direction * qty, // SIGNED — matches Pine's closedtrades.size()
+        _entry_order_qty: qty, // qty_percent exits are based on THIS (qty-percent-exit-base)
         commission: entryCommission,
         max_drawdown: 0,
         max_runup: 0,
@@ -3039,7 +3040,21 @@ export function processExitOrders(
                 // always catch (403/403). Suppress the stop leg for
                 // same-bar short entries gapped past at the open; the TP
                 // leg (if also reachable) still applies.
-                const buyStopSparesFreshEntry = !isLong && openPastSl && entryBar === context.idx;
+                //
+                // VIN-1781 (STOP_GAP_OPEN_FILL_SHORT, FX:USDZAR 120, ledger
+                // TV 12/12 lignes / 6 barres de gap week-end) : l'épargne ne
+                // couvre que l'AJOUT pyramiding — le probe l'a mesurée sur un
+                // stack DÉJÀ OUVERT («closes ONLY the prior stack», l'ajout du
+                // même open survit) ; une entrée short qui OUVRE la position
+                // depuis flat au même open est au contraire RATTRAPÉE par le
+                // buy-stop déjà franchi et se remplit au open (entrée =
+                // sortie = open, profit 0). Le reversal du même open est aussi
+                // rattrapé (gap-exit à son propre fill, 2021-09-08) — aucun
+                // trade short antérieur dans `matching`, donc pas d'épargne.
+                const priorStackExists = matching.some((prior) =>
+                    (prior._activation_entry_bar_index ?? prior.entry_bar_index) < context.idx,
+                );
+                const buyStopSparesFreshEntry = !isLong && openPastSl && entryBar === context.idx && priorStackExists;
                 if (!buyStopSparesFreshEntry) {
                     slEvents.push({
                         qty: tQty,
@@ -3230,7 +3245,14 @@ export function processExitOrders(
         let reservedQty = matchingQty;
         if (order._explicit_qty_cap || (order.qty && order.qty > 0)) reservedQty = Math.min(order.qty, matchingQty);
         else if (order.qty_percent && order.qty_percent > 0) {
-            reservedQty = matchingQty * (order.qty_percent / 100);
+            // Famille qty-percent-exit-base (1739, BINANCE:LDOUSDT 240, ledger TV) :
+            // TradingView applique qty_percent à la quantité de l'ORDRE D'ENTRÉE
+            // (fraction constante par exit — 266 lignes TV à 0.05 = 5 % × entrée 1.0
+            // au SL commun, position résiduelle pourtant décroissante), PAS à la
+            // position résiduelle (0.05 → 0.0475 → 0.0425 fautif). La taille
+            // initiale de chaque lot est latched à l'ouverture (_entry_order_qty).
+            const entryQty = matching.reduce((sum, trade) => sum + Math.abs(trade._entry_order_qty ?? trade.size), 0);
+            reservedQty = entryQty * (order.qty_percent / 100);
         }
 
         const combinedEvents: FillEvent[] = [];

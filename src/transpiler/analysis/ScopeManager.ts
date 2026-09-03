@@ -66,6 +66,18 @@ export class ScopeManager {
     private userFunctions: Set<string> = new Set();
     private userMethods: Set<string> = new Set();
     /**
+     * Famille EXPLICIT_QTY_QUANTIZATION (2485 FX:USDCHF, 2026-09-02) : user
+     * functions whose return values feed an EXPLICIT order quantity
+     * (strategy.entry/strategy.order/strategy.exit qty argument,
+     * transitively through local variables). TradingView evaluates those
+     * expressions at full precision; the classic `$.precision(...)` wrap on
+     * user-function returns is skipped for exactly these functions (the
+     * wrap is kept everywhere else — corpus behavior unchanged outside the
+     * explicit-qty pattern). Keyed by the CURRENT (post-rename) JS name.
+     */
+    private qtyPrecisionFunctions: Set<string> = new Set();
+    private currentFnName: string | undefined;
+    /**
      * Regular user-declared functions (i.e. NOT methods). Tracked separately
      * from `userFunctions` so a UFCS-style direct call to a method-only
      * declaration (`foo(receiver, args)` where `foo` was declared as
@@ -494,6 +506,22 @@ export class ScopeManager {
 
     isUserFunction(name: string): boolean {
         return this.userFunctions.has(name);
+    }
+
+    markQtyPrecisionFunction(name: string): void {
+        this.qtyPrecisionFunctions.add(name);
+    }
+
+    isQtyPrecisionFunction(name: string): boolean {
+        return this.qtyPrecisionFunctions.has(name);
+    }
+
+    setCurrentFnName(name: string | undefined): void {
+        this.currentFnName = name;
+    }
+
+    getCurrentFnName(): string | undefined {
+        return this.currentFnName;
     }
 
     addUserMethod(name: string): void {
