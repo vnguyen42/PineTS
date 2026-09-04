@@ -114,8 +114,10 @@ export function order(context: any) {
         const currentTime = Series.from(context.data.openTime).get(0);
 
         // VIN-95: a stop already beyond the signal bar's close at submission
-        // is triggered and fills at the next admissible open. Equality
-        // remains a stop crossing on the next bar.
+        // is triggered and fills at the next admissible open (at the signal
+        // bar's close for a current-bar stop under process_orders_on_close,
+        // POC_CLOSE_MARKETABLE_STOP). Equality remains a stop crossing on
+        // the next bar.
         const stopMarketable = orderType === 'stop'
             && stopValue !== undefined
             && ((dir === 1 && stopValue < currentPrice - 1e-12 * Math.max(1, Math.abs(currentPrice)))

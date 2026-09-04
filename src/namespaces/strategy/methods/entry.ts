@@ -382,7 +382,9 @@ export function entry(context: any) {
         // A stop already beyond the signal bar's close is marketable at
         // submission (VIN-95): it keeps its level for sizing — the qty was
         // computed above from `stopValue` — but behaves as a triggered stop
-        // and fills at the next admissible open. Equality remains a stop
+        // and fills at the next admissible open (at the signal bar's close
+        // for a current-bar stop under process_orders_on_close,
+        // POC_CLOSE_MARKETABLE_STOP). Equality remains a stop
         // crossing on the next bar, with 1-ulp tolerance reserved for
         // trigger-vs-feed comparisons.
         const stopMarketable = orderType === 'stop'

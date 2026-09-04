@@ -884,6 +884,20 @@ export function processStrategyOrders(context: any, phase: 'open' | 'close' = 'o
         && order.limit !== undefined
         && (parseDirection(order.direction) === 1 ? closePrice <= order.limit : closePrice >= order.limit);
 
+    const closeMarketableStop = (order: Order): boolean => {
+        if (
+            !closePhase
+            || cofState !== null
+            || order.bar !== context.idx
+            || order.type !== 'stop'
+            || order.stop === undefined
+        ) return false;
+        const stopEps = 1e-12 * Math.max(1, Math.abs(order.stop));
+        return parseDirection(order.direction) === 1
+            ? closePrice >= order.stop - stopEps
+            : closePrice <= order.stop + stopEps;
+    };
+
     // Process each pending order that was placed on a previous bar.
     for (const order of ordersToProcess) {
         if (order.status !== 'pending') continue;
@@ -917,11 +931,15 @@ export function processStrategyOrders(context: any, phase: 'open' | 'close' = 'o
         } else {
             // Orders placed on bar N can only fill on bar N+1 or later.
             // Skip current-bar orders outside the COF intrabar path, except
-            // for current-bar MARKET orders — and close-marketable LIMIT
-            // orders — in the explicit process-on-close phase.
+            // for current-bar MARKET, close-marketable LIMIT, and
+            // close-marketable STOP orders in the explicit process-on-close phase.
             const currentBarOrder = order.bar >= context.idx;
             const sameBarEligible = (cof && !closePhase)
-                || (closePhase && (order.type === 'market' || closeMarketableLimit(order)));
+                || (closePhase && (
+                    order.type === 'market'
+                    || closeMarketableLimit(order)
+                    || closeMarketableStop(order)
+                ));
             if (currentBarOrder && !sameBarEligible) {
                 continue;
             }
@@ -1029,7 +1047,11 @@ export function processStrategyOrders(context: any, phase: 'open' | 'close' = 'o
                     const stopPreviousTick = cofState && cofState.pass > 0
                         ? cofState.ticks[cofState.pass - 1]
                         : undefined;
-                    if (direction === 1) {
+                    const closeMarketable = closeMarketableStop(order);
+                    if (closeMarketable) {
+                        shouldFill = true;
+                        fillPrice = closePrice;
+                    } else if (direction === 1) {
                         if (tickPrice !== undefined) {
                             const crossed = cofState.pass === 0
                                 ? tickPrice >= order.stop

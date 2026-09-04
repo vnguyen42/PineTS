@@ -170,7 +170,9 @@ export interface Order {
     // Internal marker (VIN-95): a pure stop order already beyond the signal
     // bar's close at submission (buy stop < close / sell stop > close) is a
     // triggered order. It keeps its LEVEL for sizing (VIN-89) but fills at
-    // the next admissible open.
+    // the next admissible open — except under process_orders_on_close, where
+    // a current-bar marketable stop fills at the signal bar's close
+    // (POC_CLOSE_MARKETABLE_STOP, target 2120).
     _stop_marketable?: boolean;
     // Exit-specific fields (only set when category === 'exit').
     // strategy.exit() parameters: profit (TP in ticks), loss (SL in ticks),
