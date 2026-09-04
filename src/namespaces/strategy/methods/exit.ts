@@ -97,11 +97,11 @@ export function exit(context: any) {
         const trailPoints      = extractValue(parsed.trail_points);
         const trailOffset      = extractValue(parsed.trail_offset);
 
-        // Snap absolute limit/stop levels to the mintick grid. For an open
-        // stock position, TradingView rounds a stop toward the market's
-        // adverse side (long=floor, short=ceil) and a limit away from it
-        // (long=ceil, short=floor). Without a position, preserve the
-        // reference-directed placement rule.
+        // TradingView rounds an absolute exit LIMIT away from the market's adverse
+        // side for ANY open position class (stock, crypto spot, ...): long → up,
+        // short → down (probed on BINANCE:XLMUSDT D, script 1828: level 0.074295
+        // from a short TP placed at close 0.07426 fills at 0.0742). Without a
+        // position, preserve the reference-directed placement rule.
         // Absolute trail_price placement keeps the established current-close
         // reference so VIN-86c trailing direction semantics remain unchanged.
         const mintick = context.pine?.syminfo?.mintick ?? 0;
@@ -118,7 +118,7 @@ export function exit(context: any) {
         const positionReference = isStock && Number.isFinite(context.strategy.position_avg_price)
             ? context.strategy.position_avg_price
             : currentClose;
-        const limitRounding: 'up' | 'down' | undefined = isStock && positionDirection !== 0
+        const limitRounding: 'up' | 'down' | undefined = positionDirection !== 0
             ? positionDirection === 1 ? 'up' : 'down'
             : undefined;
         const stopRounding: 'up' | 'down' | undefined = isStock && positionDirection !== 0
