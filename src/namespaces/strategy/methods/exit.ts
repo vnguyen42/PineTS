@@ -101,7 +101,8 @@ export function exit(context: any) {
         // side for ANY open position class (stock, crypto spot, ...): long → up,
         // short → down (probed on BINANCE:XLMUSDT D, script 1828: level 0.074295
         // from a short TP placed at close 0.07426 fills at 0.0742). Without a
-        // position, preserve the reference-directed placement rule.
+        // position and without a bound pending entry, preserve the
+        // reference-directed placement rule.
         // Absolute trail_price placement keeps the established current-close
         // reference so VIN-86c trailing direction semantics remain unchanged.
         const mintick = context.pine?.syminfo?.mintick ?? 0;
@@ -118,13 +119,9 @@ export function exit(context: any) {
         const positionReference = isStock && Number.isFinite(context.strategy.position_avg_price)
             ? context.strategy.position_avg_price
             : currentClose;
-        const limitRounding: 'up' | 'down' | undefined = positionDirection !== 0
-            ? positionDirection === 1 ? 'up' : 'down'
-            : undefined;
         const stopRounding: 'up' | 'down' | undefined = isStock && positionDirection !== 0
             ? positionDirection === 1 ? 'down' : 'up'
             : undefined;
-        const limit       = limitRaw      !== undefined ? roundToMintick(limitRaw,      positionReference, mintick, limitRounding) : undefined;
         const stop        = stopRaw       !== undefined ? roundToMintick(stopRaw,       positionReference, mintick, stopRounding) : undefined;
         const trailPrice  = trailPriceRaw !== undefined ? roundToMintick(trailPriceRaw, currentClose, mintick) : undefined;
         const fromEntryId = fromEntry ?? '';
@@ -220,6 +217,16 @@ export function exit(context: any) {
                 boundEntryIds = [];
             }
         }
+        const limitRounding: 'up' | 'down' | undefined = boundDirection === 1
+            ? 'up'
+            : boundDirection === -1
+              ? 'down'
+              : positionDirection !== 0
+                ? positionDirection === 1 ? 'up' : 'down'
+                : undefined;
+        const limit = limitRaw !== undefined
+            ? roundToMintick(limitRaw, positionReference, mintick, limitRounding)
+            : undefined;
         const lifecycle = context.strategy._filled_exit_trade_ids?.get(lifecycleKey);
         const sameBarLifecycle = lifecycle?.bar === context.idx ? lifecycle : undefined;
         const partialExit = Number(qty) > 0 || Number(qtyPercent) > 0;
