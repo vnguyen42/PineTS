@@ -81,6 +81,38 @@ describe('Strategy — 1763 touch exact (binary noise)', () => {
         expect(context.strategy.closedtrades[1].exit_price).toBe(1.07448);
         expect(context.strategy.position_size).toBe(0);
     });
+    it('keeps sibling reservations separate when the full bracket fills before the 50% bracket', () => {
+        // The 1596 EURJPY pattern queues these two siblings on the same
+        // evaluation: the partial bracket reserves 50%, while its uncapped
+        // sibling must receive only the remaining 50%. The full bracket
+        // reaches its stop first; the partial bracket must remain live for
+        // the later take-profit.
+        const context = makeContext(0.01);
+        setBar(context, 0, 1, 1, 1, 1);
+        openTrade(context, 'sell', -1, 1000, 1, 0);
+        exit(context)('partial', 'sell', { qty_percent: 50, profit: 10 });
+        exit(context)('full', 'sell', { stop: 1.1 });
+        // Transpiled strategy.exit calls can leave the newest sibling first
+        // in the pending queue; reservation order must still follow callsite
+        // order (partial before full), as it does in the EURJPY replay.
+        context.strategy.pending_orders.reverse();
+
+        setBar(context, 1, 1.05, 1.1, 1.02, 1.08, 3_600_000);
+        expect(processExitOrders(context, 'intrabar')).toBe(1);
+        expect(context.strategy.closedtrades).toHaveLength(1);
+        expect(context.strategy.closedtrades[0].size).toBe(-500);
+        expect(context.strategy.closedtrades[0].exit_price).toBe(1.1);
+        expect(context.strategy.pending_orders.filter((order: { category?: string }) => order.category === 'exit')).toHaveLength(1);
+        expect(context.strategy.position_size).toBe(-500);
+
+        setBar(context, 2, 0.95, 0.98, 0.9, 0.93, 7_200_000);
+        expect(processExitOrders(context, 'intrabar')).toBe(1);
+        expect(context.strategy.closedtrades).toHaveLength(2);
+        expect(context.strategy.closedtrades[1].size).toBe(-500);
+        expect(context.strategy.closedtrades[1].exit_price).toBe(0.9);
+        expect(context.strategy.position_size).toBe(0);
+    });
+
 
     it('keeps the exit pending when the high is genuinely below the stop (beyond the noise tolerance)', () => {
         const context = makeContext(0.00001);

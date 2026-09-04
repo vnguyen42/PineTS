@@ -1124,6 +1124,28 @@ export function processStrategyOrders(context: any, phase: 'open' | 'close' = 'o
                 break;
         }
 
+        if (shouldFill && !cof && !closePhase && order.type !== 'market') {
+            // TV interleaves an active exit with a crossed opposite
+            // price-based entry along the assumed path. Process the exit
+            // prefix before this entry; market entries keep the established
+            // same-open entry-first behavior.
+            const entryDirection = parseDirection(order.direction);
+            const positionDirection = Math.sign(strategy.position_size);
+            if (positionDirection !== 0 && positionDirection !== entryDirection) {
+                const fillPath = snapExecutionPrices && order.type === 'stop'
+                    ? displayedIntrabarPath
+                    : intrabarPath;
+                const entryPathPosition = entryFillPathPosition(
+                    order,
+                    entryDirection,
+                    fillPath,
+                    null,
+                    false,
+                );
+                processExitOrders(context, 'intrabar', false, entryPathPosition);
+            }
+        }
+
         if (shouldFill) {
             // Risk rules run below, after the reversal close-qty adjustments.
 
@@ -2483,12 +2505,15 @@ interface ExitFillEvent {
  *
  * In the COF post-fill drain, `marketExitsOnly` restricts processing to pure
  * market exits emitted by the recalculation; those exits fill at the current
- * assumed tick before the path advances.
+ * assumed tick before the path advances. `beforePathPosition` is used by the
+ * non-COF path scheduler to consume only the active-exit prefix that precedes
+ * a crossed opposite price-based entry.
  */
 export function processExitOrders(
     context: any,
     phase: 'open' | 'intrabar' | 'close' = 'intrabar',
     marketExitsOnly = false,
+    beforePathPosition?: IntrabarPathPosition,
 ): number {
     if (!context.strategy) return 0;
     const strategy: StrategyState = context.strategy;
@@ -2549,6 +2574,31 @@ export function processExitOrders(
         })),
     );
     const globalEvents: ExitFillEvent[] = [];
+    // TradingView reserves an exit's quantity when sibling brackets are
+    // submitted, before any trigger is known. Track those reservations by
+    // activation so a later sibling cannot consume the quantity already
+    // claimed by an earlier pending bracket.
+    const reservedByActivation = new Map<string, number>();
+    const reserveExitQty = (matching: typeof activationBook, requestedQty: number): number => {
+        const availableQty = matching.reduce((sum, trade) => {
+            const activationId = trade._activation_id ?? trade.id;
+            return sum + Math.max(0, Math.abs(trade.size) - (reservedByActivation.get(activationId) ?? 0));
+        }, 0);
+        const reservedQty = Math.min(requestedQty, availableQty);
+        let remainingQty = reservedQty;
+        for (const trade of matching) {
+            if (remainingQty <= 1e-9) break;
+            const activationId = trade._activation_id ?? trade.id;
+            const alreadyReserved = reservedByActivation.get(activationId) ?? 0;
+            const availableForActivation = Math.max(0, Math.abs(trade.size) - alreadyReserved);
+            const reservedForActivation = Math.min(remainingQty, availableForActivation);
+            if (reservedForActivation > 0) {
+                reservedByActivation.set(activationId, alreadyReserved + reservedForActivation);
+                remainingQty -= reservedForActivation;
+            }
+        }
+        return reservedQty;
+    };
     // VIN-132b: exact distance tie → LOW first (strict <), consistent with
     // assumedIntrabarPath. The old <= sent ties HIGH-first, which fired the
     // TP legs of 1781 bar 66 where TV fires the stops.
@@ -2614,7 +2664,23 @@ export function processExitOrders(
     // order surviving to intra-bar crossing closes same-bar entries too
     // (2020-12-17), and a waiting order attaches to a reversal entry and
     // gap-exits it at its own fill price (2021-09-08).
-    for (const [orderSequence, order] of strategy.pending_orders.entries()) {
+    // Reservations follow the script's exit-call order, not the pending
+    // array's newest-first order. Keep the original sequence on each event so
+    // equal-path execution precedence remains unchanged.
+    const exitCallsiteRank = (order: Order): number => {
+        if ((order.category ?? 'entry') !== 'exit' || order._callsiteId === undefined) {
+            return Number.MAX_SAFE_INTEGER;
+        }
+        const suffix = /(\d+)$/.exec(order._callsiteId);
+        return suffix === null ? Number.MAX_SAFE_INTEGER : Number(suffix[1]);
+    };
+    const orderedPendingEntries = strategy.pending_orders
+        .map((order, orderSequence) => ({ order, orderSequence }))
+        .sort((left, right) =>
+            exitCallsiteRank(left.order) - exitCallsiteRank(right.order)
+            || left.orderSequence - right.orderSequence,
+        );
+    for (const { orderSequence, order } of orderedPendingEntries) {
         if (order.status !== 'pending') continue;
         if ((order.category ?? 'entry') !== 'exit') continue;
         const isPureMarketExit =
@@ -3240,8 +3306,6 @@ export function processExitOrders(
             ? [...tpEvents, ...slEvents, ...(trailEvent ? [trailEvent] : [])]
             : [...slEvents, ...(trailEvent ? [trailEvent] : []), ...tpEvents];
 
-        if (events.length === 0) continue;
-
         let reservedQty = matchingQty;
         if (order._explicit_qty_cap || (order.qty && order.qty > 0)) reservedQty = Math.min(order.qty, matchingQty);
         else if (order.qty_percent && order.qty_percent > 0) {
@@ -3254,6 +3318,10 @@ export function processExitOrders(
             const entryQty = matching.reduce((sum, trade) => sum + Math.abs(trade._entry_order_qty ?? trade.size), 0);
             reservedQty = entryQty * (order.qty_percent / 100);
         }
+        // Reserve even when this order has no trigger on the current bar:
+        // sibling brackets still own their quantity while waiting.
+        reservedQty = reserveExitQty(matching, reservedQty);
+        if (events.length === 0) continue;
 
         const combinedEvents: FillEvent[] = [];
         for (const event of events) {
@@ -3299,10 +3367,18 @@ export function processExitOrders(
         || left.distanceAlongSegment - right.distanceAlongSegment
         || left.orderSequence - right.orderSequence,
     );
+    const deferredOrders = beforePathPosition === undefined
+        ? undefined
+        : new Set(
+            globalEvents
+                .filter((event) => comparePathPositions(event, beforePathPosition) > 0)
+                .map((event) => event.order),
+        );
 
     const capRemaining = new Map<Order, number>();
     const lastFillByOrder = new Map<Order, number>();
     for (const event of globalEvents) {
+        if (beforePathPosition !== undefined && comparePathPositions(event, beforePathPosition) > 0) continue;
         const remainingCap = capRemaining.get(event.order) ?? event.reservedQty;
         if (remainingCap <= 1e-9 || event.order.status !== 'pending') continue;
 
@@ -3416,6 +3492,7 @@ export function processExitOrders(
     }
 
     for (const [order, fillPrice] of lastFillByOrder) {
+        if (deferredOrders?.has(order)) continue;
         order.status = 'filled';
         order.fill_price = fillPrice;
         order.fill_bar = context.idx;
