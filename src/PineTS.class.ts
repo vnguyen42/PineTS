@@ -1038,6 +1038,12 @@ export class PineTS {
         snapshot.strategyHistorySnapshotBar = context._strategyHistorySnapshotBar;
 
         // Also snapshot result and data array lengths
+        // VIN-151: the forming bar is replayed by updateTail. Save append-only
+        // curve lengths too, otherwise each replay leaves a duplicate point.
+        // Drawing collections are rebuilt separately by their helpers.
+        snapshot.plotLengths = Object.fromEntries(Object.entries(context.plots)
+            .filter(([, plot]: [string, any]) => plot._plotKey && Array.isArray(plot.data))
+            .map(([key, plot]: [string, any]) => [key, plot.data.length]));
         snapshot.resultLength = this._getResultLength(context.result);
         snapshot.dataLength = context.data.close?.data?.length ?? 0;
 
@@ -1073,6 +1079,11 @@ export class PineTS {
             }
         };
 
+        for (const [key, plot] of Object.entries(context.plots) as [string, any][]) {
+            if (plot._plotKey && Array.isArray(plot.data)) {
+                plot.data.length = Math.min(plot.data.length, snapshot.plotLengths?.[key] ?? 0);
+            }
+        }
         restoreContainer(context, snapshot.main);
         if (context.lctx && snapshot.lctx) {
             let i = 0;
