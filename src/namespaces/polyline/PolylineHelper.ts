@@ -16,29 +16,28 @@ export class PolylineHelper {
     }
 
     private _ensurePlotsEntry() {
-        if (!this.context.plots['__polylines__']) {
-            this.context.plots['__polylines__'] = {
-                title: '__polylines__',
-                data: [],
+        const key = '__polylines__';
+        if (!this.context.plots[key]) {
+            const helper = this;
+            this.context.plots[key] = {
+                title: key,
+                get data() {
+                    return [{
+                        time: helper.context.marketData[0]?.openTime || 0,
+                        value: helper._polylines.map(obj => obj.toPlotData()),
+                        options: { style: 'drawing_polyline' },
+                    }];
+                },
                 options: { style: 'drawing_polyline', overlay: this.context.indicator?.overlay || false },
             };
         }
     }
 
     public syncToPlot() {
+        // VIN-152: retain the object lifecycle on every bar, but materialize
+        // the display payload only when read, like the existing table helper.
         this._ensurePlotsEntry();
-        // Store ALL polylines as a single array value at the first bar's time.
-        // Same aggregation pattern as lines and linefills — prevents sparse array
-        // collisions when multiple objects share the same timestamp.
-        const time = this.context.marketData[0]?.openTime || 0;
-        // Compact out deleted polylines — bounded array (RC3), transparent output;
-        // rollbackFromBar filters by _createdAtBar, orthogonal to _deleted.
-        this._polylines = this._polylines.filter(pl => !pl._deleted);
-        this.context.plots['__polylines__'].data = [{
-            time,
-            value: this._polylines.map(pl => pl.toPlotData()),
-            options: { style: 'drawing_polyline' },
-        }];
+        this._polylines = this._polylines.filter(obj => !obj._deleted);
     }
 
     /**

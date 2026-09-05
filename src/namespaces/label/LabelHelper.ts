@@ -32,44 +32,31 @@ export class LabelHelper {
         return Series.from(source).get(index);
     }
 
-    private _ensurePlotsEntry() {
-        if (!this.context.plots['__labels__']) {
-            this.context.plots['__labels__'] = {
-                title: '__labels__',
-                data: [],
-                options: { style: 'label', overlay: this.context.indicator?.overlay || false },
+    private _ensurePlotsEntry(overlay = false) {
+        const key = overlay ? '__labels_overlay__' : '__labels__';
+        if (!this.context.plots[key]) {
+            const helper = this;
+            this.context.plots[key] = {
+                title: key,
+                get data() {
+                    return [{
+                        time: helper.context.marketData[0]?.openTime || 0,
+                        value: helper._labels.filter(obj => !!obj.force_overlay === overlay).map(obj => obj.toPlotData()),
+                        options: { style: 'label' },
+                    }];
+                },
+                options: { style: 'label', overlay: overlay || helper.context.indicator?.overlay || false },
             };
         }
     }
 
     public syncToPlot() {
+        // VIN-152: retain the object lifecycle on every bar, but materialize
+        // the display payload only when read, like the existing table helper.
         this._ensurePlotsEntry();
-        const time = this.context.marketData[0]?.openTime || 0;
-        // Compact out deleted labels — keeps the backing array bounded to the
-        // active set (RC3). Transparent to output; rollbackFromBar filters by
-        // _createdAtBar, orthogonal to _deleted.
-        this._labels = this._labels.filter(lbl => !lbl._deleted);
-        const allPlotData = this._labels.map(lbl => lbl.toPlotData());
-
-        // Split force_overlay objects into a separate overlay plot (renders on main chart pane)
-        const regular = allPlotData.filter((l: any) => !l.force_overlay);
-        const overlay = allPlotData.filter((l: any) => l.force_overlay);
-
-        this.context.plots['__labels__'].data = [{
-            time,
-            value: regular,
-            options: { style: 'label' },
-        }];
-
-        if (overlay.length > 0) {
-            this.context.plots['__labels_overlay__'] = {
-                title: '__labels_overlay__',
-                data: [{ time, value: overlay, options: { style: 'label' } }],
-                options: { style: 'label', overlay: true },
-            };
-        } else {
-            delete this.context.plots['__labels_overlay__'];
-        }
+        this._labels = this._labels.filter(obj => !obj._deleted);
+        if (this._labels.some(obj => obj.force_overlay)) this._ensurePlotsEntry(true);
+        else delete this.context.plots['__labels_overlay__'];
     }
 
     /**
