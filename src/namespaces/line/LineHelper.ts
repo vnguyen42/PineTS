@@ -30,47 +30,31 @@ export class LineHelper {
         return Series.from(source).get(index);
     }
 
-    private _ensurePlotsEntry() {
-        if (!this.context.plots['__lines__']) {
-            this.context.plots['__lines__'] = {
-                title: '__lines__',
-                data: [],
-                options: { style: 'drawing_line', overlay: this.context.indicator?.overlay || false },
+    private _ensurePlotsEntry(overlay = false) {
+        const key = overlay ? '__lines_overlay__' : '__lines__';
+        if (!this.context.plots[key]) {
+            const helper = this;
+            this.context.plots[key] = {
+                title: key,
+                get data() {
+                    return [{
+                        time: helper.context.marketData[0]?.openTime || 0,
+                        value: helper._lines.filter(obj => !!obj.force_overlay === overlay).map(obj => obj.toPlotData()),
+                        options: { style: 'drawing_line' },
+                    }];
+                },
+                options: { style: 'drawing_line', overlay: overlay || helper.context.indicator?.overlay || false },
             };
         }
     }
 
     public syncToPlot() {
+        // VIN-152: retain the object lifecycle on every bar, but materialize
+        // the display payload only when read, like the existing table helper.
         this._ensurePlotsEntry();
-        const time = this.context.marketData[0]?.openTime || 0;
-        // Compact out deleted objects so the backing array stays bounded to the
-        // active set. Without this it grows O(bars·objects), and every syncToPlot
-        // / _enforceMaxCount scan over it becomes O(that) → quadratic overall
-        // (RC3). Transparent: the emitted set is unchanged (deleted objects were
-        // already filtered out). rollbackFromBar filters by _createdAtBar, which
-        // is orthogonal to _deleted, so streaming rollback is unaffected.
-        this._lines = this._lines.filter(ln => !ln._deleted);
-        const allPlotData = this._lines.map(ln => ln.toPlotData());
-
-        // Split force_overlay objects into a separate overlay plot (renders on main chart pane)
-        const regular = allPlotData.filter((l: any) => !l.force_overlay);
-        const overlay = allPlotData.filter((l: any) => l.force_overlay);
-
-        this.context.plots['__lines__'].data = [{
-            time,
-            value: regular,
-            options: { style: 'drawing_line' },
-        }];
-
-        if (overlay.length > 0) {
-            this.context.plots['__lines_overlay__'] = {
-                title: '__lines_overlay__',
-                data: [{ time, value: overlay, options: { style: 'drawing_line' } }],
-                options: { style: 'drawing_line', overlay: true },
-            };
-        } else {
-            delete this.context.plots['__lines_overlay__'];
-        }
+        this._lines = this._lines.filter(obj => !obj._deleted);
+        if (this._lines.some(obj => obj.force_overlay)) this._ensurePlotsEntry(true);
+        else delete this.context.plots['__lines_overlay__'];
     }
 
     private _resolvePoint(point: ChartPointObject): { x: number; xloc: string } {

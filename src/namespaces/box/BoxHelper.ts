@@ -33,43 +33,31 @@ export class BoxHelper {
         return Series.from(source).get(index);
     }
 
-    private _ensurePlotsEntry() {
-        if (!this.context.plots['__boxes__']) {
-            this.context.plots['__boxes__'] = {
-                title: '__boxes__',
-                data: [],
-                options: { style: 'drawing_box', overlay: this.context.indicator?.overlay || false },
+    private _ensurePlotsEntry(overlay = false) {
+        const key = overlay ? '__boxes_overlay__' : '__boxes__';
+        if (!this.context.plots[key]) {
+            const helper = this;
+            this.context.plots[key] = {
+                title: key,
+                get data() {
+                    return [{
+                        time: helper.context.marketData[0]?.openTime || 0,
+                        value: helper._boxes.filter(obj => !!obj.force_overlay === overlay).map(obj => obj.toPlotData()),
+                        options: { style: 'drawing_box' },
+                    }];
+                },
+                options: { style: 'drawing_box', overlay: overlay || helper.context.indicator?.overlay || false },
             };
         }
     }
 
     public syncToPlot() {
+        // VIN-152: retain the object lifecycle on every bar, but materialize
+        // the display payload only when read, like the existing table helper.
         this._ensurePlotsEntry();
-        const time = this.context.marketData[0]?.openTime || 0;
-        // Compact out deleted boxes — bounded array (RC3), transparent output;
-        // rollbackFromBar filters by _createdAtBar, orthogonal to _deleted.
-        this._boxes = this._boxes.filter(bx => !bx._deleted);
-        const allPlotData = this._boxes.map(bx => bx.toPlotData());
-
-        // Split force_overlay objects into a separate overlay plot (renders on main chart pane)
-        const regular = allPlotData.filter((b: any) => !b.force_overlay);
-        const overlay = allPlotData.filter((b: any) => b.force_overlay);
-
-        this.context.plots['__boxes__'].data = [{
-            time,
-            value: regular,
-            options: { style: 'drawing_box' },
-        }];
-
-        if (overlay.length > 0) {
-            this.context.plots['__boxes_overlay__'] = {
-                title: '__boxes_overlay__',
-                data: [{ time, value: overlay, options: { style: 'drawing_box' } }],
-                options: { style: 'drawing_box', overlay: true },
-            };
-        } else {
-            delete this.context.plots['__boxes_overlay__'];
-        }
+        this._boxes = this._boxes.filter(obj => !obj._deleted);
+        if (this._boxes.some(obj => obj.force_overlay)) this._ensurePlotsEntry(true);
+        else delete this.context.plots['__boxes_overlay__'];
     }
 
     private _resolvePoint(point: ChartPointObject): { x: number; xloc: string } {
