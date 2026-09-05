@@ -274,8 +274,8 @@ plot(ma)
             // Canonical form since 325508c: the message passes through
             // runtime.param (Type B unwrap), then runtime.error(pN) throws
             // PineRuntimeError with the exact message.
-            expect(code).toContain("runtime.param('No matching MA type found.', undefined, 'p16')");
-            expect(code).toContain('const temp_7 = runtime.error(p16);');
+            expect(code).toMatch(/runtime\.param\('No matching MA type found\.', undefined, 'p\d+'\)/); // VIN-149: input specialization renumbers temporaries.
+            expect(code).toMatch(/const temp_\d+ = runtime\.error\(p\d+\);/);
             expect(code).toMatch(/default:[^]*?runtime\.error[^]*?float/);
         });
 

@@ -21,6 +21,7 @@
 // keywords as typed local variable names » ci-dessous).
 
 import { describe, it, expect } from 'vitest';
+import { Indicator } from '../../src/Indicator';
 import { transpile } from '../../src/transpiler/index';
 import { extractPineScriptVersion } from '../../src/transpiler/pineToJS/pineToJS.index';
 
@@ -565,9 +566,9 @@ plot(src)
         const result = transpile(code);
         const jsCode = result.toString();
 
-        expect(jsCode).toContain('input.int');
+        expect(jsCode).toContain('$._inputValue('); // VIN-149: literal scalar inputs are resolved directly.
         expect(jsCode).toContain('input.source');
-        expect(jsCode).toContain('input.float');
+        expect(jsCode).toContain("$._inputValue(2.0, 'Multiplier'");
     });
 
     it('should transpile string functions', () => {
@@ -983,7 +984,7 @@ plot(step + threshold)
 
             expect(jsCode).toContain('0.5');
             expect(jsCode).toContain('$.let.glb1_threshold = $.init($.let.glb1_threshold, 0.75)');
-            expect(jsCode).toContain('0.1');
+            expect(new Indicator(code).getInputsMeta().find(input => input.varId === 'step')?.step).toBe(0.1); // VIN-149: metadata remains available outside the bar loop.
         });
 
         it('should distinguish dot-prefix numbers from member access', () => {
@@ -1588,7 +1589,7 @@ plot(a * b)
         expect(jsCode).toContain('$.let.glb1_b');
         // Should not have incorrectly split the arguments
         expect(jsCode).toContain('ta.sma');
-        expect(jsCode).toContain('input.int');
+        expect(jsCode).toContain('$._inputValue('); // VIN-149: literal scalar inputs are resolved directly.
     });
 
     it('should handle comma-separated statements on multiple lines separately', () => {
@@ -2287,7 +2288,7 @@ plot(signal, title="Signal", color=color.orange)
         const result = transpile(code);
         const jsCode = result.toString();
 
-        expect(jsCode).toContain('input.int');
+        expect(jsCode).toContain('$._inputValue('); // VIN-149: literal scalar inputs are resolved directly.
         expect(jsCode).toContain('ta.ema');
         expect(jsCode).toContain('plot');
         expect(jsCode).toContain('$.let.glb1_macd');

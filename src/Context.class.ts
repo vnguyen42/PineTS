@@ -718,6 +718,13 @@ export class Context {
         //return Number(n.toFixed(decimals));
     }
 
+    /** VIN-149: compiler-resolved literal scalar inputs, with live overrides. */
+    _inputValue(defval: unknown, title: string, varId: string) {
+        if (varId && this.inputs && this.inputs[varId] !== undefined) return this.inputs[varId];
+        if (title && this.inputs && this.inputs[title] !== undefined) return this.inputs[title];
+        return defval;
+    }
+
     /**
      * This function is used to apply special transformation to internal PineTS parameters and handle them as time-series
      * @param source - the source data, can be an array or a single value

@@ -253,33 +253,23 @@ let src_open = input.any({ title: 'Open Source', defval: open });
     __varId: "_string"
   });
   $.let.glb1__string = $.init($.let.glb1__string, temp_2);
-  const p2 = input.param(10.0, undefined, 'p2');
-  const p3 = input.param("float input", undefined, 'p3');
-  const p4 = input.param({
-    minval: 0.0,
-    maxval: 100.0,
-    step: 0.1
-  }, undefined, 'p4');
-  const temp_3 = input.float(p2, p3, p4, {
-    __varId: "_float"
-  });
-  $.let.glb1__float = $.init($.let.glb1__float, temp_3);
-  const p5 = input.param({
+  $.let.glb1__float = $.init($.let.glb1__float, $._inputValue(10.0, "float input", "_float"));
+  const p2 = input.param({
     title: 'Close Source',
     defval: close
-  }, undefined, 'p5');
-  const temp_4 = input.any(p5, {
+  }, undefined, 'p2');
+  const temp_3 = input.any(p2, {
     __varId: "src_close"
   });
-  $.let.glb1_src_close = $.init($.let.glb1_src_close, temp_4);
-  const p6 = input.param({
+  $.let.glb1_src_close = $.init($.let.glb1_src_close, temp_3);
+  const p3 = input.param({
     title: 'Open Source',
     defval: open
-  }, undefined, 'p6');
-  const temp_5 = input.any(p6, {
+  }, undefined, 'p3');
+  const temp_4 = input.any(p3, {
     __varId: "src_open"
   });
-  $.let.glb1_src_open = $.init($.let.glb1_src_open, temp_5);
+  $.let.glb1_src_open = $.init($.let.glb1_src_open, temp_4);
 }`;
 
         expect(result).toBe(expected_code);
