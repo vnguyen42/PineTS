@@ -386,9 +386,9 @@ export function computeEquityAtPrice(context: any, atPrice: number): number {
     const strategy: StrategyState = context.strategy;
     const pointValue = context.pine?.syminfo?.pointvalue ?? 1;
     let unrealized = 0;
-    for (const lot of ledgerOpenLots(strategy)) {
-        const priceChange = lot.dir === 1 ? atPrice - lot.entry_price : lot.entry_price - atPrice;
-        unrealized += priceChange * lot.qty * pointValue;
+    for (const trade of strategy.opentrades) {
+        const priceChange = Math.sign(trade.size) === 1 ? atPrice - trade.entry_price : trade.entry_price - atPrice;
+        unrealized += priceChange * Math.abs(trade.size) * pointValue;
     }
     return strategy.initial_capital + strategy.netprofit + unrealized;
 }
@@ -2134,31 +2134,22 @@ export function closePartialPosition(context: any, qtyToClose: number, exitPrice
         strategy.position_entry_name = '';
     } else if (strategy.opentrades.length > 0) {
         // Recompute average entry price from the remaining open book
-        // (LEDGER view — see ledgerOpenLots). Crucial because closing
+        // (chronological open-trade view). Crucial because closing
         // older entries (FIFO pairing) changes the weighted average if
         // the position was built from multiple entries at different
         // prices.
         let totalCost = 0;
         let totalQty = 0;
-        for (const t of ledgerOpenLots(strategy)) {
-            totalCost += t.qty * t.entry_price;
-            totalQty += t.qty;
+        for (const t of strategy.opentrades) {
+            const qty = Math.abs(t.size);
+            totalCost += qty * t.entry_price;
+            totalQty += qty;
         }
         strategy.position_avg_price = totalCost / totalQty;
         // position_entry_name keeps pointing at whichever entry opened the
         // first still-open trade
         strategy.position_entry_name = strategy.opentrades[0].entry_id;
     }
-}
-
-/** Canonical chronological open-lot view used by all equity calculations. */
-function ledgerOpenLots(strategy: StrategyState): Array<{ qty: number; entry_price: number; commission: number; dir: number }> {
-    return strategy.opentrades.map((trade) => ({
-        qty: Math.abs(trade.size),
-        entry_price: trade.entry_price,
-        commission: trade.commission ?? 0,
-        dir: Math.sign(trade.size),
-    }));
 }
 
 /**
@@ -2169,9 +2160,9 @@ function ledgerOpenLots(strategy: StrategyState): Array<{ qty: number; entry_pri
 function openProfitAt(context: any, price: number): number {
     const pointValue = context.pine?.syminfo?.pointvalue ?? 1;
     let unrealizedPnL = 0;
-    for (const lot of ledgerOpenLots(context.strategy)) {
-        const priceChange = lot.dir === 1 ? price - lot.entry_price : lot.entry_price - price;
-        unrealizedPnL += priceChange * lot.qty * pointValue;
+    for (const trade of context.strategy.opentrades) {
+        const priceChange = Math.sign(trade.size) === 1 ? price - trade.entry_price : trade.entry_price - price;
+        unrealizedPnL += priceChange * Math.abs(trade.size) * pointValue;
     }
     return unrealizedPnL;
 }
@@ -2235,7 +2226,7 @@ function updateEquityPeaks(context: any, highPrice: number, lowPrice: number): v
     // Open-book entry commissions (already deducted from netprofit at
     // fill) — LEDGER view, consistent with netprofit's slice increments.
     let openCommission = 0;
-    for (const lot of ledgerOpenLots(strategy)) openCommission += lot.commission;
+    for (const trade of strategy.opentrades) openCommission += trade.commission ?? 0;
 
     // PEAK basis excludes the open trades' entry commissions. TV latches the
     // equity high-water on the intermediate funds state right after a close

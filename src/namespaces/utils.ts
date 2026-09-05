@@ -68,7 +68,24 @@ export function extractCallsiteId(args: any[]): string | undefined {
  * @param types - The types to parse, each type is a string representing the type of the argument.
  * @returns The parsed arguments, the arguments are parsed according to the signatures and types.
  */
-export function parseArgsForPineParams<T>(args: any[], signatures: any[], types: Record<string, string>, override?: Record<string, any>) {
+export function parseArgsForPineParams<T>(args: any[], signatures: any[], types: Record<string, string>, override?: Record<string, any>): T & Partial<T> & Record<string, any> {
+    // One signature needs neither a validity array nor a nested matching loop.
+    // Keep scanning after a positional mismatch: a trailing named bag still wins.
+    const single = typeof signatures[0] === 'string' ? signatures : signatures.length === 1 ? signatures[0] : undefined;
+    if (single) {
+        const options = {} as T;
+        let valid = true;
+        for (let i = 0; i < args.length; i++) {
+            const arg = args[i];
+            if (TYPE_CHECK.remaining_options(arg)) return { ...options, ...arg, ...override };
+            if (!valid) continue;
+            const name = single[i];
+            const checker = name === undefined ? undefined : TYPE_CHECK[types[name]];
+            if (typeof checker === 'function' && checker(arg)) options[name] = arg;
+            else valid = false;
+        }
+        return { ...options, ...override };
+    }
     if (Array.isArray(signatures) && typeof signatures[0] === 'string') {
         signatures = [signatures];
     }
