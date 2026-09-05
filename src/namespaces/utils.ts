@@ -85,10 +85,8 @@ export function parseArgsForPineParams<T>(args: any[], signatures: any[], types:
             break;
         }
 
-        const curOptions = signatures.map((e, idx) => (valid[idx] ? e[i] : undefined));
-
-        for (let o = 0; o < curOptions.length; o++) {
-            const optionName = curOptions[o];
+        for (let o = 0; o < signatures.length; o++) {
+            const optionName = valid[o] ? signatures[o][i] : undefined;
             if (optionName === undefined) {
                 valid[o] = false;
                 continue;

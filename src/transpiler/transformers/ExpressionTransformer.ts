@@ -1909,6 +1909,35 @@ export function transformCallExpression(node: any, scopeManager: ScopeManager, n
         }
 
         const namespace = node.callee.object.name;
+        // VIN-149: literal scalar input declarations need no per-bar overload
+        // parsing or widget-metadata construction. Resolve overrides live;
+        // input.source / bare input and dynamic expressions keep the old path.
+        const scalarInputs = ['bool', 'color', 'enum', 'float', 'int', 'price', 'session', 'string', 'symbol', 'text_area', 'time', 'timeframe'];
+        const literalMetadata = (arg: any): boolean => {
+            if (!arg) return false;
+            if (arg.type === 'Literal') return arg.value === null || ['string', 'number', 'boolean'].includes(typeof arg.value);
+            if (arg.type === 'UnaryExpression' && ['+', '-'].includes(arg.operator)) return literalMetadata(arg.argument);
+            if (arg.type === 'ArrayExpression') return arg.elements.every(literalMetadata);
+            if (arg.type === 'ObjectExpression') return arg.properties.every((p: any) => p.type === 'Property' &&
+                !p.computed && !p.method && p.kind === 'init' && literalMetadata(p.value));
+            return false;
+        };
+        if (namespace === 'input' && scalarInputs.includes(node.callee.property.name) && node._varId !== undefined &&
+            node.arguments.length >= 2 && node.arguments[0]?.type === 'Literal' &&
+            ['string', 'number', 'boolean'].includes(typeof node.arguments[0].value) &&
+            node.arguments[1]?.type === 'Literal' && typeof node.arguments[1].value === 'string' &&
+            node.arguments.slice(2).every((a: any) => a.type === 'Literal' || a.type === 'UnaryExpression' ||
+                (a.type === 'ObjectExpression' && a.properties.every((p: any) => p.type === 'Property' && !p.computed && !p.method && p.kind === 'init'))) &&
+            node.arguments.slice(2).every((a: any) => a.type !== 'ObjectExpression' || a.properties.every((p: any) =>
+                !['defval', 'title', '__varId'].includes(p.key.name ?? p.key.value)))) {
+            // Nonliteral widget expressions still execute in their original
+            // order (they can call TA/user functions). Only pure literals vanish.
+            const metadata = node.arguments.slice(2).filter((a: any) => !literalMetadata(a))
+                .map((a: any) => transformFunctionArgument(a, namespace, scopeManager));
+            node.callee = ASTFactory.createMemberExpression(ASTFactory.createIdentifier(CONTEXT_NAME), ASTFactory.createIdentifier('_inputValue'));
+            node.arguments = [node.arguments[0], node.arguments[1], { type: 'Literal', value: node._varId }, ...metadata];
+            return;
+        }
         // For `request.security(...)` / `request.security_lower_tf(...)`
         // called with the named-args options bag (`{symbol, timeframe,
         // expression, …}`), the `expression` property must be wrapped in
