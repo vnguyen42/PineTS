@@ -19,3 +19,9 @@ This entry point specializes static inputs, suitable current-value expressions a
 Scope: full historical runs with fixed configuration, validated on Node 22.23.1. This API exposes neither streaming nor `updateTail`/checkpoint operations. It does not add support for Pine functions missing from the underlying engine. It preserves strategy results and plots; internal variable slots in `context.let`/`var` may be removed by specialization and are not a supported introspection contract. There is no scores-only mode or cross-job indicator cache.
 
 The benchmark and qualification report lives in the companion `pinets-parity` repository under `benchmarks/studio-production-perf/README.md`. The runtime package contains its own optimizer and helper; it does not import benchmark files or machine-specific paths. Existing `acorn` and `astring` package dependencies are used for the transformation.
+
+## Contributor checks
+
+Run `npm test -- --run` for the engine suite and `npm run test:package` for this entry point. The package check rebuilds every format and the declarations, packs the archive, installs it in a temporary consumer outside the repository, and verifies real strategy outputs, concurrent/configuration isolation, the specialization boundary cases, and strict TypeScript usage in Bundler and NodeNext modes. It requires npm registry access to install the package dependencies. Both `prepublishOnly` and the release workflow run the package check automatically.
+
+The specialization passes execute in order: resolve fixed inputs and current-value arguments, fold constants, simplify strategy declarations and current-only locals/functions, remove unused histories, then specialize fixed plot metadata. Constant folding and plot specialization are local helpers in the optimizer file. The prepared runner owns a private cached compilation and returns a separate input map per run; it never replaces an instance method at runtime.

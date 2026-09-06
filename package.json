@@ -77,8 +77,9 @@
         "build:prod:browser": "cross-env BUILD=prod FORMAT=browser rollup -c ./rollup.config.js",
         "build:prod:browser-es": "cross-env BUILD=prod FORMAT=browser-es rollup -c ./rollup.config.js",
         "build:prod:es": "cross-env BUILD=prod rollup -c ./rollup.config.js",
-        "prepublishOnly": "npm run build:prod:all",
-        "knip": "knip"
+        "prepublishOnly": "npm run test:package",
+        "knip": "knip",
+        "test:package": "npm run build:prod:all && node scripts/test-package.mjs"
     },
     "author": "LuxAlgo",
     "license": "AGPL-3.0-only",

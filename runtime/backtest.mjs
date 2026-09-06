@@ -1,8 +1,19 @@
 // VIN-156: prepared full-history runner, with private fixed configuration.
-import {PineTS, Indicator} from './specialize.mjs';
+import { PineTS, Indicator } from './specialize.mjs';
+
+// The compiled function is shared; the input map attached to each returned
+// Context is private to that run. Keep this policy in the prepared indicator.
+class FixedBacktestIndicator extends Indicator {
+    #prepared;
+
+    prepare() {
+        this.#prepared ??= super.prepare();
+        return { ...this.#prepared, inputs: { ...this.#prepared.inputs } };
+    }
+}
 
 /** Prepare one fixed configuration; each call runs a fresh historical context. */
-export function prepareBacktest(source, {inputs = {}, props = {}} = {}) {
+export function prepareBacktest(source, { inputs = {}, props = {} } = {}) {
     // Pine configuration inputs are scalars. Reject mutable source objects rather
     // than cloning a Series into a plain object and changing its meaning.
     for (const [key, value] of Object.entries(inputs)) {
@@ -10,11 +21,8 @@ export function prepareBacktest(source, {inputs = {}, props = {}} = {}) {
             throw new TypeError(`Backtest input "${key}" must be a string, number or boolean`);
         }
     }
-    const indicator = new Indicator(source, {...inputs});
+    const indicator = new FixedBacktestIndicator(source, { ...inputs });
     for (const [key, value] of Object.entries(structuredClone(props))) indicator.prop[key] = value;
-    const prepared = indicator.prepare();
-    // PineTS attaches prepared.inputs to the returned Context. Give each run
-    // its own map so a consumer cannot mutate the private fixed configuration.
-    indicator.prepare = () => ({...prepared, inputs: {...prepared.inputs}});
+    indicator.prepare();
     return (...dataArguments) => new PineTS(...dataArguments).run(indicator);
 }
