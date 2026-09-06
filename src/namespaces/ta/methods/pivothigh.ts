@@ -17,10 +17,24 @@ export function pivothigh(context: any) {
         const leftbars = Series.from(_leftbars).get(0);
         const rightbars = Series.from(_rightbars).get(0);
 
-        // Stateless calculation using full array history
-        const sourceArray = Series.from(source).toArray();
-        const result = pivothighUtil(sourceArray, leftbars, rightbars);
+        const values = Series.from(source).toArray();
         const idx = context.idx;
-        return context.precision(result[idx]);
+        // VIN-156: the full-array helper recomputes every earlier pivot on each bar.
+        // Keep its legacy behavior for unusual widths; evaluate only result[idx]
+        // for normal Pine integer widths, including sparse/conditional histories.
+        if (!Number.isInteger(leftbars) || !Number.isInteger(rightbars) || leftbars < 0 || rightbars < 0 || !Number.isInteger(idx)) {
+            return context.precision(pivothighUtil(values, leftbars, rightbars)[idx]);
+        }
+        if (idx < 0 || idx >= values.length) return context.precision(undefined);
+        if (idx < leftbars + rightbars) return context.precision(NaN);
+
+        const pivot = values[idx - rightbars];
+        for (let j = 1; j <= leftbars; j++) {
+            if (values[idx - rightbars - j] > pivot) return context.precision(NaN);
+        }
+        for (let j = 1; j <= rightbars; j++) {
+            if (values[idx - rightbars + j] >= pivot) return context.precision(NaN);
+        }
+        return context.precision(pivot);
     };
 }

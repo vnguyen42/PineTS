@@ -41,11 +41,18 @@
                 "default": "./dist/pinets.min.browser.js"
             },
             "default": "./dist/pinets.min.es.js"
+        },
+        "./backtest": {
+            "types": "./runtime/backtest.d.ts",
+            "node": {
+                "import": "./runtime/backtest.mjs"
+            }
         }
     },
     "files": [
         "dist/*.min.*",
-        "dist/types"
+        "dist/types",
+        "runtime"
     ],
     "type": "module",
     "scripts": {
