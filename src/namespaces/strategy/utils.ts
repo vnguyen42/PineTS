@@ -143,6 +143,18 @@ function snapExecutionPrice(price: number, mintick: number): number {
     if (decimalPlaces > 100 || Object.is(snapped, -0)) return snapped;
     return Number(snapped.toFixed(decimalPlaces));
 }
+
+/** Keep the broker's tick-product representation in average-price arithmetic. */
+function averageEntryPrice(context: any, price: number): number {
+    const mintick = context.pine?.syminfo?.mintick;
+    if (!Number.isFinite(price) || !Number.isFinite(mintick) || mintick <= 0) return price;
+    // Use the existing execution-grid test; do not quantize genuinely off-grid
+    // prices or the final weighted average. TV exposes 2.1710000000000003 for
+    // an LDO entry reported as 2.171, which changes percent-based tick counts.
+    if (snapExecutionPrice(price, mintick) !== price) return price;
+    const tickPrice = Math.round(price / mintick) * mintick;
+    return Number.isFinite(tickPrice) ? tickPrice : price;
+}
 /**
  * Compose a market/gap execution fill on the mintick grid IN TICK SPACE —
  * rule R3 (VIN-2479, fit 4525/4525 on the archived TradingView ledgers):
@@ -1805,15 +1817,16 @@ export function openTrade(
     // Update flat position scalars
     const oldSize = strategy.position_size;
     const newSize = oldSize + trade.size;
+    const averagePrice = averageEntryPrice(context, price);
 
     if (oldSize === 0) {
         // Opening fresh position
         strategy.position_size = newSize;
-        strategy.position_avg_price = price;
+        strategy.position_avg_price = averagePrice;
         strategy.position_entry_name = entryId;
     } else if (Math.sign(oldSize) === Math.sign(newSize)) {
         // Adding to existing same-direction position — weighted-avg the entry price
-        const totalCost = Math.abs(oldSize) * strategy.position_avg_price + qty * price;
+        const totalCost = Math.abs(oldSize) * strategy.position_avg_price + qty * averagePrice;
         const totalQty = Math.abs(newSize);
         strategy.position_avg_price = totalCost / totalQty;
         strategy.position_size = newSize;
@@ -2139,7 +2152,7 @@ export function closePartialPosition(context: any, qtyToClose: number, exitPrice
         let totalQty = 0;
         for (const t of strategy.opentrades) {
             const qty = Math.abs(t.size);
-            totalCost += qty * t.entry_price;
+            totalCost += qty * averageEntryPrice(context, t.entry_price);
             totalQty += qty;
         }
         strategy.position_avg_price = totalCost / totalQty;
