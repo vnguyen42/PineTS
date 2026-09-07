@@ -1318,6 +1318,14 @@ export class PineTS {
                                 // its triggering order's submission, not older batches.
                                 const pendingBefore = strategy.risk_rules.max_intraday_filled_orders
                                     ? new Set(strategy.pending_orders) : null;
+                                // Native VIN-173: a carried fill is valued at this point.
+                                // An additional COF batch / freshly submitted market fill
+                                // observes the next point; conditional crossings already
+                                // precede their current endpoint.
+                                const nextValuationPoint = drainIterations > 0
+                                    || (strategy._cof.currentBarEntryFilled && !strategy._cof.interiorEntryFilled);
+                                const valuationPass = Math.min(strategy._cof.pass + Number(nextValuationPoint), strategy._cof.ticks.length - 1);
+                                markToMarket(context, strategy._cof.ticks[valuationPass]);
                                 await transpiledFn(context);
                                 if (pendingBefore) {
                                     const batch = strategy._cof.submissionBatch = (strategy._cof.submissionBatch ?? 0) + 1;
