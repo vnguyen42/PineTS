@@ -2126,6 +2126,9 @@ export interface CloseInfo {
 export function closePartialPosition(context: any, qtyToClose: number, exitPrice: number, exitTime: number, closeInfo?: CloseInfo): void {
     const strategy: StrategyState = context.strategy;
     const pointValue = context.pine?.syminfo?.pointvalue ?? 1;
+    // One close order may span several FIFO lots. A flat commission belongs
+    // to the order, so distribute it over the quantity actually closed.
+    const totalClosingQty = Math.min(qtyToClose, strategy.opentrades.reduce((sum, trade) => sum + Math.abs(trade.size), 0));
     let remainingQty = qtyToClose;
     const remainingActivation = activationSegmentsAfterClose(
         strategy.opentrades,
@@ -2164,7 +2167,8 @@ export function closePartialPosition(context: any, qtyToClose: number, exitPrice
         // would charge the flat fee TWICE (review L1 round 2).
         const commType = strategy.config.commission_type ?? 'percent';
         const halveFlat = closeInfo?.isImplicitReversal && commType === 'cash_per_order';
-        const rawExitCommission = computeLegCommission(context, strategy, qtyClosing, exitPrice);
+        const rawExitCommission = computeLegCommission(context, strategy, qtyClosing, exitPrice)
+            * (commType === 'cash_per_order' ? qtyClosing / totalClosingQty : 1);
         const exitCommissionTotal = halveFlat ? rawExitCommission / 2 : rawExitCommission;
 
         const emitClosedRow = (sizeParts: number) => {
@@ -2894,6 +2898,9 @@ export function processExitOrders(
         // cancelled, mirroring TV's behavior of treating
         // strategy.close_all() as a no-op when its intended position is
         // already gone.
+        // A flat fee makes independent brackets non-additive: keep their
+        // activation boundaries even when their fill prices coincide.
+        const flatFeeBrackets = !isPureMarketExit && strategy.config.commission_type === 'cash_per_order';
         const cofPercentExit = cofState !== null && !order._explicit_qty_cap
             && !(order.qty > 0) && Number(order.qty_percent) > 0;
         const excludedActivationTradeIds = order._excluded_activation_trade_ids;
@@ -3169,7 +3176,9 @@ export function processExitOrders(
             // FIFO may consume both fractions from the same physical lot.
             let tQty = cofPercentExit
                 ? Math.min(Math.abs(t.size), Math.abs(t._entry_order_qty ?? t.size) * (Number(order.qty_percent) / 100))
-                : Math.abs(t.size);
+                : flatFeeBrackets
+                  ? Math.abs(t._entry_order_qty ?? t.size) * (Number(order.qty_percent) > 0 ? Number(order.qty_percent) / 100 : 1)
+                  : Math.abs(t.size);
             // VIN-160: floor each activation's percent fraction before FIFO
             // allocation. Sub-step halves otherwise erase real residual lots
             // and change the position average used by subsequent brackets.
@@ -3550,7 +3559,7 @@ export function processExitOrders(
             const existing = combinedEvents.find(
                 (candidate) =>
                     candidate.kind === event.kind
-                    && (!cofPercentExit || candidate.tradeId === event.tradeId)
+                    && (!(cofPercentExit || flatFeeBrackets) || candidate.tradeId === event.tradeId)
                     && candidate.price === event.price
                     && candidate.gap === event.gap
                     && candidate.atClose === event.atClose
@@ -3562,7 +3571,7 @@ export function processExitOrders(
                 existing.qty = existing.qty === Infinity || event.qty === Infinity
                     ? Infinity
                     : existing.qty + event.qty;
-                if (!cofPercentExit) {
+                if (!(cofPercentExit || flatFeeBrackets)) {
                     existing.tradeId = undefined;
                     existing.sourceCount = (existing.sourceCount ?? 1) + 1;
                 }
