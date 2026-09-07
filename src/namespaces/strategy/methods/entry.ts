@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright (C) 2026 LuxAlgo
 
-import { intradayFilledOrdersHalted, calculateOrderQty, cofCurrentTick, cryptoMarketSizingPrice, normalizeOrderLevel, parseDirection, parseEntryDirection, wouldExceedPyramiding, roundToMintick } from '../utils';
+import { riskOrderRequestsHalted, calculateOrderQty, cofCurrentTick, cryptoMarketSizingPrice, normalizeOrderLevel, parseDirection, parseEntryDirection, wouldExceedPyramiding, roundToMintick } from '../utils';
 import { Order } from '../types';
 import { Series } from '../../../Series';
 import { parseArgsForPineParams } from '../../utils';
@@ -74,7 +74,7 @@ export function entry(context: any) {
         if (!context.strategy) {
             throw new Error('strategy.entry() called before strategy() declaration');
         }
-        if (intradayFilledOrdersHalted(context)) return;
+        if (riskOrderRequestsHalted(context)) return;
         const parsed = parseArgsForPineParams<any>(args, ENTRY_SIGNATURES, ENTRY_ARGS_TYPES);
 
         const extractValue = (val: any) => {

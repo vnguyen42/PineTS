@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright (C) 2026 LuxAlgo
 
-import { intradayFilledOrdersHalted, calculateOrderQty, normalizeOrderLevel, parseDirection } from '../utils';
+import { riskOrderRequestsHalted, calculateOrderQty, normalizeOrderLevel, parseDirection } from '../utils';
 import { Order } from '../types';
 import { Series } from '../../../Series';
 import { parseArgsForPineParams } from '../../utils';
@@ -51,7 +51,7 @@ export function order(context: any) {
         if (!context.strategy) {
             throw new Error('strategy.order() called before strategy() declaration');
         }
-        if (intradayFilledOrdersHalted(context)) return;
+        if (riskOrderRequestsHalted(context)) return;
 
         const parsed = parseArgsForPineParams<any>(args, ORDER_SIGNATURES, ORDER_ARGS_TYPES);
 

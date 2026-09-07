@@ -4,7 +4,7 @@
 import { Order } from '../types';
 import { Series } from '../../../Series';
 import { parseArgsForPineParams } from '../../utils';
-import { intradayFilledOrdersHalted, resolveWhenGate } from '../utils';
+import { riskOrderRequestsHalted, resolveWhenGate } from '../utils';
 
 /**
  * Close ALL open positions at market, regardless of which entry opened them.
@@ -30,7 +30,7 @@ export function close_all(context: any) {
         if (!context.strategy) {
             throw new Error('strategy.close_all() called before strategy() declaration');
         }
-        if (intradayFilledOrdersHalted(context)) return;
+        if (riskOrderRequestsHalted(context)) return;
 
         // Pine v4 also allows `when` as the first positional argument. The
         // canonical signature keeps `when` trailing so named and v5 calls

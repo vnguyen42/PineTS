@@ -20,6 +20,11 @@ export function intradayFilledOrdersHalted(context: any): boolean {
     return strategy._intraday_filled_orders.halted;
 }
 
+/** VIN-168: a permanent halt rejects new requests, not accepted pending orders. */
+export function riskOrderRequestsHalted(context: any): boolean {
+    return context.strategy?.risk_halted === true || intradayFilledOrdersHalted(context);
+}
+
 function recordIntradayOrderFill(context: any, price: number, time: number, count = 1, triggeringOrder?: Order): void {
     const strategy: StrategyState = context.strategy;
     const rule = strategy.risk_rules.max_intraday_filled_orders;
@@ -1632,7 +1637,6 @@ export function wouldExceedPyramiding(strategy: StrategyState, direction: number
  * Pre-fill risk-rule check. Returns true if the order should be BLOCKED.
  *
  * Consulted rules (independent; first violation wins):
- *   - risk_halted (latched by any catastrophic rule)
  *   - allow_entry_in: 'long' blocks short orders; 'short' blocks long.
  *     A prohibited-direction order never opens a prohibited residual: when
  *     it would only close/reduce an existing opposite (allowed) position,
@@ -1643,7 +1647,6 @@ export function wouldExceedPyramiding(strategy: StrategyState, direction: number
  *     to the remaining cap, while a purely reducing order is unchanged
  */
 export function isOrderBlockedByRisk(strategy: StrategyState, order: Order): boolean {
-    if (strategy.risk_halted) return true;
     const rules = strategy.risk_rules;
     const orderDir = order.direction;
 
@@ -1691,8 +1694,8 @@ export function isOrderBlockedByRisk(strategy: StrategyState, order: Order): boo
 
 /**
  * Latches `risk_halted` when any catastrophic rule trips (max_drawdown,
- * max_intraday_loss, max_cons_loss_days). Once halted, all entries are
- * blocked for the rest of the run.
+ * max_intraday_loss, max_cons_loss_days). Once halted, all order requests are
+ * rejected at submission for the rest of the run. Accepted orders survive.
  *
  * Called after each close. The intraday rules use simple cumulative
  * approximations — true day-rollover detection would require bar timestamp

@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright (C) 2026 LuxAlgo
 
+import { parseArgsForPineParams } from '../../utils';
+
 /**
  * `strategy.risk` is a nested namespace with 6 setter functions that
  * configure pre-trade risk rules. Each call mutates `context.strategy.risk_rules`;
@@ -30,8 +32,12 @@ export function risk(context: any) {
             if (!context.strategy) return;
             context.strategy.risk_rules.max_cons_loss_days = { count, alert_message };
         },
-        max_drawdown: (value: number, type: 'cash' | 'percent_of_equity', _alert_message?: string) => {
+        max_drawdown: (...args: any[]) => {
             if (!context.strategy) return;
+            // VIN-168: public source 1592 supplies named value/type arguments.
+            const { value, type } = parseArgsForPineParams<{ value: number; type: 'cash' | 'percent_of_equity' }>(
+                args, ['value', 'type', 'alert_message'], { value: 'number', type: 'string', alert_message: 'string' },
+            );
             context.strategy.risk_rules.max_drawdown = { value, type };
         },
         max_intraday_filled_orders: (count: number, alert_message?: string) => {
