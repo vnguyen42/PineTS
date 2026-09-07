@@ -3580,9 +3580,13 @@ export function applyPendingOpenMarginCall(context: any): number {
     (strategy as any)._pending_open_mc = null;
     if (Math.sign(strategy.position_size) !== pending.dir) return 0;
     const price = snapExecutionPrice(Series.from(context.data.open).get(0), context.pine?.syminfo?.mintick ?? 0);
-    const qtyToClose = Math.min(pending.qty, Math.abs(strategy.position_size));
-    const marginPct = pending.dir === 1 ? (strategy.config.margin_long ?? 0) : (strategy.config.margin_short ?? 0);
     const pointValue = context.pine?.syminfo?.pointvalue ?? 1;
+    // The covered money is frozen at detection; contracts are quantized at
+    // execution (UNI: .028 at open 6.55, not .032 at the prior close 6.54).
+    const rawCoverQty = pending.moneyToCover / (price * pointValue);
+    const coverQty = quantizeToQtyStep(context, rawCoverQty) ?? rawCoverQty;
+    const qtyToClose = Math.min(Math.abs(strategy.position_size), coverQty === 0 ? 1 : 4 * coverQty);
+    const marginPct = pending.dir === 1 ? (strategy.config.margin_long ?? 0) : (strategy.config.margin_short ?? 0);
     // VIN-161: deferred liquidation admission uses entry margin less the
     // FULL liquidated notional, not proportional margin on the remainder.
     // This preserves the borrowed amount for the admission check. Equity
@@ -3764,18 +3768,18 @@ export function processMarginCall(context: any, checkpoint: 'open' | 'extreme' |
         // 4×deficit/(price·m) — verified exactly on fresh TV captures at
         // margin_long/short = 50 (close-MC investigation, 2026-06-12).
         const marginFrac = marginPct / 100;
+        if (checkpoint === 'close') {
+            // VIN-161: freeze the money to cover, not the number of units.
+            // Convert and quantize at the next opening execution price even
+            // if that opening price has already restored sufficient equity.
+            (strategy as any)._pending_open_mc = { moneyToCover: deficit / marginFrac, dir: positionDir };
+            return 0;
+        }
         const rawCoverQty = deficit / (adversePrice * pointValue * marginFrac);
         const coverQty = quantizeToQtyStep(context, rawCoverQty) ?? rawCoverQty;
         // A real deficit whose covered quantity truncates to zero still
         // liquidates one unit (UNI April witness, unchanged with default qty 7).
         const qtyToLiquidate = Math.min(totalQty, coverQty === 0 ? 1 : 4 * coverQty);
-        if (checkpoint === 'close') {
-            // VIN-161: POC entry commission creates the deficit at this
-            // close; TV fills its frozen .044 UNI liquidation at the next
-            // open even when that open has already restored sufficient equity.
-            (strategy as any)._pending_open_mc = { qty: qtyToLiquidate, dir: positionDir };
-            return 0;
-        }
 
         // Remember the FIFO order before the close so we can identify the
         // PARTIALLY-consumed lot afterwards (the liquidation eats whole

@@ -154,6 +154,13 @@ plot(strategy.position_avg_price, "Average price")
         expect(trades[1].size).toBeCloseTo(-28.228, 9);
         expect(trades[1].exit_price).toBe(3.019);
         expect(trades[1].exit_time).toBe(1602936000000);
+        // TV plots the normal close execution before its immediate exit.
+        // A second COF execution at the final tick would expose a flat book.
+        for (const [name, value] of [['Position', -28.228], ['Equity', 100.014376],
+            ['Liquidation price', 3.282], ['Net profit', -.267904],
+            ['Open profit', .28228], ['Average price', 3.029]] as const) {
+            expect(r.plots[name].data.find(p => p.time === 1602936000000)!.value).toBeCloseTo(value, 9);
+        }
     });
 
     it.each([1, 7])('liquidates one unit for a sub-contract cover independently of default qty %s', async (defaultQty) => {
