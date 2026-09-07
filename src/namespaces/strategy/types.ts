@@ -232,6 +232,9 @@ export interface Order {
     // semantics (1502: after a close_all fills at the open, the re-entry is
     // booked at the OPEN, the first fill point).
     _cof_fresh_same_tick?: boolean;
+    // Internal risk close scheduled after a current-bar COF order fill.
+    _risk_close_after_cof_pass?: number;
+    _cof_submission_batch?: number;
     // VIN-160: fresh bracket marketable at a preceding forward TP fill.
     _cof_marketable_next_pass?: number;
 
@@ -326,8 +329,9 @@ export interface Order {
 //      exactly FLAT (VIN-135, oracle 1502) — marked `_cof_fresh_same_tick`,
 //      also filled at the current tick (1502: after a close_all takes the
 //      open, the re-entry is booked at the OPEN, the first fill point).
-// Pyramiding (same-direction) market entries and price-based orders retain
-// their next-tick/path semantics (1502 same-bar groups prove it).
+// VIN-166: the opening point also admits one additional same-direction
+// market fill. Further additions and later points keep next-tick semantics;
+// price-based orders keep their path semantics.
 // The bar-close evaluation runs with `_cof === null` (only a fill
 // recalculation has a pass), so the close-time POC phase is unaffected.
 export interface CofBarState {
@@ -350,6 +354,9 @@ export interface CofBarState {
     // recalculation re-emits the same logical order.
     drainedEntryIds?: Set<string>;
     drainedEntryPass?: number;
+    // VIN-166: one extra same-side market addition at the opening point.
+    openAdditionFilled?: boolean;
+    submissionBatch?: number;
 }
 
 /**

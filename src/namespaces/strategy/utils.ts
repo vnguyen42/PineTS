@@ -20,7 +20,7 @@ export function intradayFilledOrdersHalted(context: any): boolean {
     return strategy._intraday_filled_orders.halted;
 }
 
-function recordIntradayOrderFill(context: any, price: number, time: number, count = 1): void {
+function recordIntradayOrderFill(context: any, price: number, time: number, count = 1, triggeringOrder?: Order): void {
     const strategy: StrategyState = context.strategy;
     const rule = strategy.risk_rules.max_intraday_filled_orders;
     if (!rule || intradayFilledOrdersHalted(context)) return;
@@ -28,10 +28,30 @@ function recordIntradayOrderFill(context: any, price: number, time: number, coun
     state.count += count;
     if (state.count < rule.count) return;
     state.halted = true;
+    // A fill rejects unexecuted orders submitted with it during the same COF
+    // recalculation. Earlier recalculation batches survive (VIN-166 probes).
+    if (strategy._cof && triggeringOrder?.bar === context.idx
+        && triggeringOrder._cof_submission_batch !== undefined) {
+        for (const order of strategy.pending_orders) {
+            if (order.status === 'pending' && order.bar === context.idx
+                && order._cof_submission_batch === triggeringOrder._cof_submission_batch) {
+                order.status = 'cancelled';
+            }
+        }
+    }
     // VIN-164 TV BCH witnesses: close once at the triggering fill, but keep
     // previously queued orders alive, including fills on subsequent bars.
     const reason = 'Close Position (Max number of filled orders in one day)';
-    if (strategy.position_size !== 0) {
+    if (strategy.position_size !== 0 && triggeringOrder?.bar === context.idx && strategy._cof) {
+        // VIN-166: a cap reached by a current-bar COF order closes at the
+        // next path point. A carried order (cap1) closes immediately.
+        strategy.pending_orders.push({
+            id: reason, direction: 0, qty: 0, type: 'market', category: 'exit',
+            bar: context.idx, time, status: 'pending', from_entry: '', comment: reason,
+            _intended_trade_ids: strategy.opentrades.map(t => t.id),
+            _risk_close_after_cof_pass: strategy._cof.pass,
+        });
+    } else if (strategy.position_size !== 0) {
         closePartialPosition(context, Math.abs(strategy.position_size), price, time, {
             exitId: reason, exitComment: reason,
         });
@@ -949,13 +969,17 @@ export function processStrategyOrders(context: any, phase: 'open' | 'close' = 'o
         // Skip exit-category orders — processExitOrders handles them.
         if ((order.category ?? 'entry') === 'exit') continue;
 
-        // VIN-110/VIN-135 same-tick drain: only REVERSAL MARKET entries and
+        // VIN-166: at the OPEN, recalculated MARKET additions also drain
+        // once per opening point (TV BCH cap100, pyramid2, and three-ID
+        // chain probes). At later points,
+        // only the previously qualified reversal/fresh entry cases drain.
+        // VIN-110/VIN-135 same-tick drain: REVERSAL MARKET entries and
         // MARKET entries opening FROM FLAT (1502) created by the current-bar
         // recalculation fill at the current tick. One fill per logical order
         // id per pass — the recalculation re-emits the same order on every
         // drain iteration (TV books it once; without the guard the drain
-        // would oscillate the position forever). Same-direction adds on a
-        // NON-flat position keep next-point semantics (1502 adds; a re-entry
+        // would oscillate the position forever). Beyond the first open addition,
+        // same-direction adds keep next-point semantics (1502 adds; a re-entry
         // after a same-tick flatten — 2205 round-trips — is "fresh" and
         // drains same-tick).
         if (reversalEntriesOnly) {
@@ -963,7 +987,8 @@ export function processStrategyOrders(context: any, phase: 'open' | 'close' = 'o
                 cofState === null
                 || order.bar !== context.idx
                 || order.type !== 'market'
-                || (!order._cof_reversal_same_tick && !order._cof_fresh_same_tick)
+                || (!order._cof_reversal_same_tick && !order._cof_fresh_same_tick
+                    && (cofState.pass !== 0 || cofState.openAdditionFilled))
             ) {
                 continue;
             }
@@ -1432,7 +1457,7 @@ export function processStrategyOrders(context: any, phase: 'open' | 'close' = 'o
                             order.fill_bar = context.idx;
                             order.fill_time = currentTime;
                             fills += 1;
-                            recordIntradayOrderFill(context, fillPrice, currentTime);
+                            recordIntradayOrderFill(context, fillPrice, currentTime, 1, order);
                         } else {
                             order.status = 'cancelled';
                         }
@@ -1455,7 +1480,11 @@ export function processStrategyOrders(context: any, phase: 'open' | 'close' = 'o
             order.fill_bar = context.idx;
             order.fill_time = currentTime;
             fills += 1;
-            recordIntradayOrderFill(context, fillPrice, currentTime);
+            recordIntradayOrderFill(context, fillPrice, currentTime, 1, order);
+            if (reversalEntriesOnly && cofState?.pass === 0
+                && !order._cof_reversal_same_tick && !order._cof_fresh_same_tick) {
+                cofState.openAdditionFilled = true;
+            }
             // VIN-110 anti-loop: the recalculation re-emits the same reversal
             // order id on every drain iteration; only the FIRST fill of each
             // logical id counts for the current pass.
@@ -2742,6 +2771,9 @@ export function processExitOrders(
     for (const { orderSequence, order } of orderedPendingEntries) {
         if (order.status !== 'pending') continue;
         if ((order.category ?? 'entry') !== 'exit') continue;
+        if (order.bar === context.idx && cofState
+            && order._risk_close_after_cof_pass !== undefined
+            && cofState.pass <= order._risk_close_after_cof_pass) continue;
         const isPureMarketExit =
             order.type === 'market' &&
             order.profit === undefined &&
@@ -3564,7 +3596,7 @@ export function processExitOrders(
         capRemaining.set(event.order, nextCap);
         lastFillByOrder.set(event.order, fillPrice);
         fills += event.fillCount;
-        recordIntradayOrderFill(context, fillPrice, currentTime, event.fillCount);
+        recordIntradayOrderFill(context, fillPrice, currentTime, event.fillCount, event.order);
 
         const excludedActivation = event.order._excluded_activation_trade_ids ??= [];
         for (const tradeId of activatedIds) {

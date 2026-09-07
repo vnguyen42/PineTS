@@ -72,9 +72,159 @@ plot(strategy.equity, "Equity")
         expect(trades[2].exit_comment).toBe('final');
         expect(r.strategy!.netprofit).toBeCloseTo(25, 9);
     });
-    // Known same-open COF discrepancy, independently present on base4433851.
+    it('VIN-166: fills the independently captured pyramid2 addition at the open', async () => {
+        const r = await run(`//@version=5
+strategy("VIN166 distinct IDs pyramid2", overlay=true, initial_capital=10000, pyramiding=2, calc_on_order_fills=true, margin_long=0, margin_short=0)
+if time == timestamp("UTC", 2020, 3, 16, 0, 0)
+    strategy.entry("L1", strategy.long, qty=1)
+if time == timestamp("UTC", 2020, 3, 16, 4, 0) and strategy.position_size > 0
+    strategy.entry("L2", strategy.long, qty=1)
+if time == timestamp("UTC", 2020, 3, 17, 4, 0)
+    strategy.close_all("final")
+plot(strategy.position_size, "Position")
+plot(strategy.closedtrades, "Closed trades")
+plot(strategy.equity, "Equity")
+`);
+        expect(r.strategy!.closedtrades).toHaveLength(2);
+        for (const t of r.strategy!.closedtrades) {
+            expect(t.entry_price).toBe(179.6);
+            expect(t.entry_time).toBe(1584331200000);
+            expect(t.exit_price).toBe(182.2);
+            expect(t.exit_time).toBe(1584432000000);
+            expect(t.size).toBe(1);
+        }
+        expect(r.strategy!.netprofit).toBeCloseTo(5.2, 9);
+    });
+    it.each([false, true])('VIN-166: matches the COF cap100 control (same ID: %s)', async (sameId) => {
+        const controlSource = sameId ? source.replace('strategy.entry("second",', 'strategy.entry("first",') : source;
+        const r = await run(controlSource.replace('pyramiding=10,', 'pyramiding=10, calc_on_order_fills=true,').replace('max_intraday_filled_orders(2)', 'max_intraday_filled_orders(100)'));
+        expect(r.strategy!.closedtrades).toHaveLength(11);
+        if (!sameId) expect(r.strategy!.closedtrades.filter(t => t.entry_id === 'second').map(t => t.entry_price)).toEqual([179.6, 179.9, 158, 159.2]);
+        const expected = [["first", 179.6, 172.4, 1584331200000, 1584403200000, -7.2], ["second", 179.6, 172.4, 1584331200000, 1584403200000, -7.2], ["second", 179.9, 172.4, 1584331200000, 1584403200000, -7.5], ["second", 158.0, 172.4, 1584331200000, 1584403200000, 14.4], ["second", 159.2, 172.4, 1584345600000, 1584403200000, 13.2], ["pending-buy-150", 150.0, 172.4, 1584345600000, 1584403200000, 22.4], ["third-fill-attempt", 172.5, 172.4, 1584374400000, 1584403200000, -0.1], ["next-day", 172.4, 180.0, 1584403200000, 1584417600000, 7.6], ["next-day", 168.7, 180.0, 1584403200000, 1584417600000, 11.3], ["next-day", 184.6, 180.0, 1584403200000, 1584417600000, -4.6], ["next-day", 180.0, 180.0, 1584417600000, 1584417600000, 0.0]];
+        expected.forEach(([id, entry, exit, entryTime, exitTime, profit], i) => {
+            const t = r.strategy!.closedtrades[i];
+            expect([t.entry_id, t.entry_time, t.exit_time, t.size, t.commission]).toEqual([sameId && id === 'second' ? 'first' : id, entryTime, exitTime, 1, 0]);
+            expect(t.entry_price).toBeCloseTo(Number(entry), 9);
+            expect(t.exit_price).toBeCloseTo(Number(exit), 9);
+            expect(t.profit).toBeCloseTo(Number(profit), 9);
+        });
+        expect(r.strategy!.netprofit).toBeCloseTo(42.3, 9);
+    });
+    // TV COF captures from VIN-164; base4433851 omitted the second same-open fill.
     // https://linear.app/vinplus/issue/VIN-166/studio-corriger-les-executions-au-meme-open-avec-calc-on-order-fills
-    it.fails('VIN-166: matches the COF TradingView witness', async () => {
+    it('VIN-166: preserves an older pending order when the COF cap closes next tick', async () => {
+        const r = await run(`//@version=5
+strategy("BCH daily fill limit 2 COF old pending witness", overlay=true, initial_capital=10000, pyramiding=10, calc_on_order_fills=true, margin_long=0, margin_short=0)
+// Real source 2650 uses this exact rule. BCHUSDT 4h, all timestamps UTC.
+// March 16 08:00 candle: open159.16 high164.84 low147.14 close150.85.
+// The second market fill precedes the later touch of the pending buy150.
+strategy.risk.max_intraday_filled_orders(2)
+if time == timestamp("UTC", 2020, 3, 16, 0, 0)
+    strategy.entry("first", strategy.long, qty=1)
+    strategy.entry("pending-buy-150", strategy.long, qty=1, limit=150)
+if time == timestamp("UTC", 2020, 3, 16, 4, 0)
+    strategy.entry("second", strategy.long, qty=1)
+if time == timestamp("UTC", 2020, 3, 16, 12, 0)
+    strategy.entry("third-fill-attempt", strategy.long, qty=1)
+if time == timestamp("UTC", 2020, 3, 16, 20, 0)
+    strategy.close_all("day-cleanup")
+if time == timestamp("UTC", 2020, 3, 17, 0, 0)
+    strategy.entry("next-day", strategy.long, qty=1)
+if time == timestamp("UTC", 2020, 3, 17, 4, 0)
+    strategy.close_all("final")
+plot(strategy.position_size, "Position")
+plot(strategy.closedtrades, "Closed trades")
+plot(strategy.equity, "Equity")
+`);
+        expect(r.strategy!.closedtrades).toHaveLength(4);
+        expect(r.strategy!.closedtrades.map(t => t.entry_price)).toEqual([179.6, 179.6, 150, 180]);
+        expect(r.strategy!.closedtrades.map(t => t.exit_price)).toEqual([179.9, 179.9, 180, 180]);
+        expect(r.strategy!.netprofit).toBeCloseTo(30.6, 9);
+    });
+    it('VIN-166: closes immediately when the regular fill itself reaches cap1', async () => {
+        const r = await run(source.replace('pyramiding=10,', 'pyramiding=10, calc_on_order_fills=true,').replace('max_intraday_filled_orders(2)', 'max_intraday_filled_orders(1)'));
+        expect(r.strategy!.closedtrades).toHaveLength(2);
+        expect(r.strategy!.closedtrades.map(t => t.entry_price)).toEqual([179.6, 180]);
+        expect(r.strategy!.closedtrades.map(t => t.exit_price)).toEqual([179.6, 180]);
+        expect(r.strategy!.netprofit).toBe(0);
+    });
+    it('VIN-166: preserves a pending order from an earlier recalculation on the same bar', async () => {
+        const r = await run(`//@version=5
+strategy("BCH daily fill VIN166 pending earlier recalc cap3", overlay=true, initial_capital=10000, pyramiding=10, calc_on_order_fills=true, margin_long=0, margin_short=0)
+// Real source 2650 uses this exact rule. BCHUSDT 4h, all timestamps UTC.
+// March 16 08:00 candle: open159.16 high164.84 low147.14 close150.85.
+// The second market fill precedes the later touch of the pending buy150.
+strategy.risk.max_intraday_filled_orders(3)
+if time == timestamp("UTC", 2020, 3, 16, 0, 0)
+    strategy.entry("first", strategy.long, qty=1)
+if time == timestamp("UTC", 2020, 3, 16, 4, 0)
+    strategy.entry("second", strategy.long, qty=1)
+    if strategy.opentrades == 1
+        strategy.entry("pending-buy-150", strategy.long, qty=1, limit=150)
+if time == timestamp("UTC", 2020, 3, 16, 12, 0)
+    strategy.entry("third-fill-attempt", strategy.long, qty=1)
+if time == timestamp("UTC", 2020, 3, 16, 20, 0)
+    strategy.close_all("day-cleanup")
+if time == timestamp("UTC", 2020, 3, 17, 0, 0)
+    strategy.entry("next-day", strategy.long, qty=1)
+if time == timestamp("UTC", 2020, 3, 17, 4, 0)
+    strategy.close_all("final")
+plot(strategy.position_size, "Position")
+plot(strategy.closedtrades, "Closed trades")
+plot(strategy.equity, "Equity")
+`);
+        expect(r.strategy!.closedtrades).toHaveLength(5);
+        expect(r.strategy!.closedtrades.map(t => t.entry_price)).toEqual([179.6, 179.6, 179.9, 150, 180]);
+        expect(r.strategy!.closedtrades.map(t => t.exit_price)).toEqual([158, 158, 158, 180, 180]);
+        expect(r.strategy!.netprofit).toBeCloseTo(-35.1, 9);
+    });
+    it('VIN-166: admits one additional same-open fill and preserves an older batch', async () => {
+        const r = await run(`//@version=5
+strategy("VIN166 pending older drain cap3", overlay=true, initial_capital=10000, pyramiding=10, calc_on_order_fills=true, margin_long=0, margin_short=0)
+strategy.risk.max_intraday_filled_orders(3)
+if time == timestamp("UTC", 2020, 3, 16, 0, 0)
+    strategy.entry("first", strategy.long, qty=1)
+if time == timestamp("UTC", 2020, 3, 16, 4, 0)
+    if strategy.opentrades == 1
+        strategy.entry("second", strategy.long, qty=1)
+        strategy.entry("pending-buy-150", strategy.long, qty=1, limit=150)
+    if strategy.opentrades == 2
+        strategy.entry("third", strategy.long, qty=1)
+if time == timestamp("UTC", 2020, 3, 17, 4, 0)
+    strategy.close_all("final")
+plot(strategy.position_size, "Position")
+plot(strategy.closedtrades, "Closed trades")
+plot(strategy.equity, "Equity")
+`);
+        expect(r.strategy!.closedtrades).toHaveLength(4);
+        expect(r.strategy!.closedtrades.map(t => t.entry_price)).toEqual([179.6, 179.6, 179.9, 150]);
+        expect(r.strategy!.closedtrades.map(t => t.exit_price)).toEqual([158, 158, 158, 182.2]);
+        expect(r.strategy!.netprofit).toBeCloseTo(-32.9, 9);
+    });
+    it('VIN-166: admits only one additional same-open fill without reaching the cap', async () => {
+        const r = await run(`//@version=5
+strategy("VIN166 three IDs cap100 control", overlay=true, initial_capital=10000, pyramiding=10, calc_on_order_fills=true, margin_long=0, margin_short=0)
+strategy.risk.max_intraday_filled_orders(100)
+if time == timestamp("UTC", 2020, 3, 16, 0, 0)
+    strategy.entry("first", strategy.long, qty=1)
+if time == timestamp("UTC", 2020, 3, 16, 4, 0)
+    if strategy.opentrades == 1
+        strategy.entry("second", strategy.long, qty=1)
+        strategy.entry("pending-buy-150", strategy.long, qty=1, limit=150)
+    if strategy.opentrades == 2
+        strategy.entry("third", strategy.long, qty=1)
+if time == timestamp("UTC", 2020, 3, 17, 4, 0)
+    strategy.close_all("final")
+plot(strategy.position_size, "Position")
+plot(strategy.closedtrades, "Closed trades")
+plot(strategy.equity, "Equity")
+`);
+        expect(r.strategy!.closedtrades).toHaveLength(4);
+        expect(r.strategy!.closedtrades.map(t => t.entry_price)).toEqual([179.6, 179.6, 179.9, 150]);
+        expect(r.strategy!.closedtrades.map(t => t.exit_price)).toEqual([182.2, 182.2, 182.2, 182.2]);
+        expect(r.strategy!.netprofit).toBeCloseTo(39.7, 9);
+    });
+    it('VIN-166: matches the COF TradingView witness', async () => {
         const r = await run(source.replace('pyramiding=10,', 'pyramiding=10, calc_on_order_fills=true,'));
         const trades = r.strategy!.closedtrades;
         expect(trades).toHaveLength(3);

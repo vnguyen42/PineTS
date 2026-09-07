@@ -1235,7 +1235,8 @@ export class PineTS {
                     // Orders placed during a fill recalculation normally fill
                     // on the next assumed tick. The measured exception is a
                     // pure market exit emitted by that recalculation: it is
-                    // drained at the current tick. Same-bar market entries and
+                    // drained at the current tick. VIN-166 also admits one extra
+                    // market addition at the open; later additions and
                     // conditional exits retain their next-tick/path behavior.
                     // The loop visits all four path points. A fill triggers a
                     // recalculation; a point with no fill simply advances the
@@ -1307,7 +1308,17 @@ export class PineTS {
                                     const data = Object.getOwnPropertyDescriptor(context.plots[key], 'data')?.value;
                                     if (Array.isArray(data)) plotLengths.push([data, data.length]);
                                 }
+                                // VIN-166: a risk halt discards the unfilled peers of
+                                // its triggering order's submission, not older batches.
+                                const pendingBefore = strategy.risk_rules.max_intraday_filled_orders
+                                    ? new Set(strategy.pending_orders) : null;
                                 await transpiledFn(context);
+                                if (pendingBefore) {
+                                    const batch = strategy._cof.submissionBatch = (strategy._cof.submissionBatch ?? 0) + 1;
+                                    for (const order of strategy.pending_orders) {
+                                        if (!pendingBefore.has(order)) order._cof_submission_batch = batch;
+                                    }
+                                }
                                 for (const [data, len] of plotLengths) {
                                     if (data.length > len) data.length = len;
                                 }

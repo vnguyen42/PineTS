@@ -894,7 +894,7 @@ if strategy.position_size > 0
         expect(strategy.closedtrades[0].exit_price).toBe(100);
     });
 
-    it('keeps a recalculated market entry on the next path tick while its bracket uses the crossed level', async () => {
+    it('fills a recalculated market entry at the same open while its bracket uses the crossed level', async () => {
         const engine = new PineTS(new FixedProvider() as any, 'BTCUSDT', 'D');
         const context = await engine.run(MARKET_ENTRY_SOURCE);
         const strategy = context.strategy as any;
@@ -902,7 +902,7 @@ if strategy.position_size > 0
         const l1 = strategy.closedtrades.find((trade: any) => trade.entry_id === 'L1');
 
         expect(l2).toBeDefined();
-        expect(l2.entry_price).toBe(95);
+        expect(l2.entry_price).toBe(100);
         expect(l1).toBeDefined();
         expect(l1.exit_price).toBe(102);
     });
@@ -1007,7 +1007,7 @@ if bar_index == 1 and strategy.position_size > 0
         expect(opened.size).toBe(-1);
     });
 
-    it('③ keeps a same-side pyramid entry on the NEXT OHLC point (1502 population B)', async () => {
+    it('③ fills a same-side pyramid entry at the same OPEN (VIN-166 TV witness)', async () => {
         const engine = new PineTS(new ReversalProvider() as any, 'BTCUSDT', 'D');
         const context = await engine.run(PYRAMID_SAME_SIDE_SOURCE);
         const strategy = context.strategy as any;
@@ -1017,9 +1017,9 @@ if bar_index == 1 and strategy.position_size > 0
         expect(l1).toBeDefined();
         expect(l1.entry_price).toBe(100);
         expect(l2).toBeDefined();
-        // Same-side market entry created by the recalculation advances to the
-        // next assumed tick (the low 95) — never drained at the trigger.
-        expect(l2.entry_price).toBe(95);
+        // VIN-166 TV pyramid2 probe: same-side market additions from the
+        // open recalculation drain at that open, before the next path point.
+        expect(l2.entry_price).toBe(100);
         expect(l2.entry_time).toBe(86_400_000);
     });
 });
