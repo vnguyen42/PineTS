@@ -1365,7 +1365,6 @@ export class PineTS {
             const result = await transpiledFn(context);
             const poc = context.strategy?.config.process_orders_on_close === true;
             const cof = context.strategy?.config.calc_on_order_fills === true;
-            let closeFills = 0;
             // Studio T1/T2 TradingView windows: immediate market closes fill
             // after this evaluation without advancing ordinary orders.
             // COF sequencing is unchanged; these witnesses disable COF.
@@ -1373,7 +1372,7 @@ export class PineTS {
                 (order) => order.status === 'pending' && order.category === 'exit' && order.type === 'market' && order.immediately === true,
             );
 
-            if ((poc && !cof) || immediateClose) {
+            if (poc || immediateClose) {
                 // The close fill runs after this evaluation. Mark at the same
                 // close price used by the evaluation before capturing history;
                 // the entry/exit commissions of the pending close fill are not
@@ -1382,57 +1381,13 @@ export class PineTS {
                 context.pine?.strategy?.snapshotSeries();
             }
 
-            // process_orders_on_close is a fill phase after the normal
-            // bar-close evaluation, not a second evaluation. Current-bar
-            // market orders fill at the signal bar's close. When COF is also
-            // enabled, the close is the final assumed intrabar tick: one
-            // post-fill recalculation is allowed, but the intrabar loop is
-            // never reopened and orders from that recalc remain deferred.
+            // Native VIN-166 POC history/reaction witnesses: orders fill after
+            // the bar-close evaluation without another script execution, even
+            // with COF enabled. Preserve the pre-fill series snapshot above.
+            // COF recalculations for intrabar fills remain in the earlier loop.
             if (poc) {
-                const strategy = context.strategy;
-
-                if (cof) {
-                    const openPrice = Series.from(context.data.open).get(0);
-                    const highPrice = Series.from(context.data.high).get(0);
-                    const lowPrice = Series.from(context.data.low).get(0);
-                    const closePrice = Series.from(context.data.close).get(0);
-                    const openCloserToHigh = Math.abs(highPrice - openPrice) < Math.abs(openPrice - lowPrice); // VIN-132b: tie -> LOW first
-                    strategy._cof = {
-                        pass: 3,
-                        ticks: openCloserToHigh
-                            ? [openPrice, highPrice, lowPrice, closePrice]
-                            : [openPrice, lowPrice, highPrice, closePrice],
-                    };
-                }
-
-                closeFills = processStrategyOrders(context, 'close');
-                closeFills += processExitOrders(context, 'close');
+                const closeFills = processStrategyOrders(context, 'close') + processExitOrders(context, 'close');
                 if (closeFills > 0) processMarginCall(context, 'close');
-
-                if (cof && closeFills > 0) {
-                    // A COF recalc is allowed after the close fill, but no
-                    // second fill pass is started at the same final tick.
-                    // Roll back plot channels so one bar still contributes
-                    // one plotted point, matching the existing COF loop.
-                    const plotLengths: Array<[unknown[], number]> = [];
-                    for (const key of Object.keys(context.plots ?? {})) {
-                        const data = Object.getOwnPropertyDescriptor(context.plots[key], 'data')?.value;
-                        if (Array.isArray(data)) plotLengths.push([data, data.length]);
-                    }
-                    await transpiledFn(context);
-                    for (const [data, len] of plotLengths) {
-                        if (data.length > len) data.length = len;
-                    }
-                    // The post-fill execution is the last script execution
-                    // on this bar; replace its history entry, never append a
-                    // second bar entry.
-                    context.pine?.strategy?.snapshotSeries(true);
-                }
-
-                if (cof) strategy._cof = null;
-                // Close fills happen after the normal pre-script finalize;
-                // refresh equity peaks and the monthly close sample with the
-                // final position/equity state before the next bar.
                 finalizeStrategyBar(context);
             } else if (immediateClose) {
                 // Do not process entries, ordinary closes, or recalculate
@@ -1441,9 +1396,8 @@ export class PineTS {
                 finalizeStrategyBar(context);
             }
 
-            // Non-POC paths have no earlier snapshot unless an immediate exit filled. For POC + COF without a
-            // close fill, the normal bar-close execution remains the last one.
-            if ((!poc && !immediateClose) || (cof && closeFills === 0)) {
+            // POC and immediate-close paths captured their pre-fill state above.
+            if (!poc && !immediateClose) {
                 context.pine?.strategy?.snapshotSeries();
             }
             //collect results

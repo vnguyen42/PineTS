@@ -98,7 +98,7 @@ plot(evaluations, 'evaluations')`;
         expect(context.plots.evaluations.data.map((point: { value: number }) => point.value)).toEqual([1, 2]);
     });
 
-    it('composes COF with close processing: close fill then one post-fill recalc, without reopening the loop', async () => {
+    it('waits for the next bar-close evaluation after a POC fill even with COF enabled', async () => {
         const source = `
 //@version=5
 strategy('COF + POC', calc_on_order_fills=true, process_orders_on_close=true, default_qty_type=strategy.fixed, default_qty_value=1)
@@ -113,7 +113,10 @@ if strategy.position_size > 0
 
         expect(strategy.closedtrades.length).toBe(1);
         expect(strategy.closedtrades[0].entry_price).toBe(100);
-        expect(strategy.closedtrades[0].exit_price).toBe(110);
+        // Native VIN-166 POC reaction capture (2026-09-07): the close
+        // fill does not re-run the script. The exit is first submitted by
+        // the next bar's normal evaluation and fills at that bar's close.
+        expect(strategy.closedtrades[0].exit_price).toBe(112);
     });
 
     it('reads strategy state from the previous finalized bar', async () => {

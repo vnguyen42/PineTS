@@ -93,7 +93,7 @@ plot(strategy.opentrades[1], 'previous_open_trades')`;
         expect(strategy._series_history?.opentrades).toHaveLength(candles.length);
         expect(strategy._series_history?.position_size).toEqual([0, 1, 1]);
     });
-    it('replaces the POC history entry after a COF close-fill recalculation', async () => {
+    it('keeps POC history before the fill even with COF enabled', async () => {
         const source = `
 //@version=5
 strategy('COF + POC history 2511', calc_on_order_fills=true, process_orders_on_close=true, default_qty_type=strategy.fixed, default_qty_value=1)
@@ -105,11 +105,11 @@ plot(strategy.position_size[1], 'previous_position')`;
         const strategy = context.strategy;
         if (!strategy) throw new Error('strategy state was not initialized');
 
-        // COF's post-fill execution is the last script execution on bar 0,
-        // so it replaces—not appends—a single VIN-79 history entry.
-        expect(plotValues(context, 'previous_position')).toEqual([NaN, 1, 1]);
+        // Native VIN-166 POC history/reaction captures (2026-09-07) show
+        // no script execution after the final close fill.
+        expect(plotValues(context, 'previous_position')).toEqual([NaN, 0, 1]);
         expect(strategy._series_history?.position_size).toHaveLength(candles.length);
-        expect(strategy._series_history?.position_size).toEqual([1, 1, 1]);
+        expect(strategy._series_history?.position_size).toEqual([0, 1, 1]);
     });
     it('keeps one history entry per re-executed bar in a partial runTail', async () => {
         const c = (t: number, open: number, high: number, low: number, close: number): Candle => ({
@@ -166,8 +166,8 @@ plot(strategy.position_size[1], 'prev')`;
         ];
         await engine.updateTail(context);
 
-        expect(context.strategy?._series_history?.position_size).toEqual([6, 11]);
-        expect(context.plots.prev.data.map((point: { value: number }) => point.value)).toEqual([NaN, 1, 6]);
+        expect(context.strategy?._series_history?.position_size).toEqual([1, 2]);
+        expect(context.plots.prev.data.map((point: { value: number }) => point.value)).toEqual([NaN, 0, 1]);
     });
     it('does not append stale history on a no-fill partial updateTail', async () => {
         const partialFeed = [

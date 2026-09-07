@@ -212,9 +212,10 @@ describe('strategy calc_on_order_fills — chemin intrabarre démarrant à l\'op
         expect(nextBar.length).toBeGreaterThan(0);
         expect(nextBar[0].entry_price).toBe(102);
 
-        // Position finale : L fermé + 3 lots barre 3 + 3 lots barre 4
-        // (le signal persiste — même mécanique de la barre 9349 de 1502).
-        expect(strategy.opentrades.length).toBe(6);
+        // VIN-166 TV native-window probe: 3 lots after the open close, then
+        // 4 on the next bar (open twice, followed by the two extremes).
+        // The old 3+3 expectation extrapolated the first bar to the second.
+        expect(strategy.opentrades.length).toBe(7);
         expect(strategy.closedtrades.length).toBe(1);
     });
 
