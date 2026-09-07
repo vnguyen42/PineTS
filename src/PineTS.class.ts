@@ -1336,6 +1336,10 @@ export class PineTS {
                                 if ((strategy._cof.pass === 0 || strategy._cof.interiorEntryFilled) && drainIterations === 0) {
                                     sameTickFills = processExitOrders(context, 'intrabar', true);
                                     sameTickFills += processStrategyOrders(context, 'open', true);
+                                } else {
+                                    // Explicit immediate closes execute at this point even
+                                    // when ordinary COF-created orders must wait (VIN-161).
+                                    sameTickFills = processExitOrders(context, 'intrabar', 'immediate');
                                 }
                                 drainIterations += 1;
                             } while (sameTickFills > 0 && drainIterations < MAX_SAME_TICK_DRAIN);

@@ -2689,7 +2689,7 @@ interface ExitFillEvent {
 export function processExitOrders(
     context: any,
     phase: 'open' | 'intrabar' | 'close' = 'intrabar',
-    marketExitsOnly = false,
+    marketExitsOnly: boolean | 'immediate' = false,
     beforePathPosition?: IntrabarPathPosition,
 ): number {
     if (!context.strategy) return 0;
@@ -2881,6 +2881,7 @@ export function processExitOrders(
             && order._cof_fresh_single_trade_exit_pass !== undefined
             && order._cof_fresh_single_trade_exit_pass === cofState.pass;
         if (marketExitsOnly && !isPureMarketExit && !cofMarkedThisPass) continue;
+        if (marketExitsOnly === 'immediate' && order.immediately !== true) continue;
         // Without global POC this phase is exclusive to immediate closes.
         if (closePhase && !processOnClose && (!isPureMarketExit || order.immediately !== true)) continue;
 
