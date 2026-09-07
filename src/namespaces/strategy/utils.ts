@@ -88,6 +88,14 @@ export function processIntradayLoss(context: any, price: number): number {
     // COF-created entries become risk-visible at the next main point.
     if (strategy._cof?.currentBarEntryFilled) return 0;
     const state = strategy._intraday_loss!;
+    // VIN-175: entry fees alone are first checked when the new position's
+    // valuation price changes, even in the favorable direction. Slippage
+    // already separates the entry price from the opening quote (VIN-169).
+    if (state.unvaluedEntryPrice !== undefined) {
+        const markedPrice = snapExecutionPrice(price, context.pine?.syminfo?.mintick ?? 0);
+        if (markedPrice === state.unvaluedEntryPrice) return 0;
+        delete state.unvaluedEntryPrice;
+    }
     const rule = strategy.risk_rules.max_intraday_loss;
     markToMarket(context, price);
     const equity = strategy.equity + strategy._equity_account_residual;
@@ -1869,6 +1877,9 @@ export function openTrade(
             : {}),
     };
 
+    if (strategy._intraday_loss && strategy.opentrades.length === 0) {
+        strategy._intraday_loss.unvaluedEntryPrice = price;
+    }
     strategy.opentrades.push(trade);
 
     // Latch the slippage-adjusted entry price of the FIRST trade ever opened —
