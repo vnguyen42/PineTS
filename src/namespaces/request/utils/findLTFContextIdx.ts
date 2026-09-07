@@ -14,35 +14,14 @@ export function findLTFContextIdx(
         if (closeTime[i] <= myCloseTime && openTime[i] >= myOpenTime) {
             // Found the last intrabar for this chart bar
 
-            // Check if we're on an incomplete/current bar:
-            // If eDate is defined and the bar extends beyond it, this is the current bar being processed
-            const isCurrentBar = mainContextEDate && myCloseTime > mainContextEDate;
-
-            // For LTF with gaps=true and lookahead=true: ALWAYS return first intrabar (not just current bar)
-            if (gaps && lookahead) {
-                for (let j = 0; j < openTime.length; j++) {
-                    if (openTime[j] >= myOpenTime && openTime[j] < myCloseTime) {
-                        return j;
-                    }
-                    if (openTime[j] >= myCloseTime) {
-                        break;
-                    }
+            // Native VIN-174: lookahead_on selects the first intrabar on
+            // historical chart bars too, independently of the gaps setting.
+            if (lookahead) {
+                for (let j = 0; j <= i; j++) {
+                    if (openTime[j] >= myOpenTime && openTime[j] < myCloseTime) return j;
                 }
             }
 
-            // For current bar with lookahead=true (and gaps=false): return the FIRST intrabar
-            if (isCurrentBar && lookahead && !gaps) {
-                for (let j = 0; j < openTime.length; j++) {
-                    if (openTime[j] >= myOpenTime && openTime[j] < myCloseTime) {
-                        return j;
-                    }
-                    if (openTime[j] >= myCloseTime) {
-                        break;
-                    }
-                }
-            }
-
-            // For historical bars OR lookahead=false: return the last intrabar
             return i;
         }
 

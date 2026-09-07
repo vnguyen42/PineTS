@@ -31,6 +31,14 @@ export function param(context: any) {
                 // Time-series array - extract value at index
                 val = Series.from(source).get(index || 0);
             }
+        } else if (index !== undefined && index !== null) {
+            // Inline calls return scalars. Retain their unshifted history separately
+            // from the expression history consumed by the secondary context.
+            const key = `_requestSource_${name}`;
+            const history = context.params[key] || (context.params[key] = []);
+            if (history.length === 0) history.push(source);
+            else history[history.length - 1] = source;
+            val = Series.from(history).get(index);
         } else {
             val = source;
         }
