@@ -278,9 +278,9 @@ export class PineTS {
                             resolve(true);
                         })
                         .catch((error) => {
-                            console.warn('Failed to get symbol info, using default values:', error);
-                            this._ready = true;
-                            resolve(true);
+                            // The provider promised metadata; a failure must not
+                            // silently substitute trading defaults and return P&L.
+                            reject(error);
                         });
                 } else {
                     this._ready = true;
