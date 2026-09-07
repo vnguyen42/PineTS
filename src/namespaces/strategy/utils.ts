@@ -3719,22 +3719,18 @@ export function processMarginCall(context: any, checkpoint: 'open' | 'extreme' |
         // at price 110,797.38 → 4 × 0.30328) and 0.48244 of another
         // (deficit $10,924.98 at 90,574.00 → 4 × 0.12061).
         const deficit = requiredMarginAtAdverse - equityAtAdverse;
-        // Full-precision cover — no truncation. Verified against the
-        // commission-0 margin oracle (BTCUSDC weekly) where TV's
-        // liquidation qty matches PT's untruncated 4× cover exactly, and
-        // against the BTCUSDC avg_price QA xlsx (TV qty 3.602232 ≈ 7
-        // significant digits). An earlier 5-decimal floor was overfit to
-        // the BTCUSDT margin_calls xlsx where TV's exported quantities
-        // (1.21312, 0.48244) are 7-significant-digit values with trailing
-        // zeros trimmed; the residual there (~$1 equity-basis opacity
-        // inside TV) is sub-dollar on a $530k net and accepted.
+        // VIN-161: truncate covered contracts to the known instrument
+        // quantity step BEFORE the 4x buffer (ETH short: 1.7732, not
+        // 1.77353448). Providers without a known step retain full precision.
         //
         // The marginPct/100 divisor matters below 100%: TV liquidates
         // 4×deficit/(price·m) — verified exactly on fresh TV captures at
         // margin_long/short = 50 (close-MC investigation, 2026-06-12).
         const marginFrac = marginPct / 100;
-        const coverQty = deficit / (adversePrice * pointValue * marginFrac);
+        const rawCoverQty = deficit / (adversePrice * pointValue * marginFrac);
+        const coverQty = quantizeToQtyStep(context, rawCoverQty) ?? rawCoverQty;
         const qtyToLiquidate = Math.min(totalQty, 4 * coverQty);
+        if (qtyToLiquidate === 0) return;
 
         // Remember the FIFO order before the close so we can identify the
         // PARTIALLY-consumed lot afterwards (the liquidation eats whole

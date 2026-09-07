@@ -4,8 +4,8 @@
 /**
  * Price at which the current leveraged position would be force-liquidated.
  * Returns NaN when flat, when margin is 0 (the v5 default — no margin
- * requirement, no liquidation price) or when the relevant margin% is 100
- * (no leverage).
+ * requirement, no liquidation price) or for a long with at least 100%
+ * margin. Shorts can still be liquidated with 100% margin.
  *
  * Official TV formula, documented at
  * https://www.tradingview.com/support/solutions/43000717375/ :
@@ -37,8 +37,9 @@ export function margin_liquidation_price(context: any) {
             ? (s.config.margin_long  ?? 0)
             : (s.config.margin_short ?? 0);
         // Margin 0 = the Pine v5 default: no margin requirement → TV returns
-        // na (there is no calculable margin-call price). 100 = no leverage.
-        if (marginPct <= 0 || marginPct >= 100) return NaN;
+        // na (there is no calculable margin-call price). At 100% margin,
+        // shorts still face an adverse-price liquidation (VIN-161).
+        if (marginPct <= 0 || (direction === 1 && marginPct >= 100)) return NaN;
 
         const qty        = Math.abs(s.position_size);
         const pointValue = context.pine?.syminfo?.pointvalue ?? 1;
