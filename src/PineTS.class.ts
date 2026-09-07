@@ -1252,6 +1252,10 @@ export class PineTS {
                             ? [openPrice, highPrice, lowPrice, closePrice]
                             : [openPrice, lowPrice, highPrice, closePrice],
                     };
+                    // A checkpoint MC becomes observable to COF at the next
+                    // path tick (open -> low, high -> close in VIN-161 probes).
+                    // An MC already deferred from the previous close is due now.
+                    let marginRecalcNextPass = false;
                     for (;;) {
                         // VIN-110: snapshot the position sign at the start of
                         // this assumed tick, before its fills. A recalc-created
@@ -1260,7 +1264,8 @@ export class PineTS {
                         // same-tick reversal (1539); same-direction re-entries
                         // keep the next-tick path (2205/1502).
                         strategy._cof.tickStartSign = Math.sign(strategy.position_size);
-                        let fills = (strategy._cof.pass === 0 ? pendingMarginFills : 0) + processStrategyOrders(context);
+                        let fills = (strategy._cof.pass === 0 ? pendingMarginFills : 0)
+                            + Number(marginRecalcNextPass) + processStrategyOrders(context);
                         // Margin checkpoints along the intra-bar path (TV
                         // broker emulator): first at the OPEN right after
                         // entries fill; then at the adverse extreme — BEFORE
@@ -1270,11 +1275,14 @@ export class PineTS {
                         // exits free margin first). The 'extreme' checkpoint
                         // may schedule a deferred second margin call at this
                         // bar's close (phantom re-check).
-                        processMarginCall(context, 'open');
+                        let marginFills = processMarginCall(context, 'open');
                         const adverseFirst = isAdverseFirstBar(context);
-                        if (adverseFirst) processMarginCall(context, 'extreme');
+                        if (adverseFirst) marginFills += processMarginCall(context, 'extreme');
                         fills += processExitOrders(context, 'intrabar');
-                        if (!adverseFirst) processMarginCall(context, 'extreme');
+                        if (!adverseFirst) marginFills += processMarginCall(context, 'extreme');
+                        // The final close already has its normal script evaluation;
+                        // an extra COF pass there would replace TV's pre-exit plots.
+                        marginRecalcNextPass = marginFills > 0 && strategy._cof.pass < strategy._cof.ticks.length - 2;
 
                         if (fills > 0) {
                             // Re-execute at the fill's current assumed path

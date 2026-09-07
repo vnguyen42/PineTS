@@ -3580,7 +3580,26 @@ export function applyPendingOpenMarginCall(context: any): number {
     (strategy as any)._pending_open_mc = null;
     if (Math.sign(strategy.position_size) !== pending.dir) return 0;
     const price = snapExecutionPrice(Series.from(context.data.open).get(0), context.pine?.syminfo?.mintick ?? 0);
-    closePartialPosition(context, Math.min(pending.qty, Math.abs(strategy.position_size)), price,
+    const qtyToClose = Math.min(pending.qty, Math.abs(strategy.position_size));
+    const marginPct = pending.dir === 1 ? (strategy.config.margin_long ?? 0) : (strategy.config.margin_short ?? 0);
+    const pointValue = context.pine?.syminfo?.pointvalue ?? 1;
+    // VIN-161: deferred liquidation admission uses entry margin less the
+    // FULL liquidated notional, not proportional margin on the remainder.
+    // This preserves the borrowed amount for the admission check. Equity
+    // is valued at the snapped open BEFORE the liquidation's exit fee.
+    let marginAfterClose = 0;
+    let qtyLeftToAllocate = qtyToClose;
+    for (const trade of strategy.opentrades) {
+        const qty = Math.abs(trade.size);
+        const closedQty = Math.min(qty, qtyLeftToAllocate);
+        marginAfterClose += computeRequiredMargin(qty, trade.entry_price, marginPct, pointValue)
+            - closedQty * trade.entry_price * pointValue;
+        qtyLeftToAllocate -= closedQty;
+    }
+    const marginTolerance = 1e-12 * Math.max(1, Math.abs(marginAfterClose));
+    if (computeEquityAtPrice(context, price) < marginAfterClose - marginTolerance) return 0;
+
+    closePartialPosition(context, qtyToClose, price,
         Series.from(context.data.openTime).get(0), { exitId: 'Margin call', exitComment: 'Margin call' });
     return 1;
 }
@@ -3676,15 +3695,15 @@ export function isAdverseFirstBar(context: any): boolean {
  * never margin-calls such positions, whatever the equity (the broker
  * emulator "does not check available funds"). The check is skipped.
  */
-export function processMarginCall(context: any, checkpoint: 'open' | 'extreme' | 'close' = 'extreme'): void {
+export function processMarginCall(context: any, checkpoint: 'open' | 'extreme' | 'close' = 'extreme'): number {
     const strategy: StrategyState = context.strategy;
-    if (!strategy || strategy.opentrades.length === 0) return;
+    if (!strategy || strategy.opentrades.length === 0) return 0;
 
     const positionDir = Math.sign(strategy.position_size);
-    if (positionDir === 0) return;
+    if (positionDir === 0) return 0;
 
     const marginPct = positionDir === 1 ? (strategy.config.margin_long ?? 0) : (strategy.config.margin_short ?? 0);
-    if (marginPct <= 0) return; // v5 default: no margin requirement → no margin calls.
+    if (marginPct <= 0) return 0; // v5 default: no margin requirement → no margin calls.
 
     const openPrice = Series.from(context.data.open).get(0);
     const highPrice = Series.from(context.data.high).get(0);
@@ -3696,7 +3715,7 @@ export function processMarginCall(context: any, checkpoint: 'open' | 'extreme' |
     const cof = strategy._cof;
     if (cof && checkpoint !== 'close') {
         const adversePass = cof.ticks[1] === (positionDir === 1 ? lowPrice : highPrice) ? 1 : 2;
-        if (cof.pass !== (checkpoint === 'open' ? 0 : adversePass)) return;
+        if (cof.pass !== (checkpoint === 'open' ? 0 : adversePass)) return 0;
     }
 
     const pointValue = context.pine?.syminfo?.pointvalue ?? 1;
@@ -3755,7 +3774,7 @@ export function processMarginCall(context: any, checkpoint: 'open' | 'extreme' |
             // close; TV fills its frozen .044 UNI liquidation at the next
             // open even when that open has already restored sufficient equity.
             (strategy as any)._pending_open_mc = { qty: qtyToLiquidate, dir: positionDir };
-            return;
+            return 0;
         }
 
         // Remember the FIFO order before the close so we can identify the
@@ -3828,7 +3847,9 @@ export function processMarginCall(context: any, checkpoint: 'open' | 'extreme' |
         // 2026-02-05 (the only lot was the touched one → its TP filled).
         const survivor = fifoBefore.find((t) => t.status === 'open');
         (strategy as any)._mc_exit_lock = { bar: context.idx, tradeId: survivor?.id ?? null };
+        return 1;
     }
+    return 0;
 }
 
 /**
