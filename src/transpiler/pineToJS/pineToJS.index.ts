@@ -34,6 +34,26 @@ export function extractPineScriptVersion(sourceCode: string): number | null {
     return null;
 }
 
+// VIN-164: TradingView rejects this risk declaration in a local scope.
+// Keep the check specific to the independently captured API; other risk
+// declarations have not yet been qualified against TradingView.
+function validateRiskPositionSizeScope(node: any, local = false): void {
+    if (!node || typeof node !== 'object') return;
+    const inLocal = local || node.type === 'BlockStatement' || node.type === 'FunctionDeclaration'
+        || node.type === 'ArrowFunctionExpression' || node.type === 'FunctionExpression';
+    const callee = node.type === 'CallExpression' ? node.callee : null;
+    if (inLocal && callee?.type === 'MemberExpression' && !callee.computed
+        && callee.property?.name === 'max_position_size'
+        && callee.object?.type === 'MemberExpression' && !callee.object.computed
+        && callee.object.property?.name === 'risk' && callee.object.object?.name === 'strategy') {
+        throw new Error("Cannot use 'strategy.risk.max_position_size' in local scope");
+    }
+    for (const value of Object.values(node)) {
+        if (Array.isArray(value)) value.forEach(child => validateRiskPositionSizeScope(child, inLocal));
+        else if (value && typeof value === 'object') validateRiskPositionSizeScope(value, inLocal);
+    }
+}
+
 export function pineToJS(sourceCode: string, options: any = {}) {
     // Step 0: Detect Pine Script version. `options.forceVersion` lets callers
     // transpile version-less sources (no //@version header) under an assumed
@@ -70,6 +90,7 @@ export function pineToJS(sourceCode: string, options: any = {}) {
         // statement sequence spanning a var declaration).
         const parser = new Parser(tokens, version);
         const ast = parser.parse();
+        validateRiskPositionSizeScope(ast);
 
         // Step 2b: v4 legacy lowering — rewrite flat builtins in call
         // position into their v5 namespaced equivalents (ta.*, math.*, …),
