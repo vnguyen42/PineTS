@@ -517,6 +517,7 @@ export interface StrategyState {
     // further entries are blocked for the rest of the run (or trading day for
     // intraday rules — TODO: day rollover detection).
     risk_halted: boolean;
+    _intraday_filled_orders?: { day: string; count: number; halted: boolean };
 
     // Internal: per-callsite cadence tracking for strategy.exit. Keyed by the
     // transpiler-injected __callsiteId; value is the last context.idx the user

@@ -3,8 +3,40 @@
 
 import { Order, StrategyState, Trade } from './types';
 import { Series } from '../../Series';
+import { getDatePartsInTimezone } from '../Time';
 import { defaultStrategyMargin } from './defaults';
 import { convertAccountToSymbol, currentBarTimeMs, symbolToAccountResidual } from './currency';
+
+/** Daily order-admission gate, separate from permanent catastrophic risk halts. */
+export function intradayFilledOrdersHalted(context: any): boolean {
+    const strategy: StrategyState = context.strategy;
+    if (!strategy?.risk_rules.max_intraday_filled_orders) return false;
+    const time = Series.from(context.data.openTime).get(0);
+    const parts = getDatePartsInTimezone(time, context.pine?.syminfo?.timezone ?? 'UTC');
+    const day = `${parts.year}-${parts.month}-${parts.day}`;
+    if (strategy._intraday_filled_orders?.day !== day) {
+        strategy._intraday_filled_orders = { day, count: 0, halted: false };
+    }
+    return strategy._intraday_filled_orders.halted;
+}
+
+function recordIntradayOrderFill(context: any, price: number, time: number, count = 1): void {
+    const strategy: StrategyState = context.strategy;
+    const rule = strategy.risk_rules.max_intraday_filled_orders;
+    if (!rule || intradayFilledOrdersHalted(context)) return;
+    const state = strategy._intraday_filled_orders!;
+    state.count += count;
+    if (state.count < rule.count) return;
+    state.halted = true;
+    // VIN-164 TV BCH witnesses: close once at the triggering fill, but keep
+    // previously queued orders alive, including fills on subsequent bars.
+    const reason = 'Close Position (Max number of filled orders in one day)';
+    if (strategy.position_size !== 0) {
+        closePartialPosition(context, Math.abs(strategy.position_size), price, time, {
+            exitId: reason, exitComment: reason,
+        });
+    }
+}
 
 /**
  * Parse strategy() function arguments
@@ -1400,6 +1432,7 @@ export function processStrategyOrders(context: any, phase: 'open' | 'close' = 'o
                             order.fill_bar = context.idx;
                             order.fill_time = currentTime;
                             fills += 1;
+                            recordIntradayOrderFill(context, fillPrice, currentTime);
                         } else {
                             order.status = 'cancelled';
                         }
@@ -1422,6 +1455,7 @@ export function processStrategyOrders(context: any, phase: 'open' | 'close' = 'o
             order.fill_bar = context.idx;
             order.fill_time = currentTime;
             fills += 1;
+            recordIntradayOrderFill(context, fillPrice, currentTime);
             // VIN-110 anti-loop: the recalculation re-emits the same reversal
             // order id on every drain iteration; only the FIRST fill of each
             // logical id counts for the current pass.
@@ -3530,6 +3564,7 @@ export function processExitOrders(
         capRemaining.set(event.order, nextCap);
         lastFillByOrder.set(event.order, fillPrice);
         fills += event.fillCount;
+        recordIntradayOrderFill(context, fillPrice, currentTime, event.fillCount);
 
         const excludedActivation = event.order._excluded_activation_trade_ids ??= [];
         for (const tradeId of activatedIds) {

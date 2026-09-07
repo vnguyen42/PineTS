@@ -4,7 +4,7 @@
 import { Order } from '../types';
 import { Series } from '../../../Series';
 import { parseArgsForPineParams } from '../../utils';
-import { resolveWhenGate } from '../utils';
+import { intradayFilledOrdersHalted, resolveWhenGate } from '../utils';
 
 /**
  * Close all trades opened by entries with the given id at market.
@@ -51,6 +51,7 @@ export function close(context: any) {
         if (!context.strategy) {
             throw new Error('strategy.close() called before strategy() declaration');
         }
+        if (intradayFilledOrdersHalted(context)) return;
         const parsed = parseArgsForPineParams<any>(args, CLOSE_SIGNATURES, CLOSE_ARGS_TYPES);
         if (!resolveWhenGate(parsed, ['when', 'when_positional'])) return;
         const targetId = parsed.id;

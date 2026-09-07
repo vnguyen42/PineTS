@@ -4,7 +4,7 @@
 import { Order } from '../types';
 import { Series } from '../../../Series';
 import { parseArgsForPineParams, extractCallsiteId } from '../../utils';
-import { calculateOrderQty, hasPendingMatchingEntry, roundToMintick } from '../utils';
+import { intradayFilledOrdersHalted, calculateOrderQty, hasPendingMatchingEntry, roundToMintick } from '../utils';
 
 /**
  * Pine signature (21 named args):
@@ -54,6 +54,7 @@ export function exit(context: any) {
         if (!context.strategy) {
             throw new Error('strategy.exit() called before strategy() declaration');
         }
+        if (intradayFilledOrdersHalted(context)) return;
 
         // Extract the transpiler-injected callsite ID BEFORE parsing args
         // (so parseArgsForPineParams doesn't see the sentinel). When the call
