@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 import { Series } from '../../../Series';
+import { relationalTolerance } from '../../math/relational-tolerance';
 
 /**
  * Directional Movement Index (DMI)
@@ -119,8 +120,12 @@ export function dmi(context: any) {
         const up = high - prevHigh;
         const down = prevLow - low;
 
-        const plusDM = (up > down && up > 0) ? up : 0;
-        const minusDM = (down > up && down > 0) ? down : 0;
+        // Use Pine's comparison precision: equal decimal moves can differ
+        // after binary subtraction (UNI .014 up/down), but neither wins.
+        // Keep the raw movement for smoothing and preserve small-price gaps.
+        const tied = Math.abs(up - down) < relationalTolerance(up, down);
+        const plusDM = (!tied && up > down && up > 0) ? up : 0;
+        const minusDM = (!tied && down > up && down > 0) ? down : 0;
 
         // --- Calculate Smoothed TR, +DM, -DM (RMA with diLength) ---
         let initCount = state.prevInitCount;
