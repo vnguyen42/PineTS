@@ -2989,7 +2989,11 @@ export function processExitOrders(
             const activationId = t._activation_id ?? t.id;
             if (mcLocked && activationId !== mcLock.tradeId) continue;
             const entry = t._activation_bracket_entry ?? t._bracket_entry ?? t.entry_price;
-            const tQty = Math.abs(t.size);
+            // VIN-160: each activation contributes its own percent bracket;
+            // FIFO may consume both fractions from the same physical lot.
+            const tQty = cofState !== null && !order._explicit_qty_cap && !(order.qty > 0) && Number(order.qty_percent) > 0
+                ? Math.min(Math.abs(t.size), Math.abs(t._entry_order_qty ?? t.size) * Number(order.qty_percent) / 100)
+                : Math.abs(t.size);
             let tp = absTp;
             if (tp === undefined && order.profit !== undefined) {
                 const derivedTp = isLong ? entry + order.profit * mintick : entry - order.profit * mintick;
@@ -3054,15 +3058,34 @@ export function processExitOrders(
                     // wrong-sided-but-marketable 2205 cases prove it).
                     tpHit = isLong ? touchedAtOrAbove(tp, cofTickPrice!) : touchedAtOrBelow(tp, cofTickPrice!);
                 } else if (cofState !== null) {
-                    // The prior tick must be strictly before the level (a
-                    // within-noise prior tick already fired the touch on
-                    // that pass); the current tick uses the tolerant test.
-                    tpHit = isLong
-                        ? cofPreviousPrice! < tp && touchedAtOrAbove(tp, cofTickPrice!)
-                        : cofPreviousPrice! > tp && touchedAtOrBelow(tp, cofTickPrice!);
+                    // VIN-160: an entry fill batches the pending TP on the
+                    // following segment before recalculation. Without an
+                    // entry at this point, retain the ordinary crossing.
+                    const entryFilledAtTick = matching.some((trade) =>
+                        (trade._activation_entry_bar_index ?? trade.entry_bar_index) === context.idx
+                        && trade._activation_entry_path_segment === cofState.pass - 1);
+                    const nextTick = cofState.ticks[Math.min(cofState.pass + 1, cofState.ticks.length - 1)];
+                    if (entryFilledAtTick) {
+                        tpHit = isLong
+                            ? touchedAtOrAbove(tp, Math.max(cofTickPrice!, nextTick))
+                            : touchedAtOrBelow(tp, Math.min(cofTickPrice!, nextTick));
+                    } else {
+                        tpHit = isLong
+                            ? cofPreviousPrice! < tp && touchedAtOrAbove(tp, cofTickPrice!)
+                            : cofPreviousPrice! > tp && touchedAtOrBelow(tp, cofTickPrice!);
+                    }
                 } else {
                     tpHit = isLong ? touchedAtOrAbove(tp, highPrice) : touchedAtOrBelow(tp, lowPrice);
                 }
+            }
+            // A marketable bracket created at the previous fill cannot
+            // acquire an entry that arrives at its execution tick.
+            if (cofState !== null && order.bar === context.idx && order._cof_marketable_next_pass === cofState.pass && !cofMarkedThisPass
+                && tp !== undefined && entryBar === context.idx
+                && entryPathSegment === cofState.pass - 1
+                && !order._exit_bound_activation_ids?.includes(activationId)
+                && (isLong ? touchedAtOrAbove(tp, cofTickPrice!) : touchedAtOrBelow(tp, cofTickPrice!))) {
+                tpHit = false;
             }
             if (sl !== undefined) {
                 if (closeOnly) {
@@ -3155,7 +3178,7 @@ export function processExitOrders(
                 }
             }
             if (kind === 'profit') {
-                const openPastTp = cofMarkedThisPass
+                const openPastTp = cofMarkedThisPass || (cofState !== null && order.bar === context.idx && order._cof_marketable_next_pass === cofState.pass)
                     ? (isLong ? cofTickPrice! >= (tp as number) : cofTickPrice! <= (tp as number))
                     : !closeOnly && (
                         tpExecution !== undefined
@@ -3164,7 +3187,7 @@ export function processExitOrders(
                     );
                 tpEvents.push({
                     qty: tQty,
-                    price: cofMarkedThisPass
+                    price: cofState !== null && openPastTp
                         ? cofTickPrice!
                         : closeOnly
                           ? closePrice
@@ -3340,6 +3363,10 @@ export function processExitOrders(
 
         const combinedEvents: FillEvent[] = [];
         for (const event of events) {
+            if (cofState !== null && !order._explicit_qty_cap && !(order.qty > 0) && Number(order.qty_percent) > 0) {
+                combinedEvents.push({ ...event, tradeId: undefined, sourceCount: 1 });
+                continue;
+            }
             const existing = combinedEvents.find(
                 (candidate) =>
                     candidate.kind === event.kind
@@ -3467,6 +3494,11 @@ export function processExitOrders(
             event.tradeId !== undefined ? [event.tradeId] : event.activationTradeIds,
         );
         if (closedQty <= 1e-9) continue;
+        if (cofState !== null && event.kind === 'profit'
+            && (event.direction > 0 ? fillPrice > cofTickPrice! : fillPrice < cofTickPrice!)) {
+            cofState.aheadExitPass = cofState.pass;
+            cofState.aheadExitPrice = fillPrice;
+        }
 
         const nextCap = remainingCap - closedQty;
         capRemaining.set(event.order, nextCap);

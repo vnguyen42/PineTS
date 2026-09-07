@@ -427,9 +427,12 @@ export function entry(context: any) {
         // stack by one crate ({low, high, close} instead of {open, low,
         // high}). Reversals keep their own marker; same-direction adds keep
         // next-point semantics (2205/1502).
+        // VIN-160: a TP beyond the current OHLC point has consumed that
+        // segment; a fresh same-side entry waits for the next point.
         const cofSameTickFresh = context.strategy._cof != null
             && orderType === 'market'
             && !cofSameTickReversal
+            && context.strategy._cof.aheadExitPass !== context.strategy._cof.pass
             && Math.abs(context.strategy.position_size) < 1e-9;
 
         const orderObj: Order = {

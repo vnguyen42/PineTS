@@ -307,6 +307,7 @@ export function exit(context: any) {
             // pass-scoped marker so a later bar with a coincident COF pass
             // number cannot drain this bracket same-tick as if it were new.
             delete pending._cof_fresh_single_trade_exit_pass;
+            delete pending._cof_marketable_next_pass;
             pending._isPersistent = order._isPersistent || continuousSameLifecycle;
             if (trailArmed) {
                 pending.trail_armed = true;
@@ -336,6 +337,14 @@ export function exit(context: any) {
             if (entryBar === context.idx && activationAtCurrentTick) {
                 order._cof_fresh_single_trade_exit_pass = cofState.pass;
             }
+        }
+        // VIN-160: after a forward TP fill, a new marketable bracket waits
+        // for the next assumed tick. Its creation price is the TP fill,
+        // which can lie beyond the current OHLC point.
+        if (cofState != null && cofState.aheadExitPass === cofState.pass
+            && limit !== undefined && cofState.aheadExitPrice !== undefined
+            && (boundDirection === 1 ? limit <= cofState.aheadExitPrice : boundDirection === -1 && limit >= cofState.aheadExitPrice)) {
+            order._cof_marketable_next_pass = cofState.pass + 1;
         }
         list.push(order);
     };

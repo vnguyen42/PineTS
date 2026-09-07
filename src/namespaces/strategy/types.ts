@@ -232,6 +232,8 @@ export interface Order {
     // semantics (1502: after a close_all fills at the open, the re-entry is
     // booked at the OPEN, the first fill point).
     _cof_fresh_same_tick?: boolean;
+    // VIN-160: fresh bracket marketable at a preceding forward TP fill.
+    _cof_marketable_next_pass?: number;
 
     // Internal (VIN-120): pass-scoped marker for a FRESH single-trade exit
     // bracket created by a COF fill recalculation — the new instance only,
@@ -339,6 +341,9 @@ export interface CofBarState {
     // entry fills at the same trigger price). Fresh same-direction
     // re-entries (2205/1502) keep the next-tick path.
     tickStartSign?: number;
+    // VIN-160: TP executed between this point and the next, before recalc.
+    aheadExitPass?: number;
+    aheadExitPrice?: number;
     // Anti-loop guard for the same-tick reversal-entry drain: order ids
     // already filled by the drain at the current pass (lazily reset when
     // `pass` advances). A filled reversal must not be re-drained when the
