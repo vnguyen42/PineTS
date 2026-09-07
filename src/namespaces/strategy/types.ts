@@ -527,6 +527,7 @@ export interface StrategyState {
     // Permanent max_drawdown / max_cons_loss_days halt rejects new requests.
     // Intraday limits use separate day-scoped state below.
     risk_halted: boolean;
+    _cons_loss_days?: { day: string; startEquity: number; endEquity: number; consecutive: number };
     _intraday_loss?: { day: string; equity: number; halted: boolean };
     _intraday_filled_orders?: { day: string; count: number; halted: boolean };
 

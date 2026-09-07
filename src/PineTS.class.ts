@@ -5,7 +5,7 @@ import { Context } from './Context.class';
 import { splitTickerModifier, stripTickerModifier, transformHeikinAshi, transformHeikinAshiCandle, withTickerModifier } from './tickerModifier';
 import { Series } from './Series';
 import { Indicator } from './Indicator';
-import { intradayLossHalted, processIntradayLoss, processStrategyOrders, processExitOrders, processMarginCall, finalizeStrategyBar, finalizeStrategyRun, isAdverseFirstBar, applyPendingCloseMarginCall, applyPendingOpenMarginCall, snapshotStrategyState, restoreStrategyState, markToMarket } from './namespaces/strategy/utils';
+import { processConsecutiveLossDay, finalizeConsecutiveLossDay, intradayLossHalted, processIntradayLoss, processStrategyOrders, processExitOrders, processMarginCall, finalizeStrategyBar, finalizeStrategyRun, isAdverseFirstBar, applyPendingCloseMarginCall, applyPendingOpenMarginCall, snapshotStrategyState, restoreStrategyState, markToMarket } from './namespaces/strategy/utils';
 
 // ── Timeframe duration utility ──────────────────────────────────────
 //prettier-ignore
@@ -1224,6 +1224,7 @@ export class PineTS {
                 // a reversal queued at that close (qty frozen at queue
                 // time) overshoots by exactly the deferred quantity, as TV
                 // does.
+                const consecutiveLossFills = processConsecutiveLossDay(context);
                 intradayLossHalted(context);
                 applyPendingCloseMarginCall(context);
                 const pendingMarginFills = applyPendingOpenMarginCall(context);
@@ -1270,7 +1271,7 @@ export class PineTS {
                         strategy._cof.tickStartSign = Math.sign(strategy.position_size);
                         strategy._cof.currentBarEntryFilled = false;
                         strategy._cof.interiorEntryFilled = false;
-                        let fills = (strategy._cof.pass === 0 ? pendingMarginFills : 0)
+                        let fills = (strategy._cof.pass === 0 ? pendingMarginFills + consecutiveLossFills : 0)
                             + Number(marginRecalcNextPass) + processStrategyOrders(context);
                         // Margin checkpoints along the intra-bar path (TV
                         // broker emulator): first at the OPEN right after
@@ -1407,6 +1408,8 @@ export class PineTS {
                 processExitOrders(context, 'close');
                 finalizeStrategyBar(context);
             }
+
+            finalizeConsecutiveLossDay(context);
 
             // POC and immediate-close paths captured their pre-fill state above.
             if (!poc && !immediateClose) {

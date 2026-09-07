@@ -24,6 +24,44 @@ export function intradayFilledOrdersHalted(context: any): boolean {
     return strategy._intraday_filled_orders.halted;
 }
 
+/** VIN-170: classify each completed trading day once, including floating PnL. */
+export function processConsecutiveLossDay(context: any): number {
+    const strategy: StrategyState = context.strategy;
+    if (!strategy?.risk_rules.max_cons_loss_days || strategy.risk_halted) return 0;
+    const day = riskTradingDayKey(context);
+    const previous = strategy._cons_loss_days;
+    if (previous?.day === day) return 0;
+    const price = snapExecutionPrice(Series.from(context.data.open).get(0), context.pine?.syminfo?.mintick ?? 0);
+    markToMarket(context, price);
+    const equity = strategy.equity + strategy._equity_account_residual;
+    const consecutive = previous && previous.endEquity < previous.startEquity ? previous.consecutive + 1 : 0;
+    strategy._cons_loss_days = { day, startEquity: equity, endEquity: equity, consecutive };
+    if (consecutive < strategy.risk_rules.max_cons_loss_days.count) return 0;
+    strategy.risk_halted = true;
+    if (strategy.position_size === 0) return 0;
+    const fill = snapExecutionPrice(applySlippage(context, -Math.sign(strategy.position_size), price), context.pine?.syminfo?.mintick ?? 0);
+    closePartialPosition(context, Math.abs(strategy.position_size), fill, Series.from(context.data.openTime).get(0), {
+        exitId: 'Close Position (Max consecutive loss days)', exitComment: 'Close Position (Max consecutive loss days)',
+    });
+    return 1;
+}
+
+export function finalizeConsecutiveLossDay(context: any): void {
+    const strategy: StrategyState = context.strategy;
+    if (!strategy?.risk_rules.max_cons_loss_days || strategy.risk_halted) return;
+    // On the first dataset bar, strategy() is created by the script after
+    // the pre-fill broker phase. Its opening account was still the initial
+    // capital; preserve that reference even if POC has already charged fees.
+    if (!strategy._cons_loss_days) {
+        strategy._cons_loss_days = {
+            day: riskTradingDayKey(context), startEquity: strategy.initial_capital,
+            endEquity: strategy.initial_capital, consecutive: 0,
+        };
+    }
+    markToMarket(context, Series.from(context.data.close).get(0));
+    strategy._cons_loss_days.endEquity = strategy.equity + strategy._equity_account_residual;
+}
+
 /** VIN-169: daily loss uses the day's opening equity, not an intrabar peak. */
 export function intradayLossHalted(context: any): boolean {
     const strategy: StrategyState = context.strategy;
@@ -1752,12 +1790,11 @@ export function isOrderBlockedByRisk(strategy: StrategyState, order: Order): boo
 }
 
 /**
- * Latches `risk_halted` when any catastrophic rule trips (max_drawdown,
- * max_cons_loss_days). Once halted, all order requests are
+ * Latches `risk_halted` when max_drawdown trips at trade closure.
+ * Once halted, all order requests are
  * rejected at submission for the rest of the run. Accepted orders survive.
  *
- * Called after each close. Consecutive loss days still use a trade-count
- * approximation; that separate VIN-170 correction is not part of VIN-169.
+ * Consecutive loss days are evaluated separately at the day boundary.
  */
 export function evaluateCatastrophicRiskHalt(strategy: StrategyState): void {
     if (strategy.risk_halted) return;
@@ -1771,16 +1808,7 @@ export function evaluateCatastrophicRiskHalt(strategy: StrategyState): void {
             return;
         }
     }
-    if (rules.max_cons_loss_days) {
-        let consecutive = 0;
-        for (let i = strategy.closedtrades.length - 1; i >= 0; i--) {
-            if ((strategy.closedtrades[i].profit ?? 0) < 0) consecutive++;
-            else break;
-        }
-        if (consecutive >= rules.max_cons_loss_days.count) {
-            strategy.risk_halted = true;
-        }
-    }
+
 }
 
 /**
