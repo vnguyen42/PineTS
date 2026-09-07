@@ -356,6 +356,10 @@ export interface CofBarState {
     drainedEntryPass?: number;
     // VIN-166: one extra same-side market addition at the opening point.
     openAdditionFilled?: boolean;
+    // A current-bar COF entry defers the daily-risk check until the next point.
+    currentBarEntryFilled?: boolean;
+    /** A conditional entry crossed strictly inside the current path segment. */
+    interiorEntryFilled?: boolean;
     submissionBatch?: number;
 }
 
@@ -520,10 +524,10 @@ export interface StrategyState {
         max_position_size?: number;
     };
 
-    // Once max_drawdown / max_intraday_loss / max_cons_loss_days triggers, all
-    // further entries are blocked for the rest of the run (or trading day for
-    // intraday rules — TODO: day rollover detection).
+    // Permanent max_drawdown / max_cons_loss_days halt rejects new requests.
+    // Intraday limits use separate day-scoped state below.
     risk_halted: boolean;
+    _intraday_loss?: { day: string; equity: number; halted: boolean };
     _intraday_filled_orders?: { day: string; count: number; halted: boolean };
 
     // Internal: per-callsite cadence tracking for strategy.exit. Keyed by the

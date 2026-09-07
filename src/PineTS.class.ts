@@ -5,7 +5,7 @@ import { Context } from './Context.class';
 import { splitTickerModifier, stripTickerModifier, transformHeikinAshi, transformHeikinAshiCandle, withTickerModifier } from './tickerModifier';
 import { Series } from './Series';
 import { Indicator } from './Indicator';
-import { processStrategyOrders, processExitOrders, processMarginCall, finalizeStrategyBar, finalizeStrategyRun, isAdverseFirstBar, applyPendingCloseMarginCall, applyPendingOpenMarginCall, snapshotStrategyState, restoreStrategyState, markToMarket } from './namespaces/strategy/utils';
+import { intradayLossHalted, processIntradayLoss, processStrategyOrders, processExitOrders, processMarginCall, finalizeStrategyBar, finalizeStrategyRun, isAdverseFirstBar, applyPendingCloseMarginCall, applyPendingOpenMarginCall, snapshotStrategyState, restoreStrategyState, markToMarket } from './namespaces/strategy/utils';
 
 // ── Timeframe duration utility ──────────────────────────────────────
 //prettier-ignore
@@ -1224,9 +1224,12 @@ export class PineTS {
                 // a reversal queued at that close (qty frozen at queue
                 // time) overshoots by exactly the deferred quantity, as TV
                 // does.
+                intradayLossHalted(context);
                 applyPendingCloseMarginCall(context);
                 const pendingMarginFills = applyPendingOpenMarginCall(context);
-                if (context.strategy.config.calc_on_order_fills === true) {
+                if (context.strategy.config.calc_on_order_fills === true || context.strategy.risk_rules.max_intraday_loss) {
+                    // VIN-169 also needs the broker path for daily risk checks.
+                    // With COF disabled, fills never re-execute user code.
                     // calc_on_order_fills=true — TV broker emulator intrabar
                     // sequencing. Each historical bar is assumed to have 4
                     // ticks (open, then high & low in the order inferred from
@@ -1265,6 +1268,8 @@ export class PineTS {
                         // same-tick reversal (1539); same-direction re-entries
                         // keep the next-tick path (2205/1502).
                         strategy._cof.tickStartSign = Math.sign(strategy.position_size);
+                        strategy._cof.currentBarEntryFilled = false;
+                        strategy._cof.interiorEntryFilled = false;
                         let fills = (strategy._cof.pass === 0 ? pendingMarginFills : 0)
                             + Number(marginRecalcNextPass) + processStrategyOrders(context);
                         // Margin checkpoints along the intra-bar path (TV
@@ -1279,13 +1284,14 @@ export class PineTS {
                         let marginFills = processMarginCall(context, 'open');
                         const adverseFirst = isAdverseFirstBar(context);
                         if (adverseFirst) marginFills += processMarginCall(context, 'extreme');
+                        fills += processIntradayLoss(context, strategy._cof.ticks[strategy._cof.pass]);
                         fills += processExitOrders(context, 'intrabar');
                         if (!adverseFirst) marginFills += processMarginCall(context, 'extreme');
                         // The final close already has its normal script evaluation;
                         // an extra COF pass there would replace TV's pre-exit plots.
                         marginRecalcNextPass = marginFills > 0 && strategy._cof.pass < strategy._cof.ticks.length - 2;
 
-                        if (fills > 0) {
+                        if (fills > 0 && strategy.config.calc_on_order_fills === true) {
                             // Re-execute at the fill's current assumed path
                             // point. Drain the orders that recalculation
                             // emits before advancing `pass`, in TV's measured
@@ -1293,9 +1299,8 @@ export class PineTS {
                             // REVERSAL market entries (VIN-110) — the 1539
                             // ledger shows the close then the opposite open,
                             // both at the triggering fill price. Repeating
-                            // the drain handles a chain (partial closes, then
-                            // a reversal, then a close of the reversal...)
-                            // while no-op/cancelled orders return zero. One
+                            // the drain at the open permits one additional batch
+                            // while later recalculations defer their orders. One
                             // fill per logical reversal order id per pass
                             // (anti-loop, see CofBarState) plus the module-level
                             // MAX_SAME_TICK_DRAIN cap against pathological
@@ -1322,8 +1327,15 @@ export class PineTS {
                                 for (const [data, len] of plotLengths) {
                                     if (data.length > len) data.length = len;
                                 }
-                                sameTickFills = processExitOrders(context, 'intrabar', true);
-                                sameTickFills += processStrategyOrders(context, 'open', true);
+                                // Native VIN-169: a conditional crossing inside the segment
+                                // can drain at its endpoint (STOP170 -> close179). A market
+                                // fill at an endpoint waits for the next point, except for
+                                // the one additional OPEN batch (control500).
+                                sameTickFills = 0;
+                                if ((strategy._cof.pass === 0 || strategy._cof.interiorEntryFilled) && drainIterations === 0) {
+                                    sameTickFills = processExitOrders(context, 'intrabar', true);
+                                    sameTickFills += processStrategyOrders(context, 'open', true);
+                                }
                                 drainIterations += 1;
                             } while (sameTickFills > 0 && drainIterations < MAX_SAME_TICK_DRAIN);
                         }

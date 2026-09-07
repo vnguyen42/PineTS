@@ -44,8 +44,12 @@ export function risk(context: any) {
             if (!context.strategy) return;
             context.strategy.risk_rules.max_intraday_filled_orders = { count, alert_message };
         },
-        max_intraday_loss: (value: number, type: 'cash' | 'percent_of_equity', _alert_message?: string) => {
+        max_intraday_loss: (...args: any[]) => {
             if (!context.strategy) return;
+            // VIN-169: public source 1785 supplies named type/value arguments.
+            const { value, type } = parseArgsForPineParams<{ value: number; type: 'cash' | 'percent_of_equity' }>(
+                args, ['value', 'type', 'alert_message'], { value: 'number', type: 'string', alert_message: 'string' },
+            );
             context.strategy.risk_rules.max_intraday_loss = { value, type };
         },
         max_position_size: (contracts: number) => {

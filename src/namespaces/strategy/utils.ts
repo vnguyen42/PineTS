@@ -7,22 +7,66 @@ import { getDatePartsInTimezone } from '../Time';
 import { defaultStrategyMargin } from './defaults';
 import { convertAccountToSymbol, currentBarTimeMs, symbolToAccountResidual } from './currency';
 
+function riskTradingDayKey(context: any): string {
+    const time = Series.from(context.data.openTime).get(0);
+    const parts = getDatePartsInTimezone(time, context.pine?.syminfo?.timezone ?? 'UTC');
+    return `${parts.year}-${parts.month}-${parts.day}`;
+}
+
 /** Daily order-admission gate, separate from permanent catastrophic risk halts. */
 export function intradayFilledOrdersHalted(context: any): boolean {
     const strategy: StrategyState = context.strategy;
     if (!strategy?.risk_rules.max_intraday_filled_orders) return false;
-    const time = Series.from(context.data.openTime).get(0);
-    const parts = getDatePartsInTimezone(time, context.pine?.syminfo?.timezone ?? 'UTC');
-    const day = `${parts.year}-${parts.month}-${parts.day}`;
+    const day = riskTradingDayKey(context);
     if (strategy._intraday_filled_orders?.day !== day) {
         strategy._intraday_filled_orders = { day, count: 0, halted: false };
     }
     return strategy._intraday_filled_orders.halted;
 }
 
+/** VIN-169: daily loss uses the day's opening equity, not an intrabar peak. */
+export function intradayLossHalted(context: any): boolean {
+    const strategy: StrategyState = context.strategy;
+    if (!strategy?.risk_rules.max_intraday_loss) return false;
+    const day = riskTradingDayKey(context);
+    if (strategy._intraday_loss?.day !== day) {
+        const time = Series.from(context.data.openTime).get(0);
+        const open = snapExecutionPrice(Series.from(context.data.open).get(0), context.pine?.syminfo?.mintick ?? 0);
+        const unrealized = openProfitAt(context, open);
+        const equity = strategy.initial_capital + strategy.netprofit + strategy._netprofit_account_residual
+            + unrealized + symbolToAccountResidual(context, unrealized, time);
+        strategy._intraday_loss = { day, equity, halted: false };
+    }
+    return strategy._intraday_loss.halted;
+}
+
+/** VIN-169: check once per broker point, with an open position.
+ * POC fills and COF drain fills wait for the next main path point.
+ * Accepted pending orders survive the halt.
+ */
+export function processIntradayLoss(context: any, price: number): number {
+    const strategy: StrategyState = context.strategy;
+    if (!strategy?.risk_rules.max_intraday_loss || intradayLossHalted(context) || strategy.position_size === 0) return 0;
+    // COF-created entries become risk-visible at the next main point.
+    if (strategy._cof?.currentBarEntryFilled) return 0;
+    const state = strategy._intraday_loss!;
+    const rule = strategy.risk_rules.max_intraday_loss;
+    markToMarket(context, price);
+    const equity = strategy.equity + strategy._equity_account_residual;
+    const limit = rule.type === 'percent_of_equity' ? state.equity * rule.value / 100 : rule.value;
+    if (state.equity - equity < limit) return 0;
+    state.halted = true;
+    const direction = -Math.sign(strategy.position_size);
+    const fillPrice = snapExecutionPrice(applySlippage(context, direction, price), context.pine?.syminfo?.mintick ?? 0);
+    closePartialPosition(context, Math.abs(strategy.position_size), fillPrice, Series.from(context.data.openTime).get(0), {
+        exitId: 'Close Position (Max intraday Loss)', exitComment: 'Close Position (Max intraday Loss)',
+    });
+    return 1;
+}
+
 /** VIN-168: a permanent halt rejects new requests, not accepted pending orders. */
 export function riskOrderRequestsHalted(context: any): boolean {
-    return context.strategy?.risk_halted === true || intradayFilledOrdersHalted(context);
+    return context.strategy?.risk_halted === true || intradayFilledOrdersHalted(context) || intradayLossHalted(context);
 }
 
 function recordIntradayOrderFill(context: any, price: number, time: number, count = 1, triggeringOrder?: Order): void {
@@ -832,7 +876,7 @@ export function processStrategyOrders(context: any, phase: 'open' | 'close' = 'o
     // orders placed during a same-bar recalculation fill on the NEXT tick
     // of that bar; the fill prices for same-bar MARKET orders are the
     // bar's assumed tick OHLC values (see CofBarState / the execution loop).
-    const cof = strategy.config.calc_on_order_fills === true;
+    const cof = strategy.config.calc_on_order_fills === true || strategy._cof != null;
     const cofState = cof ? (strategy._cof ?? null) : null;
     // process_orders_on_close is a distinct fill phase, not a second user
     // evaluation: orders queued by the normal bar-close execution are
@@ -1396,7 +1440,7 @@ export function processStrategyOrders(context: any, phase: 'open' | 'close' = 'o
                 // slot before this order fills. strategy.order() has no
                 // `_base_qty` marker and remains exempt by Pine design.
                 if (
-                    !cof
+                    strategy.config.calc_on_order_fills !== true
                     && order._base_qty !== undefined
                     && oldSign === direction
                     && wouldExceedPyramiding(strategy, direction)
@@ -1490,6 +1534,21 @@ export function processStrategyOrders(context: any, phase: 'open' | 'close' = 'o
                 : intrabarPath;
             const fillPathPosition = entryFillPathPosition(order, direction, fillPath, cofState, fillsAtClose);
             executeOrder(context, order, fillPrice, currentTime, fillPathPosition, fillsAtClose);
+            if (cofState && order.bar === context.idx) cofState.currentBarEntryFilled = true;
+            if (cofState && cofState.pass > 0 && order.type !== 'market' && !gapExecution) {
+                const level = order.type === 'stop' ? order.stop : order.limit;
+                const segmentStart = fillPath[cofState.pass - 1];
+                const segmentEnd = fillPath[cofState.pass];
+                // The trigger's path position precedes slippage. Require the
+                // level inside the segment too: absolute distance alone can
+                // also describe a level already passed before its start.
+                if (fillPathPosition.distanceAlongSegment > 0
+                    && fillPathPosition.distanceAlongSegment < 1
+                    && level > Math.min(segmentStart, segmentEnd)
+                    && level < Math.max(segmentStart, segmentEnd)) {
+                    cofState.interiorEntryFilled = true;
+                }
+            }
             order.status = 'filled';
             order.fill_price = fillPrice;
             order.fill_bar = context.idx;
@@ -1694,12 +1753,11 @@ export function isOrderBlockedByRisk(strategy: StrategyState, order: Order): boo
 
 /**
  * Latches `risk_halted` when any catastrophic rule trips (max_drawdown,
- * max_intraday_loss, max_cons_loss_days). Once halted, all order requests are
+ * max_cons_loss_days). Once halted, all order requests are
  * rejected at submission for the rest of the run. Accepted orders survive.
  *
- * Called after each close. The intraday rules use simple cumulative
- * approximations — true day-rollover detection would require bar timestamp
- * + timezone logic that's deferred.
+ * Called after each close. Consecutive loss days still use a trade-count
+ * approximation; that separate VIN-170 correction is not part of VIN-169.
  */
 export function evaluateCatastrophicRiskHalt(strategy: StrategyState): void {
     if (strategy.risk_halted) return;
@@ -1709,16 +1767,6 @@ export function evaluateCatastrophicRiskHalt(strategy: StrategyState): void {
         const limit =
             rules.max_drawdown.type === 'percent_of_equity' ? (rules.max_drawdown.value / 100) * strategy.equity_peak : rules.max_drawdown.value;
         if (strategy.max_drawdown >= limit) {
-            strategy.risk_halted = true;
-            return;
-        }
-    }
-    if (rules.max_intraday_loss) {
-        const limit =
-            rules.max_intraday_loss.type === 'percent_of_equity'
-                ? (rules.max_intraday_loss.value / 100) * strategy.initial_capital
-                : rules.max_intraday_loss.value;
-        if (strategy.grossloss >= limit) {
             strategy.risk_halted = true;
             return;
         }
@@ -2625,7 +2673,7 @@ export function processExitOrders(
     // assumed intrabar tick. The explicit post-fill drain is the measured
     // exception for pure market exits: it fills them at the current tick.
     // The return value drives the execution loop's recalc decision.
-    const cof = strategy.config.calc_on_order_fills === true;
+    const cof = strategy.config.calc_on_order_fills === true || strategy._cof != null;
     const cofState = cof ? (strategy._cof ?? null) : null;
     const processOnClose = strategy.config.process_orders_on_close === true;
     const closePhase = phase === 'close';
