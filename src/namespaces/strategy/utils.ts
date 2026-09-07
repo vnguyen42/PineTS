@@ -1119,6 +1119,9 @@ export function processStrategyOrders(context: any, phase: 'open' | 'close' = 'o
                     const closeMarketable = closeMarketableStop(order);
                     if (closeMarketable) {
                         shouldFill = true;
+                        // A stop triggered at submission executes like a market
+                        // fill, including the displayed-price snap (VIN-165).
+                        gapExecution = true;
                         fillPrice = closePrice;
                     } else if (direction === 1) {
                         if (tickPrice !== undefined) {
@@ -1213,6 +1216,13 @@ export function processStrategyOrders(context: any, phase: 'open' | 'close' = 'o
                     }
                 }
                 break;
+        }
+
+        if (shouldFill && !cof && closeMarketableStop(order)
+            && Math.sign(strategy.position_size) === -parseDirection(order.direction)) {
+            // A submitted market close precedes a newly triggered stop.
+            // Entry sizing already projects that close (VIN-165).
+            processExitOrders(context, 'close', true);
         }
 
         if (shouldFill && !cof && !closePhase && order.type !== 'market') {
@@ -2907,8 +2917,9 @@ export function processExitOrders(
 
             let qtyToClose = matchingQty;
             if (order._explicit_qty_cap || (order.qty && order.qty > 0)) qtyToClose = Math.min(order.qty, matchingQty);
-            else if (order.qty_percent && order.qty_percent > 0) {
-                qtyToClose = matchingQty * (order.qty_percent / 100);
+            else if (order.qty_percent && order.qty_percent > 0 && order.qty_percent < 100) {
+                const fraction = matchingQty * (order.qty_percent / 100);
+                qtyToClose = quantizeToQtyStep(context, fraction) ?? fraction;
             }
 
             globalEvents.push({

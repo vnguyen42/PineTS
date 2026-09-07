@@ -1411,6 +1411,9 @@ export function transformReturnStatement(node: any, scopeManager: ScopeManager):
                             c(node.callee, state);
                         }
                         transformCallExpression(node, state);
+                        // Generated user calls already contain prepared Series arguments.
+                        // Re-walking them here extracts scalars and loses nested history.
+                        if (node.callee?.object?.name === CONTEXT_NAME && node.callee?.property?.name === 'call') return;
                         if (node.type === 'CallExpression') {
                             node.arguments.forEach((arg: any) => c(arg, state));
                         }

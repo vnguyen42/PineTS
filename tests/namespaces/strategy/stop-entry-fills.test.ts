@@ -129,23 +129,23 @@ describe('strategy stop-entries — TV fill semantics (VIN-95)', () => {
         expect(context.strategy.opentrades[0].entry_price).toBe(2.462);
     });
 
-    it('already-marketable LONG stop fills at the next open (even below the stop) with sizing at the order level (VIN-89)', () => {
+    it('already-marketable LONG stop fills at the next open (even below the stop) with sizing at the signal close (VIN-165)', () => {
         const context = makeContext({ default_qty_type: 'percent_of_equity', default_qty_value: 100 });
         entry(context)('L', 'long', { stop: 98 }); // 98 < close 100 (strict) → marketable at submission
         setBar(context, 1, 97, 99, 96, 98); // open 97 < stop 98
         const fills = processStrategyOrders(context);
         expect(fills).toBe(1);
-        expect(context.strategy.position_size).toBe(10204.08163); // 1000000 / 98, 5 decimals
+        expect(context.strategy.position_size).toBe(10000); // 1000000 / signal close 100
         expect(context.strategy.opentrades[0].entry_price).toBe(97); // next open, not the stop
     });
 
-    it('already-marketable SHORT stop fills at the next open with sizing at the order level', () => {
+    it('already-marketable SHORT stop fills at the next open with sizing at the signal close', () => {
         const context = makeContext({ default_qty_type: 'percent_of_equity', default_qty_value: 100 });
         entry(context)('S', 'short', { stop: 102 }); // 102 > close 100 (strict) → marketable
         setBar(context, 1, 103, 104, 101, 103);
         const fills = processStrategyOrders(context);
         expect(fills).toBe(1);
-        expect(context.strategy.position_size).toBe(-9803.92156); // 1000000 / 102, 5 decimals
+        expect(context.strategy.position_size).toBe(-10000); // 1000000 / signal close 100
         expect(context.strategy.opentrades[0].entry_price).toBe(103); // next open
     });
 
@@ -258,12 +258,11 @@ describe('strategy stop-entries — TV fill semantics (VIN-95)', () => {
         expect(context.strategy.opentrades[0].entry_price).toBe(1.2398); // open − 2×0.0001
     });
 
-    it('marketable stop keeps its level for sizing even when the signal close differs (VIN-89 regression)', () => {
+    it('marketable stop uses the signal close for sizing (VIN-165)', () => {
         const context = makeContext({ default_qty_type: 'percent_of_equity', default_qty_value: 50 });
-        // A marketable LONG stop at 98 vs a market entry at close 100: the
-        // qty must reflect the ORDER level (98), not the signal close (100).
+        // TV sizes an already-triggered stop like a market order at submission.
         entry(context)('L', 'long', { stop: 98 });
-        expect(context.strategy.pending_orders[0].qty).toBe(Math.floor((1000000 * 50 / 100) / 98 * 1e5) / 1e5);
+        expect(context.strategy.pending_orders[0].qty).toBe(Math.floor((1000000 * 50 / 100) / 100 * 1e5) / 1e5);
     });
     const naLevelCases = [
         {
@@ -312,7 +311,8 @@ describe('strategy stop-entries — TV fill semantics (VIN-95)', () => {
         expect(pending.type).toBe(testCase.type);
         expect(pending.limit).toBe(testCase.expectedLimit);
         expect(pending.stop).toBe(testCase.expectedStop);
-        expect(pending.qty).toBe(Math.floor((1000 / testCase.sizingPrice) * 1e6) / 1e6);
+        const sizingPrice = testCase.type === 'stop' ? 100 : testCase.sizingPrice;
+        expect(pending.qty).toBe(Math.floor((1000 / sizingPrice) * 1e6) / 1e6);
         expect(pending._stop_marketable).toBe(testCase.type === 'stop' && testCase.sizingPrice < 100);
     });
 

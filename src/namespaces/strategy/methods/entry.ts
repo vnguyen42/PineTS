@@ -350,13 +350,26 @@ export function entry(context: any) {
         const mintick = context.pine?.syminfo?.mintick ?? 0;
         const limitValueRounded = limitValue !== undefined ? roundToMintick(limitValue, currentPrice, mintick) : undefined;
         const stopValueRounded  = stopValue  !== undefined ? roundToMintick(stopValue,  currentPrice, mintick) : undefined;
-        const sizingPrice = stopValueRounded !== undefined
-            ? stopValueRounded
-            : limitValueRounded !== undefined
-              ? limitValueRounded
-              : usesDefaultPriceSizing
-                ? cryptoMarketSizingPrice(context, dir, currentPrice)
-                : currentPrice;
+        // A stop already beyond the signal bar's close is marketable at
+        // submission (VIN-95): it uses the market sizing reference (VIN-165)
+        // and fills at the next admissible open (at the signal bar's close
+        // for a current-bar stop under process_orders_on_close,
+        // POC_CLOSE_MARKETABLE_STOP). Equality remains a stop
+        // crossing on the next bar, with 1-ulp tolerance reserved for
+        // trigger-vs-feed comparisons.
+        const stopMarketable = limitValueRounded === undefined
+            && stopValueRounded !== undefined
+            && ((dir === 1 && stopValueRounded < currentPrice - 1e-12 * Math.max(1, Math.abs(currentPrice)))
+                || (dir === -1 && stopValueRounded > currentPrice + 1e-12 * Math.max(1, Math.abs(currentPrice))));
+        const sizingPrice = stopMarketable
+            ? (usesDefaultPriceSizing ? cryptoMarketSizingPrice(context, dir, currentPrice) : currentPrice)
+            : stopValueRounded !== undefined
+              ? stopValueRounded
+              : limitValueRounded !== undefined
+                ? limitValueRounded
+                : usesDefaultPriceSizing
+                  ? cryptoMarketSizingPrice(context, dir, currentPrice)
+                  : currentPrice;
         const baseQty = calculateOrderQty(context, qtyValue, dir, sizingPrice);
 
         // VIN-103: TV never submits an order whose calculated quantity is
@@ -379,19 +392,6 @@ export function entry(context: any) {
         } else if (stopValueRounded !== undefined) {
             orderType = 'stop';
         }
-
-        // A stop already beyond the signal bar's close is marketable at
-        // submission (VIN-95): it keeps its level for sizing — the qty was
-        // computed above from `stopValue` — but behaves as a triggered stop
-        // and fills at the next admissible open (at the signal bar's close
-        // for a current-bar stop under process_orders_on_close,
-        // POC_CLOSE_MARKETABLE_STOP). Equality remains a stop
-        // crossing on the next bar, with 1-ulp tolerance reserved for
-        // trigger-vs-feed comparisons.
-        const stopMarketable = orderType === 'stop'
-            && stopValueRounded !== undefined
-            && ((dir === 1 && stopValueRounded < currentPrice - 1e-12 * Math.max(1, Math.abs(currentPrice)))
-                || (dir === -1 && stopValueRounded > currentPrice + 1e-12 * Math.max(1, Math.abs(currentPrice))));
 
         const currentTime = Series.from(context.data.openTime).get(0);
 

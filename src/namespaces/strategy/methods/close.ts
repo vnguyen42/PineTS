@@ -107,7 +107,7 @@ export function close(context: any) {
             status: 'pending',
             category: 'exit',
             from_entry: targetId,
-            qty_percent: parsed.qty_percent,
+            qty_percent: parsed.qty_percent === undefined ? undefined : Series.from(parsed.qty_percent).get(0),
             comment: parsed.comment,
             alert_message: parsed.alert_message,
             immediately: parsed.immediately === true,
@@ -118,6 +118,12 @@ export function close(context: any) {
         // the engine computes from the matching position at fill time.
         if (parsed.qty !== undefined) order.qty = Math.abs(Number(parsed.qty));
 
-        context.strategy.pending_orders.push(order);
+        // Repeated same-bar calls modify the pending close for this entry ID.
+        // Once filled, a later bar's close still applies to the remaining size.
+        const pendingClose = context.strategy.pending_orders.findIndex((pending: Order) =>
+            pending.category === 'exit' && pending.id === order.id && pending.bar === context.idx
+        );
+        if (pendingClose >= 0) context.strategy.pending_orders[pendingClose] = order;
+        else context.strategy.pending_orders.push(order);
     };
 }
