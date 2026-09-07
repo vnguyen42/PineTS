@@ -2540,7 +2540,7 @@ export function processExitOrders(
     const cof = strategy.config.calc_on_order_fills === true;
     const cofState = cof ? (strategy._cof ?? null) : null;
     const processOnClose = strategy.config.process_orders_on_close === true;
-    const closePhase = phase === 'close' && processOnClose;
+    const closePhase = phase === 'close';
     let fills = 0;
     const rawOhlc: OhlcPrices = {
         open: Series.from(context.data.open).get(0),
@@ -2714,6 +2714,8 @@ export function processExitOrders(
             && order._cof_fresh_single_trade_exit_pass !== undefined
             && order._cof_fresh_single_trade_exit_pass === cofState.pass;
         if (marketExitsOnly && !isPureMarketExit && !cofMarkedThisPass) continue;
+        // Without global POC this phase is exclusive to immediate closes.
+        if (closePhase && !processOnClose && (!isPureMarketExit || order.immediately !== true)) continue;
 
         // Gather matching open trades (from_entry filter; '' = all).
         // For market closes from strategy.close_all() / strategy.close(id),

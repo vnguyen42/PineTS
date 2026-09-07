@@ -164,10 +164,10 @@ describe('1858 intrabar-fill-ordering', () => {
 // Chemin COMPLET de la boucle non-COF de PineTS.class.ts (pas d'appel direct
 // à processExitOrders / processStrategyOrders) : le pré-drain des sorties
 // marché différées tourne AVANT les entrées marché, tout à l'ouverture de la
-// barre. Contrat local (close.ts:18-21) : une sortie différée remplit à
-// l'ouverture de la barre suivante ; seul `immediately=true` AVEC
-// process_orders_on_close remplit à la clôture. Une sortie différée ne doit
-// donc JAMAIS consommer la clôture d'une barre future.
+// barre. Ordinary closes defer to the next open. The original currency
+// script has no immediately flag; the old test added it under a wrong local
+// contract. Studio's archived TradingView windows prove immediately=true
+// is independent of POC (covered by immediate-window-close.test.ts).
 describe('1858 deferred market exits through the non-COF bar loop', () => {
     const candles = [
         { open: 100, high: 101, low: 99, close: 100 },
@@ -187,14 +187,14 @@ describe('1858 deferred market exits through the non-COF bar loop', () => {
     }));
 
     const HEADER = `//@version=5
-strategy('1858-immediately', default_qty_type=strategy.fixed, default_qty_value=1, pyramiding=1)
+strategy('1858-deferred', default_qty_type=strategy.fixed, default_qty_value=1, pyramiding=1)
 if bar_index == 0
     strategy.entry('seed', strategy.long)
 `;
 
-    it('fills a deferred immediately close at the next bar open, never at its close', async () => {
+    it('fills an ordinary deferred close at the next bar open, never at its close', async () => {
         const context = await new PineTS(candles, 'TEST:1858', '240').run(`${HEADER}if bar_index == 1
-    strategy.close('seed', immediately = true)
+    strategy.close('seed')
 `);
         const strategy = context.strategy;
         if (!strategy) throw new Error('strategy was not initialized');
@@ -211,7 +211,7 @@ if bar_index == 0
 
     it('drains the deferred close before the opposite market entry, both at the open', async () => {
         const context = await new PineTS(candles, 'TEST:1858', '240').run(`${HEADER}if bar_index == 1
-    strategy.close('seed', immediately = true)
+    strategy.close('seed')
     strategy.entry('rev', strategy.short)
 `);
         const strategy = context.strategy;
