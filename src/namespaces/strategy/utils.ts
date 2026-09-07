@@ -3064,8 +3064,15 @@ export function processExitOrders(
                     const entryFilledAtTick = matching.some((trade) =>
                         (trade._activation_entry_bar_index ?? trade.entry_bar_index) === context.idx
                         && trade._activation_entry_path_segment === cofState.pass - 1);
+                    // A bracket attached only to this new entry must first
+                    // see the fill recalculation (VIN-160 BTC DCA witness).
+                    // Only an addition to an already matching activation
+                    // batches its pending TP ahead of that recalculation.
+                    const hadMatchingEntryBeforeTick = matching.some((trade) =>
+                        (trade._activation_entry_bar_index ?? trade.entry_bar_index) !== context.idx
+                        || (trade._activation_entry_path_segment ?? -1) < cofState.pass - 1);
                     const nextTick = cofState.ticks[Math.min(cofState.pass + 1, cofState.ticks.length - 1)];
-                    if (entryFilledAtTick) {
+                    if (entryFilledAtTick && hadMatchingEntryBeforeTick) {
                         tpHit = isLong
                             ? touchedAtOrAbove(tp, Math.max(cofTickPrice!, nextTick))
                             : touchedAtOrBelow(tp, Math.min(cofTickPrice!, nextTick));
