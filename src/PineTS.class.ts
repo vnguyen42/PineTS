@@ -5,7 +5,7 @@ import { Context } from './Context.class';
 import { splitTickerModifier, stripTickerModifier, transformHeikinAshi, transformHeikinAshiCandle, withTickerModifier } from './tickerModifier';
 import { Series } from './Series';
 import { Indicator } from './Indicator';
-import { processStrategyOrders, processExitOrders, processMarginCall, finalizeStrategyBar, finalizeStrategyRun, isAdverseFirstBar, applyPendingCloseMarginCall, snapshotStrategyState, restoreStrategyState, markToMarket } from './namespaces/strategy/utils';
+import { processStrategyOrders, processExitOrders, processMarginCall, finalizeStrategyBar, finalizeStrategyRun, isAdverseFirstBar, applyPendingCloseMarginCall, applyPendingOpenMarginCall, snapshotStrategyState, restoreStrategyState, markToMarket } from './namespaces/strategy/utils';
 
 // ── Timeframe duration utility ──────────────────────────────────────
 //prettier-ignore
@@ -1225,6 +1225,7 @@ export class PineTS {
                 // time) overshoots by exactly the deferred quantity, as TV
                 // does.
                 applyPendingCloseMarginCall(context);
+                const pendingMarginFills = applyPendingOpenMarginCall(context);
                 if (context.strategy.config.calc_on_order_fills === true) {
                     // calc_on_order_fills=true — TV broker emulator intrabar
                     // sequencing. Each historical bar is assumed to have 4
@@ -1259,7 +1260,7 @@ export class PineTS {
                         // same-tick reversal (1539); same-direction re-entries
                         // keep the next-tick path (2205/1502).
                         strategy._cof.tickStartSign = Math.sign(strategy.position_size);
-                        let fills = processStrategyOrders(context);
+                        let fills = (strategy._cof.pass === 0 ? pendingMarginFills : 0) + processStrategyOrders(context);
                         // Margin checkpoints along the intra-bar path (TV
                         // broker emulator): first at the OPEN right after
                         // entries fill; then at the adverse extreme — BEFORE
@@ -1387,6 +1388,7 @@ export class PineTS {
 
                 closeFills = processStrategyOrders(context, 'close');
                 closeFills += processExitOrders(context, 'close');
+                if (closeFills > 0) processMarginCall(context, 'close');
 
                 if (cof && closeFills > 0) {
                     // A COF recalc is allowed after the close fill, but no

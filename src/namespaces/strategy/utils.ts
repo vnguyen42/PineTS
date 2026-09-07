@@ -2174,7 +2174,9 @@ function openProfitAt(context: any, price: number): number {
  */
 export function markToMarket(context: any, currentPrice: number): void {
     const strategy: StrategyState = context.strategy;
-    const unrealizedPnL = openProfitAt(context, currentPrice);
+    // VIN-161: historical OHLC may retain sub-tick decimals; broker equity
+    // values the position at the same tick grid as execution.
+    const unrealizedPnL = openProfitAt(context, snapExecutionPrice(currentPrice, context.pine?.syminfo?.mintick ?? 0));
     strategy.openprofit = unrealizedPnL;
     strategy.equity = strategy.initial_capital + strategy.netprofit + unrealizedPnL;
     // VIN-136: the ACCOUNT-currency residual of that same equity, snapshotted
@@ -3570,6 +3572,19 @@ export function processExitOrders(
     return fills;
 }
 
+/** Apply a margin deficit detected after a POC fill on the next available tick. */
+export function applyPendingOpenMarginCall(context: any): number {
+    const strategy: StrategyState = context.strategy;
+    const pending = (strategy as any)?._pending_open_mc;
+    if (!pending) return 0;
+    (strategy as any)._pending_open_mc = null;
+    if (Math.sign(strategy.position_size) !== pending.dir) return 0;
+    const price = snapExecutionPrice(Series.from(context.data.open).get(0), context.pine?.syminfo?.mintick ?? 0);
+    closePartialPosition(context, Math.min(pending.qty, Math.abs(strategy.position_size)), price,
+        Series.from(context.data.openTime).get(0), { exitId: 'Margin call', exitComment: 'Margin call' });
+    return 1;
+}
+
 /**
  * Apply a SECOND margin call scheduled by the phantom re-check (see
  * processMarginCall). TV books that fill at the PREVIOUS bar's close,
@@ -3639,12 +3654,8 @@ export function isAdverseFirstBar(context: any): boolean {
  *   'extreme' — at the bar's adverse extreme (low for longs, high for
  *               shorts), liquidation fills at the extreme itself — the
  *               pessimistic broker model (intra-bar tick order unknown).
- *   'close'   — at the bar's close, after all exits: if the (possibly
- *               already-trimmed) position still breaches at the closing
- *               price, another partial liquidation fills at the close.
- *               Evidence: 2021-10-01 (profit QA) shows TWO same-bar MC
- *               prices — 4×cover at the high, then a further 0.263108
- *               at 48,147.38 (the close).
+ *   'close'   — after POC fills, freeze a remaining margin deficit for
+ *               liquidation at the next bar's open (VIN-161 UNI witness).
  *
  * TV checks margin along the path, interleaved with exit fills — proven
  * by the MC-ordering probe (BTCUSDT 1D, 2026-02-05): a 5-lot short
@@ -3680,9 +3691,19 @@ export function processMarginCall(context: any, checkpoint: 'open' | 'extreme' |
     const lowPrice = Series.from(context.data.low).get(0);
     const closePrice = Series.from(context.data.close).get(0);
     const currentTime = Series.from(context.data.openTime).get(0);
+    // Evaluate COF margin checkpoints at their actual path tick, so a
+    // deferred open fill can recalculate before reaching the high/low.
+    const cof = strategy._cof;
+    if (cof && checkpoint !== 'close') {
+        const adversePass = cof.ticks[1] === (positionDir === 1 ? lowPrice : highPrice) ? 1 : 2;
+        if (cof.pass !== (checkpoint === 'open' ? 0 : adversePass)) return;
+    }
+
     const pointValue = context.pine?.syminfo?.pointvalue ?? 1;
 
-    const adversePrice = checkpoint === 'open' ? openPrice : checkpoint === 'close' ? closePrice : positionDir === 1 ? lowPrice : highPrice;
+    const rawAdversePrice = checkpoint === 'open' ? openPrice : checkpoint === 'close' ? closePrice : positionDir === 1 ? lowPrice : highPrice;
+    // VIN-161: UNI historical high 3.0853 is valued and filled at 3.085.
+    const adversePrice = snapExecutionPrice(rawAdversePrice, context.pine?.syminfo?.mintick ?? 0);
     const totalQty = Math.abs(strategy.position_size);
     const equityAtAdverse = computeEquityAtPrice(context, adversePrice);
     const requiredMarginAtAdverse = computeRequiredMargin(totalQty, adversePrice, marginPct, pointValue);
@@ -3726,8 +3747,16 @@ export function processMarginCall(context: any, checkpoint: 'open' | 'extreme' |
         const marginFrac = marginPct / 100;
         const rawCoverQty = deficit / (adversePrice * pointValue * marginFrac);
         const coverQty = quantizeToQtyStep(context, rawCoverQty) ?? rawCoverQty;
-        const qtyToLiquidate = Math.min(totalQty, 4 * coverQty);
-        if (qtyToLiquidate === 0) return;
+        // A real deficit whose covered quantity truncates to zero still
+        // liquidates one unit (UNI April witness, unchanged with default qty 7).
+        const qtyToLiquidate = Math.min(totalQty, coverQty === 0 ? 1 : 4 * coverQty);
+        if (checkpoint === 'close') {
+            // VIN-161: POC entry commission creates the deficit at this
+            // close; TV fills its frozen .044 UNI liquidation at the next
+            // open even when that open has already restored sufficient equity.
+            (strategy as any)._pending_open_mc = { qty: qtyToLiquidate, dir: positionDir };
+            return;
+        }
 
         // Remember the FIFO order before the close so we can identify the
         // PARTIALLY-consumed lot afterwards (the liquidation eats whole
