@@ -1201,12 +1201,6 @@ export function processStrategyOrders(context: any, phase: 'open' | 'close' = 'o
             // trigger level — it is not an execution snap. Limit fills (an
             // activated stop-limit is a limit by this point) retain their
             // placement semantics.
-            // The pre-trade margin gate below checks the required margin at
-            // the execution price BEFORE this mintick snap (2841): the snap
-            // rounds the RECORD, not the money at risk — TV admits an entry
-            // whose snapped price pushes the notional a sub-tick past the
-            // available equity and trims the excess by a margin call. The
-            // booked fill price below stays snapped (81fcb5c intact).
             const preSnapFillPrice = fillPrice;
             if (snapExecutionFills && (gapExecution || order.type === 'market')) {
                 if (tickSpaceFills) {
@@ -1351,7 +1345,10 @@ export function processStrategyOrders(context: any, phase: 'open' | 'close' = 'o
                         heldMarginRemaining = computeHeldMargin(context, closePhase ? closePrice : openPrice);
                     }
                     const availableEquity = strategy.equity - heldMarginRemaining;
-                    const requiredMargin = computeRequiredMargin(newOpenQty, preSnapFillPrice, marginPct, pointValue);
+                    // VIN-161: admission uses the actual execution price.
+                    // Known-step quantities have already been quantized at
+                    // placement; a pre-snap price can admit excess notional.
+                    const requiredMargin = computeRequiredMargin(newOpenQty, fillPrice, marginPct, pointValue);
 
                     // marginPct === 0 (the v5 default): no margin requirement,
                     // TV never rejects — requiredMargin is 0 and even a

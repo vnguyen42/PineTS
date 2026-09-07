@@ -34,7 +34,9 @@ import { Series } from '../../../src/Series';
 
 const EQUITY = 100;
 const PRICE = 4882.8125;
-const MINTICK = 0.001;
+// VIN-161: keep the witness price on-tick so this tests only ULP noise,
+// not a real notional increase caused by rounding 4882.8125 to 4882.813.
+const MINTICK = 0.0001;
 // Same trunc6(equity / price) sizing path as the percent_of_equity family.
 const QTY = Math.floor((EQUITY / PRICE) * 1e6) / 1e6;
 
