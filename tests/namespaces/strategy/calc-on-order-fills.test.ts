@@ -531,8 +531,11 @@ describe('strategy calc_on_order_fills — same-bar sequencing', () => {
 
         context.strategy._cof.pass = 2;
         expect(processExitOrders(context, 'intrabar')).toBe(1);
-        expect(context.strategy.opentrades.find((trade: { id: string }) => trade.id === 'trade-old')?.size).toBe(50);
-        expect(context.strategy.opentrades.find((trade: { id: string }) => trade.id !== 'trade-old')?.size).toBe(50);
+        // VIN-160: the new activation supplies the bracket, but default FIFO
+        // closes the old physical remainder and leaves the new lot intact.
+        expect(context.strategy.opentrades.find((trade: { id: string }) => trade.id === 'trade-old')).toBeUndefined();
+        expect(context.strategy.opentrades.find((trade: { id: string }) => trade.id !== 'trade-old')?.size).toBe(100);
+        expect(context.strategy.closedtrades[1]).toMatchObject({ entry_price: 100, size: 50 });
     });
 
     it('clears a waiting exit after its matching entry is explicitly cancelled', () => {

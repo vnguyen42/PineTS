@@ -2726,8 +2726,15 @@ export function processExitOrders(
         // cancelled, mirroring TV's behavior of treating
         // strategy.close_all() as a no-op when its intended position is
         // already gone.
+        const cofPercentExit = cofState !== null && !order._explicit_qty_cap
+            && !(order.qty > 0) && Number(order.qty_percent) > 0;
         const excludedActivationTradeIds = order._excluded_activation_trade_ids;
-        const excludedConsumedTradeIds = order._excluded_consumed_trade_ids ?? [];
+        // VIN-160: activation exclusions prevent refilling a bracket; FIFO
+        // still consumes a physical lot's remainder on a later valid bracket.
+        const excludedConsumedTradeIds = cofPercentExit
+            && (strategy.config.close_entries_rule ?? 'FIFO').toUpperCase() !== 'ANY'
+            ? []
+            : order._excluded_consumed_trade_ids ?? [];
         const boundActivationIds = order.from_entry
             && (order._exit_bound_activation_ids?.length ?? 0) > 0
             ? undefined
@@ -2991,9 +2998,15 @@ export function processExitOrders(
             const entry = t._activation_bracket_entry ?? t._bracket_entry ?? t.entry_price;
             // VIN-160: each activation contributes its own percent bracket;
             // FIFO may consume both fractions from the same physical lot.
-            const tQty = cofState !== null && !order._explicit_qty_cap && !(order.qty > 0) && Number(order.qty_percent) > 0
-                ? Math.min(Math.abs(t.size), Math.abs(t._entry_order_qty ?? t.size) * Number(order.qty_percent) / 100)
+            let tQty = cofPercentExit
+                ? Math.min(Math.abs(t.size), Math.abs(t._entry_order_qty ?? t.size) * (Number(order.qty_percent) / 100))
                 : Math.abs(t.size);
+            // VIN-160: floor each activation's percent fraction before FIFO
+            // allocation. Sub-step halves otherwise erase real residual lots
+            // and change the position average used by subsequent brackets.
+            if (cofPercentExit) {
+                tQty = quantizeToQtyStep(context, tQty) ?? tQty;
+            }
             let tp = absTp;
             if (tp === undefined && order.profit !== undefined) {
                 const derivedTp = isLong ? entry + order.profit * mintick : entry - order.profit * mintick;
@@ -3084,15 +3097,6 @@ export function processExitOrders(
                 } else {
                     tpHit = isLong ? touchedAtOrAbove(tp, highPrice) : touchedAtOrBelow(tp, lowPrice);
                 }
-            }
-            // A marketable bracket created at the previous fill cannot
-            // acquire an entry that arrives at its execution tick.
-            if (cofState !== null && order.bar === context.idx && order._cof_marketable_next_pass === cofState.pass && !cofMarkedThisPass
-                && tp !== undefined && entryBar === context.idx
-                && entryPathSegment === cofState.pass - 1
-                && !order._exit_bound_activation_ids?.includes(activationId)
-                && (isLong ? touchedAtOrAbove(tp, cofTickPrice!) : touchedAtOrBelow(tp, cofTickPrice!))) {
-                tpHit = false;
             }
             if (sl !== undefined) {
                 if (closeOnly) {
@@ -3360,8 +3364,10 @@ export function processExitOrders(
             // au SL commun, position résiduelle pourtant décroissante), PAS à la
             // position résiduelle (0.05 → 0.0475 → 0.0425 fautif). La taille
             // initiale de chaque lot est latched à l'ouverture (_entry_order_qty).
-            const entryQty = matching.reduce((sum, trade) => sum + Math.abs(trade._entry_order_qty ?? trade.size), 0);
-            reservedQty = entryQty * (order.qty_percent / 100);
+            reservedQty = matching.reduce((sum, trade) => {
+                const fraction = Math.abs(trade._entry_order_qty ?? trade.size) * (order.qty_percent / 100);
+                return sum + (quantizeToQtyStep(context, fraction) ?? fraction);
+            }, 0);
         }
         // Reserve even when this order has no trigger on the current bar:
         // sibling brackets still own their quantity while waiting.
@@ -3370,13 +3376,12 @@ export function processExitOrders(
 
         const combinedEvents: FillEvent[] = [];
         for (const event of events) {
-            if (cofState !== null && !order._explicit_qty_cap && !(order.qty > 0) && Number(order.qty_percent) > 0) {
-                combinedEvents.push({ ...event, tradeId: undefined, sourceCount: 1 });
-                continue;
-            }
+            // FIFO can split one activation across physical lots. Preserve
+            // one percent-bracket event per activation, not per fragment.
             const existing = combinedEvents.find(
                 (candidate) =>
                     candidate.kind === event.kind
+                    && (!cofPercentExit || candidate.tradeId === event.tradeId)
                     && candidate.price === event.price
                     && candidate.gap === event.gap
                     && candidate.atClose === event.atClose
@@ -3388,8 +3393,10 @@ export function processExitOrders(
                 existing.qty = existing.qty === Infinity || event.qty === Infinity
                     ? Infinity
                     : existing.qty + event.qty;
-                existing.tradeId = undefined;
-                existing.sourceCount = (existing.sourceCount ?? 1) + 1;
+                if (!cofPercentExit) {
+                    existing.tradeId = undefined;
+                    existing.sourceCount = (existing.sourceCount ?? 1) + 1;
+                }
             }
         }
         for (const event of combinedEvents) {
