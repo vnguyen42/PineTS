@@ -128,6 +128,18 @@ const FILL_ARGS_TYPES = {
 
 export class PlotHelper {
     constructor(private context: any) { }
+    private numericPlotValue(value: any): any {
+        // Trade-count namespaces opt into numeric conversion explicitly; options
+        // bags and ordinary objects must retain their existing interpretation.
+        if (value !== null && typeof value === 'object'
+            && Object.prototype.hasOwnProperty.call(value, Symbol.toPrimitive)
+            && typeof value[Symbol.toPrimitive] === 'function') {
+            const scalar = value[Symbol.toPrimitive]('number');
+            if (typeof scalar === 'number') return scalar;
+        }
+        return value;
+    }
+
 
     /**
      * Resolve the key to use in context.plots.
@@ -241,6 +253,8 @@ export class PlotHelper {
     @silentInSecondary
     any(...args) {
         const callsiteId = extractCallsiteId(args);
+        // Resolve positional hybrid scalars before they look like a named-options bag.
+        args[0] = this.numericPlotValue(args[0]);
         const _parsed = parseArgsForPineParams<PlotOptions>(args, PLOT_SIGNATURE, PLOT_ARGS_TYPES);
         const { series, title, ...others } = _parsed;
         const options = this.extractPlotOptions(others);
@@ -255,7 +269,7 @@ export class PlotHelper {
             this.context.plots[plotKey] = { data: [], options: { ...options, overlay }, title, _plotKey: plotKey, _callsiteId: callsiteId };
         }
 
-        const value = Series.from(series).get(0);
+        const value = this.numericPlotValue(Series.from(series).get(0));
 
         // Set per-point color for QFChart:
         //   - User didn't pass color  → use Pine Script default #2962ff
