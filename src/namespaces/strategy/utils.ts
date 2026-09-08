@@ -2913,12 +2913,13 @@ export function processExitOrders(
         // A flat fee makes independent brackets non-additive: keep their
         // activation boundaries even when their fill prices coincide.
         const flatFeeBrackets = !isPureMarketExit && strategy.config.commission_type === 'cash_per_order';
-        const cofPercentExit = cofState !== null && !order._explicit_qty_cap
+        // VIN-179: each activation owns its percent bracket even without a COF path.
+        const percentBracket = !order._explicit_qty_cap
             && !(order.qty > 0) && Number(order.qty_percent) > 0;
         const excludedActivationTradeIds = order._excluded_activation_trade_ids;
         // VIN-160: activation exclusions prevent refilling a bracket; FIFO
         // still consumes a physical lot's remainder on a later valid bracket.
-        const excludedConsumedTradeIds = cofPercentExit
+        const excludedConsumedTradeIds = percentBracket
             && (strategy.config.close_entries_rule ?? 'FIFO').toUpperCase() !== 'ANY'
             ? []
             : order._excluded_consumed_trade_ids ?? [];
@@ -3186,7 +3187,7 @@ export function processExitOrders(
             const entry = t._activation_bracket_entry ?? t._bracket_entry ?? t.entry_price;
             // VIN-160: each activation contributes its own percent bracket;
             // FIFO may consume both fractions from the same physical lot.
-            let tQty = cofPercentExit
+            let tQty = percentBracket
                 ? Math.min(Math.abs(t.size), Math.abs(t._entry_order_qty ?? t.size) * (Number(order.qty_percent) / 100))
                 : flatFeeBrackets
                   ? Math.abs(t._entry_order_qty ?? t.size) * (Number(order.qty_percent) > 0 ? Number(order.qty_percent) / 100 : 1)
@@ -3194,7 +3195,7 @@ export function processExitOrders(
             // VIN-160: floor each activation's percent fraction before FIFO
             // allocation. Sub-step halves otherwise erase real residual lots
             // and change the position average used by subsequent brackets.
-            if (cofPercentExit) {
+            if (percentBracket) {
                 tQty = quantizeToQtyStep(context, tQty) ?? tQty;
             }
             let tp = absTp;
@@ -3567,11 +3568,11 @@ export function processExitOrders(
         const combinedEvents: FillEvent[] = [];
         for (const event of events) {
             // FIFO can split one activation across physical lots. Preserve
-            // one percent-bracket event per activation, not per fragment.
+            // one bracket event per activation, not per fragment or shared price.
             const existing = combinedEvents.find(
                 (candidate) =>
                     candidate.kind === event.kind
-                    && (!(cofPercentExit || flatFeeBrackets) || candidate.tradeId === event.tradeId)
+                    && candidate.tradeId === event.tradeId
                     && candidate.price === event.price
                     && candidate.gap === event.gap
                     && candidate.atClose === event.atClose
@@ -3583,10 +3584,6 @@ export function processExitOrders(
                 existing.qty = existing.qty === Infinity || event.qty === Infinity
                     ? Infinity
                     : existing.qty + event.qty;
-                if (!(cofPercentExit || flatFeeBrackets)) {
-                    existing.tradeId = undefined;
-                    existing.sourceCount = (existing.sourceCount ?? 1) + 1;
-                }
             }
         }
         for (const event of combinedEvents) {

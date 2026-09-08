@@ -101,7 +101,8 @@ describe('strategy exit global FIFO allocation', () => {
         expect(context.strategy.opentrades.map((trade: Trade) => [trade.entry_id, trade.size])).toEqual([['L3', 5]]);
     });
 
-    it('splits the same entry id at physical lot boundaries and snapshots qty_percent', () => {
+    // VIN-179 native same-id control: three 50% brackets close 5+5+5, not 10+5.
+    it('preserves same-id percent brackets while allocating their fills FIFO', () => {
         const context = makeContext();
         seed(context, true);
         context.strategy.pending_orders = [exitOrder('half', 'L', 1880, 0, 50)];
@@ -109,7 +110,8 @@ describe('strategy exit global FIFO allocation', () => {
         processExitOrders(context);
 
         expect(allocation(context)).toEqual([
-            { entryId: 'L', qty: 10, exit: 1880 },
+            { entryId: 'L', qty: 5, exit: 1880 },
+            { entryId: 'L', qty: 5, exit: 1880 },
             { entryId: 'L', qty: 5, exit: 1880 },
         ]);
         expect(context.strategy.opentrades.map((trade: Trade) => trade.size)).toEqual([5, 10]);
