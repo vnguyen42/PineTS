@@ -260,9 +260,7 @@ export function security(context: any) {
                       myCloseTime,
                       secContext.data.openTime.data,
                       secContext.data.closeTime.data,
-                      _lookahead,
-                      context.eDate,
-                      _gaps
+                      _lookahead
                   )
                 : findSecContextIdx(myOpenTime, myCloseTime, secContext.data.openTime.data, secContext.data.closeTime.data, _lookahead, isRealtime);
 
@@ -372,9 +370,7 @@ export function security(context: any) {
                   myCloseTime,
                   secContext.data.openTime.data,
                   secContext.data.closeTime.data,
-                  _lookahead,
-                  context.eDate,
-                  _gaps
+                  _lookahead
               )
             : findSecContextIdx(myOpenTime, myCloseTime, secContext.data.openTime.data, secContext.data.closeTime.data, _lookahead, isRealtime);
 

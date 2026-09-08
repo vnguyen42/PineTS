@@ -71,6 +71,7 @@ export function intradayLossHalted(context: any): boolean {
         const time = Series.from(context.data.openTime).get(0);
         const open = snapExecutionPrice(Series.from(context.data.open).get(0), context.pine?.syminfo?.mintick ?? 0);
         const unrealized = openProfitAt(context, open);
+        // Compute the reference without mutating script-visible equity: this can run inside user code.
         const equity = strategy.initial_capital + strategy.netprofit + strategy._netprofit_account_residual
             + unrealized + symbolToAccountResidual(context, unrealized, time);
         strategy._intraday_loss = { day, equity, halted: false };
@@ -115,7 +116,7 @@ export function riskOrderRequestsHalted(context: any): boolean {
     return context.strategy?.risk_halted === true || intradayFilledOrdersHalted(context) || intradayLossHalted(context);
 }
 
-function recordIntradayOrderFill(context: any, price: number, time: number, count = 1, triggeringOrder?: Order): void {
+function recordIntradayOrderFill(context: any, price: number, time: number, count: number, triggeringOrder: Order): void {
     const strategy: StrategyState = context.strategy;
     const rule = strategy.risk_rules.max_intraday_filled_orders;
     if (!rule || intradayFilledOrdersHalted(context)) return;
@@ -125,7 +126,7 @@ function recordIntradayOrderFill(context: any, price: number, time: number, coun
     state.halted = true;
     // A fill rejects unexecuted orders submitted with it during the same COF
     // recalculation. Earlier recalculation batches survive (VIN-166 probes).
-    if (strategy._cof && triggeringOrder?.bar === context.idx
+    if (strategy._cof && triggeringOrder.bar === context.idx
         && triggeringOrder._cof_submission_batch !== undefined) {
         for (const order of strategy.pending_orders) {
             if (order.status === 'pending' && order.bar === context.idx
@@ -137,7 +138,7 @@ function recordIntradayOrderFill(context: any, price: number, time: number, coun
     // VIN-164 TV BCH witnesses: close once at the triggering fill, but keep
     // previously queued orders alive, including fills on subsequent bars.
     const reason = 'Close Position (Max number of filled orders in one day)';
-    if (strategy.position_size !== 0 && triggeringOrder?.bar === context.idx && strategy._cof) {
+    if (strategy.position_size !== 0 && triggeringOrder.bar === context.idx && strategy._cof) {
         // VIN-166: a cap reached by a current-bar COF order closes at the
         // next path point. A carried order (cap1) closes immediately.
         strategy.pending_orders.push({
@@ -922,8 +923,8 @@ export function processStrategyOrders(context: any, phase: 'open' | 'close' = 'o
     // orders placed during a same-bar recalculation fill on the NEXT tick
     // of that bar; the fill prices for same-bar MARKET orders are the
     // bar's assumed tick OHLC values (see CofBarState / the execution loop).
-    const cof = strategy.config.calc_on_order_fills === true || strategy._cof != null;
-    const cofState = cof ? (strategy._cof ?? null) : null;
+    const usesIntrabarPath = strategy.config.calc_on_order_fills === true || strategy._cof != null;
+    const cofState = usesIntrabarPath ? (strategy._cof ?? null) : null;
     // process_orders_on_close is a distinct fill phase, not a second user
     // evaluation: orders queued by the normal bar-close execution are
     // processed once at that bar's close.
@@ -1005,7 +1006,7 @@ export function processStrategyOrders(context: any, phase: 'open' | 'close' = 'o
 
     // Outside COF, all entry fills compete along the broker emulator's
     // assumed OHLC path. Queue order is only the final tie-breaker.
-    const ordersToProcess = cof || closePhase
+    const ordersToProcess = usesIntrabarPath || closePhase
         ? pending_orders
         : pending_orders
             .map((order, sequence) => ({
@@ -1098,7 +1099,7 @@ export function processStrategyOrders(context: any, phase: 'open' | 'close' = 'o
             // for current-bar MARKET, close-marketable LIMIT, and
             // close-marketable STOP orders in the explicit process-on-close phase.
             const currentBarOrder = order.bar >= context.idx;
-            const sameBarEligible = (cof && !closePhase)
+            const sameBarEligible = (usesIntrabarPath && !closePhase)
                 || (closePhase && (
                     order.type === 'market'
                     || closeMarketableLimit(order)
@@ -1313,14 +1314,14 @@ export function processStrategyOrders(context: any, phase: 'open' | 'close' = 'o
                 break;
         }
 
-        if (shouldFill && !cof && closeMarketableStop(order)
+        if (shouldFill && !usesIntrabarPath && closeMarketableStop(order)
             && Math.sign(strategy.position_size) === -parseDirection(order.direction)) {
             // A submitted market close precedes a newly triggered stop.
             // Entry sizing already projects that close (VIN-165).
             processExitOrders(context, 'close', true);
         }
 
-        if (shouldFill && !cof && !closePhase && order.type !== 'market') {
+        if (shouldFill && !usesIntrabarPath && !closePhase && order.type !== 'market') {
             // TV interleaves an active exit with a crossed opposite
             // price-based entry along the assumed path. Process the exit
             // prefix before this entry; market entries keep the established
@@ -1375,7 +1376,6 @@ export function processStrategyOrders(context: any, phase: 'open' | 'close' = 'o
             // trigger level — it is not an execution snap. Limit fills (an
             // activated stop-limit is a limit by this point) retain their
             // placement semantics.
-            const preSnapFillPrice = fillPrice;
             if (snapExecutionFills && (gapExecution || order.type === 'market')) {
                 if (tickSpaceFills) {
                     // R3 (VIN-2479, fit 4525/4525 sur les ledgers TV archivés) :
@@ -1411,7 +1411,7 @@ export function processStrategyOrders(context: any, phase: 'open' | 'close' = 'o
                     // composition A héritée (81fcb5c) — snap APRÈS le
                     // slippage en espace prix, sur le prix déjà clampé, y
                     // compris son bruit ulp éventuel.
-                    fillPrice = snapExecutionPrice(preSnapFillPrice, mintick);
+                    fillPrice = snapExecutionPrice(fillPrice, mintick);
                 }
             }
 
@@ -1813,10 +1813,8 @@ export function evaluateCatastrophicRiskHalt(strategy: StrategyState): void {
             rules.max_drawdown.type === 'percent_of_equity' ? (rules.max_drawdown.value / 100) * strategy.equity_peak : rules.max_drawdown.value;
         if (strategy.max_drawdown >= limit) {
             strategy.risk_halted = true;
-            return;
         }
     }
-
 }
 
 /**
@@ -2139,7 +2137,10 @@ export function closePartialPosition(context: any, qtyToClose: number, exitPrice
     const pointValue = context.pine?.syminfo?.pointvalue ?? 1;
     // One close order may span several FIFO lots. A flat commission belongs
     // to the order, so distribute it over the quantity actually closed.
-    const totalClosingQty = Math.min(qtyToClose, strategy.opentrades.reduce((sum, trade) => sum + Math.abs(trade.size), 0));
+    const commType = strategy.config.commission_type ?? 'percent';
+    const totalClosingQty = commType === 'cash_per_order'
+        ? Math.min(qtyToClose, strategy.opentrades.reduce((sum, trade) => sum + Math.abs(trade.size), 0))
+        : 0;
     let remainingQty = qtyToClose;
     const remainingActivation = activationSegmentsAfterClose(
         strategy.opentrades,
@@ -2176,7 +2177,6 @@ export function closePartialPosition(context: any, qtyToClose: number, exitPrice
         // the closed qty). Computed on `qtyClosed` up front so a split row
         // pair shares the single order's fee pro-rata — recomputing per part
         // would charge the flat fee TWICE (review L1 round 2).
-        const commType = strategy.config.commission_type ?? 'percent';
         const halveFlat = closeInfo?.isImplicitReversal && commType === 'cash_per_order';
         const rawExitCommission = computeLegCommission(context, strategy, qtyClosing, exitPrice)
             * (commType === 'cash_per_order' ? qtyClosing / totalClosingQty : 1);
@@ -2716,8 +2716,8 @@ export function processExitOrders(
     // assumed intrabar tick. The explicit post-fill drain is the measured
     // exception for pure market exits: it fills them at the current tick.
     // The return value drives the execution loop's recalc decision.
-    const cof = strategy.config.calc_on_order_fills === true || strategy._cof != null;
-    const cofState = cof ? (strategy._cof ?? null) : null;
+    const usesIntrabarPath = strategy.config.calc_on_order_fills === true || strategy._cof != null;
+    const cofState = usesIntrabarPath ? (strategy._cof ?? null) : null;
     const processOnClose = strategy.config.process_orders_on_close === true;
     const closePhase = phase === 'close';
     let fills = 0;
@@ -2909,6 +2909,7 @@ export function processExitOrders(
         // cancelled, mirroring TV's behavior of treating
         // strategy.close_all() as a no-op when its intended position is
         // already gone.
+
         // A flat fee makes independent brackets non-additive: keep their
         // activation boundaries even when their fill prices coincide.
         const flatFeeBrackets = !isPureMarketExit && strategy.config.commission_type === 'cash_per_order';
@@ -2972,7 +2973,7 @@ export function processExitOrders(
             // attach to a later opposite-direction activation.
             const waitingForEntry = waitingForBoundEntry
                 || (
-                    cof
+                    usesIntrabarPath
                     && !order._intended_trade_ids
                     && hasPendingMatchingEntry(strategy, order.from_entry)
                 );
@@ -2994,7 +2995,7 @@ export function processExitOrders(
             // Current-bar market closes are eligible in the explicit
             // process_orders_on_close phase; otherwise they remain deferred
             // unless the existing COF same-bar path is active.
-            if (order.bar >= context.idx && !cof && !closePhase) continue;
+            if (order.bar >= context.idx && !usesIntrabarPath && !closePhase) continue;
 
             // HIGH-1 (re-revue VIN-2479) : the event carries the RAW
             // pre-slippage price — slippage is composed at consumption, in
@@ -3715,7 +3716,7 @@ export function processExitOrders(
         }
 
         const partialExit = (event.order.qty ?? 0) > 0 || (event.order.qty_percent ?? 0) > 0;
-        if ((cof || partialExit) && event.order._exit_lifecycle_key !== undefined) {
+        if ((usesIntrabarPath || partialExit) && event.order._exit_lifecycle_key !== undefined) {
             const lifecycleMap = strategy._filled_exit_trade_ids ??= new Map();
             const previous = lifecycleMap.get(event.order._exit_lifecycle_key);
             const lifecycle = previous?.bar === context.idx
@@ -3763,6 +3764,12 @@ export function processExitOrders(
     return fills;
 }
 
+/** Quantize coverage before multiplying; a sub-step deficit still liquidates one unit. */
+function liquidationQty(context: any, rawCoverQty: number, totalQty: number): number {
+    const coverQty = quantizeToQtyStep(context, rawCoverQty) ?? rawCoverQty;
+    return Math.min(totalQty, coverQty === 0 ? 1 : 4 * coverQty);
+}
+
 /** Apply a margin deficit detected after a POC fill on the next available tick. */
 export function applyPendingOpenMarginCall(context: any): number {
     const strategy: StrategyState = context.strategy;
@@ -3775,8 +3782,7 @@ export function applyPendingOpenMarginCall(context: any): number {
     // The covered money is frozen at detection; contracts are quantized at
     // execution (UNI: .028 at open 6.55, not .032 at the prior close 6.54).
     const rawCoverQty = pending.moneyToCover / (price * pointValue);
-    const coverQty = quantizeToQtyStep(context, rawCoverQty) ?? rawCoverQty;
-    const qtyToClose = Math.min(Math.abs(strategy.position_size), coverQty === 0 ? 1 : 4 * coverQty);
+    const qtyToClose = liquidationQty(context, rawCoverQty, Math.abs(strategy.position_size));
     const marginPct = pending.dir === 1 ? (strategy.config.margin_long ?? 0) : (strategy.config.margin_short ?? 0);
     // VIN-161: deferred liquidation admission uses entry margin less the
     // FULL liquidated notional, not proportional margin on the remainder.
@@ -3909,7 +3915,7 @@ export function processMarginCall(context: any, checkpoint: 'open' | 'extreme' |
     // deferred open fill can recalculate before reaching the high/low.
     const cof = strategy._cof;
     if (cof && checkpoint !== 'close') {
-        const adversePass = cof.ticks[1] === (positionDir === 1 ? lowPrice : highPrice) ? 1 : 2;
+        const adversePass = isAdverseFirstBar(context) ? 1 : 2;
         if (cof.pass !== (checkpoint === 'open' ? 0 : adversePass)) return 0;
     }
 
@@ -3967,10 +3973,7 @@ export function processMarginCall(context: any, checkpoint: 'open' | 'extreme' |
             return 0;
         }
         const rawCoverQty = deficit / (adversePrice * pointValue * marginFrac);
-        const coverQty = quantizeToQtyStep(context, rawCoverQty) ?? rawCoverQty;
-        // A real deficit whose covered quantity truncates to zero still
-        // liquidates one unit (UNI April witness, unchanged with default qty 7).
-        const qtyToLiquidate = Math.min(totalQty, coverQty === 0 ? 1 : 4 * coverQty);
+        const qtyToLiquidate = liquidationQty(context, rawCoverQty, totalQty);
 
         // Remember the FIFO order before the close so we can identify the
         // PARTIALLY-consumed lot afterwards (the liquidation eats whole

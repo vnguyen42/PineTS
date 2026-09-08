@@ -361,15 +361,8 @@ export function entry(context: any) {
             && stopValueRounded !== undefined
             && ((dir === 1 && stopValueRounded < currentPrice - 1e-12 * Math.max(1, Math.abs(currentPrice)))
                 || (dir === -1 && stopValueRounded > currentPrice + 1e-12 * Math.max(1, Math.abs(currentPrice))));
-        const sizingPrice = stopMarketable
-            ? (usesDefaultPriceSizing ? cryptoMarketSizingPrice(context, dir, currentPrice) : currentPrice)
-            : stopValueRounded !== undefined
-              ? stopValueRounded
-              : limitValueRounded !== undefined
-                ? limitValueRounded
-                : usesDefaultPriceSizing
-                  ? cryptoMarketSizingPrice(context, dir, currentPrice)
-                  : currentPrice;
+        const marketSizing = usesDefaultPriceSizing ? cryptoMarketSizingPrice(context, dir, currentPrice) : currentPrice;
+        const sizingPrice = stopMarketable ? marketSizing : stopValueRounded ?? limitValueRounded ?? marketSizing;
         const baseQty = calculateOrderQty(context, qtyValue, dir, sizingPrice);
 
         // VIN-103: TV never submits an order whose calculated quantity is

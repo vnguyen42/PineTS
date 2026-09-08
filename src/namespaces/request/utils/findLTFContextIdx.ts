@@ -5,9 +5,7 @@ export function findLTFContextIdx(
     myCloseTime: number,
     openTime: number[],
     closeTime: number[],
-    lookahead: boolean = false,
-    mainContextEDate?: number,
-    gaps: boolean = false
+    lookahead: boolean = false
 ): number {
     // Find the latest intrabar that is fully contained within the chart bar [myOpenTime, myCloseTime]
     for (let i = openTime.length - 1; i >= 0; i--) {

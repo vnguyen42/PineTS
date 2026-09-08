@@ -1217,6 +1217,9 @@ export class PineTS {
             // 'open' phase of processExitOrders implements the minority
             // (exit-first) semantics and is currently not wired in.
             if (context.strategy) {
+                const consecutiveLossFills = processConsecutiveLossDay(context);
+                // Initialize the day's equity before pending-order fills add commissions or slippage.
+                intradayLossHalted(context);
                 // Book a second margin call scheduled on the PREVIOUS bar
                 // by the phantom re-check (it fills at that bar's close,
                 // after its script evaluation — see processMarginCall and
@@ -1224,8 +1227,6 @@ export class PineTS {
                 // a reversal queued at that close (qty frozen at queue
                 // time) overshoots by exactly the deferred quantity, as TV
                 // does.
-                const consecutiveLossFills = processConsecutiveLossDay(context);
-                intradayLossHalted(context);
                 applyPendingCloseMarginCall(context);
                 const pendingMarginFills = applyPendingOpenMarginCall(context);
                 if (context.strategy.config.calc_on_order_fills === true || context.strategy.risk_rules.max_intraday_loss) {

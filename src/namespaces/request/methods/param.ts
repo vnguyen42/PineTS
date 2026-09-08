@@ -32,7 +32,7 @@ export function param(context: any) {
                 val = Series.from(source).get(index || 0);
             }
         } else if (index !== undefined && index !== null) {
-            // Inline calls return scalars. Retain their unshifted history separately
+            // Inline calls return scalars. Retain their history without an index offset separately
             // from the expression history consumed by the secondary context.
             const key = `_requestSource_${name}`;
             const history = context.params[key] || (context.params[key] = []);
