@@ -1106,7 +1106,7 @@ export function processStrategyOrders(context: any, phase: 'open' | 'close' = 'o
         // same-direction adds keep next-point semantics (1502 adds; a re-entry
         // after a same-tick flatten — 2205 round-trips — is "fresh" and
         // drains same-tick).
-        // Public2030: after a conditional entry crosses inside a segment,
+        // VIN-182/186 public2030: after a conditional fill crosses inside a segment,
         // a newly submitted executable limit fills at that segment's endpoint.
         // It must not replay the earlier crossing of its own limit level.
         const interiorMarketableLimit = reversalEntriesOnly && cofState !== null

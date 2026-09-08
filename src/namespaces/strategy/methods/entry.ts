@@ -452,7 +452,7 @@ export function entry(context: any) {
             _cof_reversal_same_tick: cofSameTickReversal,
             _cof_fresh_same_tick: cofSameTickFresh,
             _cof_interior_limit_pass: pendingIndex < 0 && orderType === 'limit'
-                && context.strategy._cof?.interiorEntryFilled
+                && (context.strategy._cof?.interiorEntryFilled || context.strategy._cof?.interiorExitFilled)
                 ? context.strategy._cof.pass : undefined,
             // Ordered base size (before the reversal close-qty addition).
             // executeOrder uses it to split a reversal OVERSHOOT into its
