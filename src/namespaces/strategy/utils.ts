@@ -2683,7 +2683,6 @@ interface ExitFillEvent {
     excludedConsumedTradeIds: readonly string[];
     pathSegment: number;
     distanceAlongSegment: number;
-    fillCount: number;
 }
 /**
  * Process exit-category orders each bar (after entry-order fills, before the
@@ -3033,7 +3032,6 @@ export function processExitOrders(
                 gap: true,
                 activationTradeIds: matching.map((trade) => trade._activation_id ?? trade.id),
                 excludedConsumedTradeIds,
-                fillCount: 1,
                 ...rankEvent(fillPrice, true),
             });
             continue;
@@ -3168,7 +3166,6 @@ export function processExitOrders(
             gap?: boolean;
             atClose?: boolean;
             forcedSegment?: number;
-            sourceCount?: number;
         };
         const tpEvents: FillEvent[] = [];
         const slEvents: FillEvent[] = [];
@@ -3591,7 +3588,7 @@ export function processExitOrders(
                     && candidate.forcedSegment === event.forcedSegment,
             );
             if (existing === undefined) {
-                combinedEvents.push({ ...event, sourceCount: 1 });
+                combinedEvents.push({ ...event });
             } else {
                 existing.qty = existing.qty === Infinity || event.qty === Infinity
                     ? Infinity
@@ -3612,7 +3609,6 @@ export function processExitOrders(
                 tradeId: event.tradeId,
                 activationTradeIds: matching.map((trade) => trade._activation_id ?? trade.id),
                 excludedConsumedTradeIds,
-                fillCount: event.sourceCount ?? 1,
                 ...rankEvent(event.price, event.gap === true, event.forcedSegment, event.atClose === true),
             });
         }
@@ -3725,8 +3721,8 @@ export function processExitOrders(
         const nextCap = remainingCap - closedQty;
         capRemaining.set(event.order, nextCap);
         lastFillByOrder.set(event.order, fillPrice);
-        fills += event.fillCount;
-        recordIntradayOrderFill(context, fillPrice, currentTime, event.fillCount, event.order);
+        fills += 1;
+        recordIntradayOrderFill(context, fillPrice, currentTime, 1, event.order);
 
         const excludedActivation = event.order._excluded_activation_trade_ids ??= [];
         for (const tradeId of activatedIds) {
