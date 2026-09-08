@@ -232,6 +232,8 @@ export interface Order {
     // semantics (1502: after a close_all fills at the open, the re-entry is
     // booked at the OPEN, the first fill point).
     _cof_fresh_same_tick?: boolean;
+    // A new LIMIT submitted after a conditional entry crossed inside this pass.
+    _cof_interior_limit_pass?: number;
     // Internal risk close scheduled after a current-bar COF order fill.
     _risk_close_after_cof_pass?: number;
     _cof_submission_batch?: number;

@@ -1078,13 +1078,23 @@ export function processStrategyOrders(context: any, phase: 'open' | 'close' = 'o
         // same-direction adds keep next-point semantics (1502 adds; a re-entry
         // after a same-tick flatten — 2205 round-trips — is "fresh" and
         // drains same-tick).
+        // Public2030: after a conditional entry crosses inside a segment,
+        // a newly submitted executable limit fills at that segment's endpoint.
+        // It must not replay the earlier crossing of its own limit level.
+        const interiorMarketableLimit = reversalEntriesOnly && cofState !== null
+            && order.bar === context.idx && order.type === 'limit'
+            && order._cof_interior_limit_pass === cofState.pass
+            && order.limit !== undefined
+            && (parseDirection(order.direction) === 1
+                ? cofState.ticks[cofState.pass] <= order.limit
+                : cofState.ticks[cofState.pass] >= order.limit);
         if (reversalEntriesOnly) {
             if (
                 cofState === null
                 || order.bar !== context.idx
-                || order.type !== 'market'
-                || (!order._cof_reversal_same_tick && !order._cof_fresh_same_tick
-                    && (cofState.pass !== 0 || cofState.openAdditionFilled))
+                || (!interiorMarketableLimit && (order.type !== 'market'
+                    || (!order._cof_reversal_same_tick && !order._cof_fresh_same_tick
+                        && (cofState.pass !== 0 || cofState.openAdditionFilled))))
             ) {
                 continue;
             }
@@ -1166,6 +1176,12 @@ export function processStrategyOrders(context: any, phase: 'open' | 'close' = 'o
                     const limitPreviousTick = cofState && cofState.pass > 0
                         ? cofState.ticks[cofState.pass - 1]
                         : undefined;
+                    if (interiorMarketableLimit) {
+                        shouldFill = true;
+                        fillPrice = tickPrice!;
+                        gapExecution = true;
+                        break;
+                    }
                     const newlyActivated = order._stop_limit_activated === true;
                     if (newlyActivated) order._stop_limit_activated = false;
                     if (direction === 1) {
@@ -1578,7 +1594,9 @@ export function processStrategyOrders(context: any, phase: 'open' | 'close' = 'o
             const fillPath = snapExecutionPrices && order.type === 'stop'
                 ? displayedIntrabarPath
                 : intrabarPath;
-            const fillPathPosition = entryFillPathPosition(order, direction, fillPath, cofState, fillsAtClose);
+            const fillPathPosition = interiorMarketableLimit
+                ? {pathSegment: cofState!.pass - 1, distanceAlongSegment: 1}
+                : entryFillPathPosition(order, direction, fillPath, cofState, fillsAtClose);
             executeOrder(context, order, fillPrice, currentTime, fillPathPosition, fillsAtClose);
             if (cofState && order.bar === context.idx) cofState.currentBarEntryFilled = true;
             if (cofState && cofState.pass > 0 && order.type !== 'market' && !gapExecution) {
