@@ -348,7 +348,11 @@ export function entry(context: any) {
         // floor(50000/21.61)=2313, the TV quantity). For market orders this
         // is a no-op (roundToMintick on a close reference).
         const mintick = context.pine?.syminfo?.mintick ?? 0;
-        const limitValueRounded = limitValue !== undefined ? roundToMintick(limitValue, currentPrice, mintick) : undefined;
+        // VIN-183: a pure LIMIT created during COF is quantized away from
+        // its creation point (public2030 DCA2), not the bar's future close.
+        // Keep the market sizing reference and stop / stop-limit handling unchanged.
+        const limitReference = stopValue === undefined ? cofCurrentTick(strategy) ?? currentPrice : currentPrice;
+        const limitValueRounded = limitValue !== undefined ? roundToMintick(limitValue, limitReference, mintick) : undefined;
         const stopValueRounded  = stopValue  !== undefined ? roundToMintick(stopValue,  currentPrice, mintick) : undefined;
         // A stop already beyond the signal bar's close is marketable at
         // submission (VIN-95): it uses the market sizing reference (VIN-165)
