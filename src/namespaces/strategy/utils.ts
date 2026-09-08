@@ -1006,7 +1006,7 @@ export function processStrategyOrders(context: any, phase: 'open' | 'close' = 'o
 
     // Outside COF, all entry fills compete along the broker emulator's
     // assumed OHLC path. Queue order is only the final tie-breaker.
-    const ordersToProcess = usesIntrabarPath || closePhase
+    let ordersToProcess = usesIntrabarPath || closePhase
         ? pending_orders
         : pending_orders
             .map((order, sequence) => ({
@@ -1025,6 +1025,34 @@ export function processStrategyOrders(context: any, phase: 'open' | 'close' = 'o
                 || left.sequence - right.sequence,
             )
             .map(({ order }) => order);
+
+    // VIN-184: competing pure LIMIT entries crossed inside this COF segment
+    // must add their physical lots in price-path order (public2030 DCA3/4/5).
+    // Keep all other queue slots unchanged; endpoint/gap fills and drains
+    // retain their cadence. A VIN-182 limit born after this crossing is not
+    // retroactively inserted into the segment that preceded its creation.
+    if (cofState && cofState.pass > 0 && !closePhase && !reversalEntriesOnly) {
+        const start = cofState.ticks[cofState.pass - 1];
+        const end = cofState.ticks[cofState.pass];
+        const crossings: Array<{index: number; order: Order; position: IntrabarPathPosition}> = [];
+        ordersToProcess.forEach((order, index) => {
+            if (order.status !== 'pending' || (order.category ?? 'entry') !== 'entry'
+                || order.type !== 'limit' || order.stop !== undefined || order.limit === undefined
+                || order._cof_interior_limit_pass === cofState.pass) return;
+            const direction = parseDirection(order.direction);
+            const crossed = direction === 1
+                ? start > order.limit && end < order.limit
+                : start < order.limit && end > order.limit;
+            if (crossed) crossings.push({index, order,
+                position: entryFillPathPosition(order, direction, cofState.ticks, cofState, false)});
+        });
+        if (crossings.length > 1) {
+            const sorted = [...crossings].sort((a, b) =>
+                comparePathPositions(a.position, b.position) || a.index - b.index);
+            ordersToProcess = [...ordersToProcess];
+            crossings.forEach(({index}, i) => { ordersToProcess[index] = sorted[i].order; });
+        }
+    }
 
     // VIN-2640: a LIMIT order submitted during the current bar's evaluation
     // whose limit is ALREADY marketable against that bar's CLOSE fills on
