@@ -360,6 +360,8 @@ export interface CofBarState {
     currentBarEntryFilled?: boolean;
     /** A conditional entry crossed strictly inside the current path segment. */
     interiorEntryFilled?: boolean;
+    /** A conditional exit crossed strictly inside the current path segment. */
+    interiorExitFilled?: boolean;
     submissionBatch?: number;
 }
 

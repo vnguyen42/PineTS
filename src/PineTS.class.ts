@@ -1272,6 +1272,7 @@ export class PineTS {
                         strategy._cof.tickStartSign = Math.sign(strategy.position_size);
                         strategy._cof.currentBarEntryFilled = false;
                         strategy._cof.interiorEntryFilled = false;
+                        strategy._cof.interiorExitFilled = false;
                         let fills = (strategy._cof.pass === 0 ? pendingMarginFills + consecutiveLossFills : 0)
                             + Number(marginRecalcNextPass) + processStrategyOrders(context);
                         // Margin checkpoints along the intra-bar path (TV
@@ -1342,7 +1343,7 @@ export class PineTS {
                                 // fill at an endpoint waits for the next point, except for
                                 // the one additional OPEN batch (control500).
                                 sameTickFills = 0;
-                                if ((strategy._cof.pass === 0 || strategy._cof.interiorEntryFilled) && drainIterations === 0) {
+                                if ((strategy._cof.pass === 0 || strategy._cof.interiorEntryFilled || strategy._cof.interiorExitFilled) && drainIterations === 0) {
                                     sameTickFills = processExitOrders(context, 'intrabar', true);
                                     sameTickFills += processStrategyOrders(context, 'open', true);
                                 } else {

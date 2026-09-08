@@ -3181,17 +3181,29 @@ export function processExitOrders(
         const mcLock = (strategy as any)._mc_exit_lock;
         const mcLocked = mcLock && mcLock.bar === context.idx;
 
+        const absoluteBracket = order._explicit_qty_cap || order.qty > 0;
+        const absoluteRemaining = new Map<string, number>();
+        let absoluteReservedQty = 0;
         for (const t of matching) {
             const activationId = t._activation_id ?? t.id;
+            // VIN-181: an absolute exit quantity belongs to each activation,
+            // shared by its FIFO fragments rather than capped across all entries.
+            let absoluteQty: number | undefined;
+            if (absoluteBracket) {
+                const remaining = absoluteRemaining.get(activationId) ?? order.qty;
+                absoluteQty = Math.min(Math.abs(t.size), remaining);
+                absoluteRemaining.set(activationId, remaining - absoluteQty);
+                absoluteReservedQty += absoluteQty;
+            }
             if (mcLocked && activationId !== mcLock.tradeId) continue;
             const entry = t._activation_bracket_entry ?? t._bracket_entry ?? t.entry_price;
             // VIN-160: each activation contributes its own percent bracket;
             // FIFO may consume both fractions from the same physical lot.
-            let tQty = percentBracket
+            let tQty = absoluteQty ?? (percentBracket
                 ? Math.min(Math.abs(t.size), Math.abs(t._entry_order_qty ?? t.size) * (Number(order.qty_percent) / 100))
                 : flatFeeBrackets
                   ? Math.abs(t._entry_order_qty ?? t.size) * (Number(order.qty_percent) > 0 ? Number(order.qty_percent) / 100 : 1)
-                  : Math.abs(t.size);
+                  : Math.abs(t.size));
             // VIN-160: floor each activation's percent fraction before FIFO
             // allocation. Sub-step halves otherwise erase real residual lots
             // and change the position average used by subsequent brackets.
@@ -3547,7 +3559,7 @@ export function processExitOrders(
             : [...slEvents, ...(trailEvent ? [trailEvent] : []), ...tpEvents];
 
         let reservedQty = matchingQty;
-        if (order._explicit_qty_cap || (order.qty && order.qty > 0)) reservedQty = Math.min(order.qty, matchingQty);
+        if (absoluteBracket) reservedQty = absoluteReservedQty;
         else if (order.qty_percent && order.qty_percent > 0) {
             // Famille qty-percent-exit-base (1739, BINANCE:LDOUSDT 240, ledger TV) :
             // TradingView applique qty_percent à la quantité de l'ORDRE D'ENTRÉE
@@ -3695,6 +3707,15 @@ export function processExitOrders(
             event.tradeId !== undefined ? [event.tradeId] : event.activationTradeIds,
         );
         if (closedQty <= 1e-9) continue;
+        // VIN-181: a bracket crossed before this point permits its reaction
+        // at the endpoint. Use the trigger before slippage; gaps, market fills,
+        // and forward executions beyond the current point do not qualify.
+        if (cofState !== null && cofState.pass > 0 && event.kind !== 'market'
+            && !event.gap && !event.atClose
+            && event.price > Math.min(cofPreviousPrice!, cofTickPrice!)
+            && event.price < Math.max(cofPreviousPrice!, cofTickPrice!)) {
+            cofState.interiorExitFilled = true;
+        }
         if (cofState !== null && event.kind === 'profit'
             && (event.direction > 0 ? fillPrice > cofTickPrice! : fillPrice < cofTickPrice!)) {
             cofState.aheadExitPass = cofState.pass;
