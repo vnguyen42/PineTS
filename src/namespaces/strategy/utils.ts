@@ -2962,9 +2962,10 @@ export function processExitOrders(
         const percentBracket = !order._explicit_qty_cap
             && !(order.qty > 0) && Number(order.qty_percent) > 0;
         const excludedActivationTradeIds = order._excluded_activation_trade_ids;
-        // VIN-160: activation exclusions prevent refilling a bracket; FIFO
-        // still consumes a physical lot's remainder on a later valid bracket.
-        const excludedConsumedTradeIds = percentBracket
+        // VIN-160/185: activation exclusions prevent refilling a bracket;
+        // FIFO still consumes a physical lot's remainder on a later valid
+        // bracket, including profit exits without an explicit percent.
+        const excludedConsumedTradeIds = !isPureMarketExit
             && (strategy.config.close_entries_rule ?? 'FIFO').toUpperCase() !== 'ANY'
             ? []
             : order._excluded_consumed_trade_ids ?? [];

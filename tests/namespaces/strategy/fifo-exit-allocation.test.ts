@@ -225,7 +225,7 @@ describe('strategy exit global FIFO allocation', () => {
         ]);
     });
 
-    it('restores the canonical position entry name after excluding an older lot', () => {
+    it('keeps physical FIFO consumption independent of an excluded activation', () => {
         const context = makeContext();
         context.strategy.opentrades = [
             lot('A', 'A-entry', 100, 0),
@@ -241,9 +241,10 @@ describe('strategy exit global FIFO allocation', () => {
         }];
 
         expect(processExitOrders(context)).toBe(1);
+        // VIN-185: activation B triggers, but native FIFO consumes physical A.
         expect(context.strategy.opentrades.map((trade: Trade) => [trade.id, trade.size])).toEqual([
-            ['A', 10],
-            ['B', 5],
+            ['A', 5],
+            ['B', 10],
         ]);
         expect(context.strategy.position_entry_name).toBe('A-entry');
     });
