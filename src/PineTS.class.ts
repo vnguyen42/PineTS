@@ -1346,8 +1346,13 @@ export class PineTS {
             const poc = context.strategy?.config.process_orders_on_close === true;
             const cof = context.strategy?.config.calc_on_order_fills === true;
             let closeFills = 0;
+            // Studio T1/T2: immediate market exits need a close fill even
+            // without global POC. Keep this probe on the non-COF path.
+            const immediateClose = !poc && !cof && context.strategy?.pending_orders.some(
+                (order) => order.status === 'pending' && order.category === 'exit' && order.immediately === true,
+            );
 
-            if (poc && !cof) {
+            if ((poc && !cof) || immediateClose) {
                 // The close fill runs after this evaluation. Mark at the same
                 // close price used by the evaluation before capturing history;
                 // the entry/exit commissions of the pending close fill are not
@@ -1407,11 +1412,16 @@ export class PineTS {
                 // refresh equity peaks and the monthly close sample with the
                 // final position/equity state before the next bar.
                 finalizeStrategyBar(context);
+            } else if (immediateClose) {
+                // Do not process entries, ordinary closes, or recalculate
+                // the script: only specifically immediate exits may fill.
+                processExitOrders(context, 'close');
+                finalizeStrategyBar(context);
             }
 
-            // Non-POC paths have no earlier snapshot. For POC + COF without a
+            // Non-POC paths have no earlier snapshot unless an immediate exit filled. For POC + COF without a
             // close fill, the normal bar-close execution remains the last one.
-            if (!poc || (cof && closeFills === 0)) {
+            if ((!poc && !immediateClose) || (cof && closeFills === 0)) {
                 context.pine?.strategy?.snapshotSeries();
             }
             //collect results
