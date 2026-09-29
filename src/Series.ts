@@ -2,6 +2,16 @@ export class Series {
     constructor(public data: any[], public offset: number = 0) { }
 
     public get(index: number): any {
+        // Pine indices are always numbers; a non-numeric key (string, object) can
+        // only come from invalid Pine that the transpiler passed through (e.g.
+        // `close[k]` with k a string). Coercing it into the array would read
+        // inherited properties (`data["constructor"]` → Array). Reject it as a
+        // clean script error instead of leaking an object-property lookup.
+        if (typeof index !== 'number') {
+            throw new TypeError(
+                `Pine history indices must be numbers (got ${typeof index}); string-keyed access is not part of Pine.`,
+            );
+        }
         // Pine history offsets are integers by definition; a fractional lookback
         // only arises from int-division divergence (e.g. `src[depth/2]`: Pine
         // computes int 5, JS `/` yields 5.5 — see RC2). Truncate the combined

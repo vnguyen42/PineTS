@@ -6,6 +6,15 @@ import { Context } from '../../../Context.class';
 
 export function set(context: Context) {
     return (id: PineArrayObject, index: number, value: any) => {
+        // A string key would write an arbitrary own property (`array.set(a,
+        // "__proto__", v)` mutates the array's prototype chain, `"constructor"`
+        // shadows it); Pine indices are numbers only. Reject as a clean script
+        // error instead of a property write.
+        if (typeof index !== 'number') {
+            throw new TypeError(
+                `Pine array indices must be numbers (got ${typeof index}); string-keyed access is not part of Pine.`,
+            );
+        }
         if (!isValueOfType(value, id.type)) {
             throw new Error(
                 `Cannot call 'array.set' with argument 'value'='${value}'. An argument of 'literal ${typeof value}' type was used but a '${

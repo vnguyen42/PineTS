@@ -76,7 +76,12 @@ describe('VIN-90 — context-bound data vars in IIFE-branch arithmetic', () => {
         }
     });
 
-    it('negatives: ta.sma(close, …) keeps the raw Series arg; loop vars and native globals in nested-IIFE returns stay bare (no $.get wrap)', async () => {
+    it('negatives: ta.sma(close, …) keeps the raw Series arg; loop vars in nested-IIFE returns stay bare (no $.get wrap)', async () => {
+        // NOTE: the previous version of this script used a bare `Infinity`
+        // (a JS global) in the innermost branch and pinned that it stayed
+        // bare. Strict Pine mode (identifierValidator) now rejects JS globals
+        // in explicit v5+ sources at compile time — that pin asserted the
+        // vulnerability, so it is dropped (see the strict-Pine tests).
         const pineTS = new PineTS(Provider.Mock, 'BTCUSDT', '1h', null, new Date('2024-01-01').getTime(), new Date('2024-01-10').getTime());
         const code = `
 //@version=5
@@ -88,7 +93,7 @@ for i = 0 to 3
         if close > close[1]
             i + 1
         else
-            Infinity + 1
+            999
     else
         na
 plot(x)
@@ -105,11 +110,5 @@ plot(m)
         //    HEAD — `return i + 1`, NOT `return $.get(i, 0) + 1`.
         expect(js).toContain('return i + 1');
         expect(js).not.toMatch(/return \$\.get\(i, 0\) \+ 1/);
-
-        // 3. Native global `Infinity` in arithmetic inside a nested-IIFE
-        //    return: stays bare — `return Infinity + 1`, NOT
-        //    `return $.get(Infinity, 0) + 1`.
-        expect(js).toContain('return Infinity + 1');
-        expect(js).not.toMatch(/return \$\.get\(Infinity, 0\) \+ 1/);
     });
 });
