@@ -5,6 +5,13 @@ import { Context } from '../../../Context.class';
 
 export function set(context: Context) {
     return (id: PineMatrixObject, row: number, col: number, value: any) => {
+        // String keys would write arbitrary own properties; Pine matrix indices
+        // are numbers only. Reject as a clean script error before any write.
+        if (typeof row !== 'number' || typeof col !== 'number') {
+            throw new TypeError(
+                `Pine matrix indices must be numbers (got ${typeof row}/${typeof col}); string-keyed access is not part of Pine.`,
+            );
+        }
         const rows = id.matrix.length;
         const cols = rows > 0 ? id.matrix[0].length : 0;
         if (row < 0 || row >= rows) {

@@ -5,6 +5,13 @@ import { isValueOfType } from '../utils';
 
 export function insert(context: any) {
     return (id: PineArrayObject, index: number, value: any): void => {
+        // `splice` would coerce a string index to 0 and write at the wrong spot;
+        // Pine indices are numbers only. Reject as a clean script error.
+        if (typeof index !== 'number') {
+            throw new TypeError(
+                `Pine array indices must be numbers (got ${typeof index}); string-keyed access is not part of Pine.`,
+            );
+        }
         if (!isValueOfType(value, id.type)) {
             throw new Error(
                 `Cannot call 'array.insert' with argument 'value'='${value}'. An argument of 'literal ${typeof value}' type was used but a '${

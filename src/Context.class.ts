@@ -762,11 +762,22 @@ export class Context {
      * @param index - The lookback index (0 = current value)
      */
     get(source: any, index: number) {
+        // A non-numeric index (e.g. `$.get(close, $.get(k, 0))` where the Pine
+        // variable k is a string) is invalid Pine the transpiler passed through.
+        // Reject it here, before any `source[index]`-style lookup, so a script
+        // cannot read inherited properties (constructor/__proto__/...) through
+        // the runtime helpers. Series re-guards inside Series.get; this covers
+        // the array/scalar paths below.
+        if (typeof index !== 'number') {
+            throw new TypeError(
+                `Pine lookback indices must be numbers (got ${typeof index}); string-keyed access is not part of Pine.`,
+            );
+        }
         // Truncate fractional history offsets toward zero (RC2 boundary safety
         // net — Pine offsets are integers; a fractional value indicates
         // int-division divergence). The Series path re-guards offset+index inside
         // Series.get; this covers the array/scalar paths below.
-        if (typeof index === 'number' && !Number.isInteger(index)) index = Math.trunc(index);
+        if (!Number.isInteger(index)) index = Math.trunc(index);
 
         if (source instanceof Series) {
             return source.get(index);

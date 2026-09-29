@@ -53,6 +53,16 @@ const EXTRA_PINE_IDENTIFIERS: readonly string[] = [
     'type',
     'method',
     'enum',
+    // Documented v6 built-ins that carry no value in this runtime (they produce a
+    // clean runtime error instead of a false "not Pine" compile claim): the order
+    // book series `bid` / `ask`, the `settlement_as_close` chart-setting flag,
+    // and the footprint chart type names `footprint` / `volume_row` (usable as
+    // bare values, e.g. via `type()`).
+    'bid',
+    'ask',
+    'settlement_as_close',
+    'footprint',
+    'volume_row',
 ];
 
 function toLookup(names: readonly string[]): Record<string, true> {

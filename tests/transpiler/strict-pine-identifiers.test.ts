@@ -183,6 +183,29 @@ plot(htfO + htfH)
         );
     });
 
+    it('accepts the documented v6 built-ins that carry no value here (bid, ask, settlement_as_close, footprint, volume_row)', () => {
+        // The names are real Pine; the runtime has no values for them, so they
+        // must not be rejected as "not a Pine built-in" at compile time — they
+        // fail cleanly at runtime when actually read.
+        for (const body of [
+            'x = bid',
+            'x = ask',
+            'x = settlement_as_close',
+            'x = footprint',
+            'x = volume_row',
+        ]) {
+            compiles(`//@version=6\nindicator("t")\n${body}\n`);
+        }
+        compiles(
+            `//@version=6
+indicator("t")
+if settlement_as_close
+    x = close
+plot(x)
+`,
+        );
+    });
+
     it('runs a strict-mode script end to end', async () => {
         const DAY = 86_400_000;
         const bars = Array.from({ length: 40 }, (_, i) => {
