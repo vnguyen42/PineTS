@@ -1023,9 +1023,20 @@ export class Parser {
                 params.push(param);
             }
 
-            if (this.match(TokenType.COMMA)) {
-                this.advance();
+            // Parameters MUST be comma-separated (whitespace is never a
+            // separator) — a missing comma here would silently merge two
+            // parameters into one typed parameter.
+            this.skipNewlines();
+            if (this.match(TokenType.RPAREN)) {
+                break;
             }
+            if (!this.match(TokenType.COMMA)) {
+                const tok = this.peek();
+                throw new Error(
+                    `Expected ',' between parameters but got ${tok.type} '${tok.value}' at ${tok.line}:${tok.column}`,
+                );
+            }
+            this.advance();
         }
 
         this.expect(TokenType.RPAREN);
@@ -1115,9 +1126,20 @@ export class Parser {
                 params.push(param);
             }
 
-            if (this.match(TokenType.COMMA)) {
-                this.advance();
+            // Parameters MUST be comma-separated (whitespace is never a
+            // separator) — a missing comma here would silently merge two
+            // parameters into one typed parameter.
+            this.skipNewlines();
+            if (this.match(TokenType.RPAREN)) {
+                break;
             }
+            if (!this.match(TokenType.COMMA)) {
+                const tok = this.peek();
+                throw new Error(
+                    `Expected ',' between parameters but got ${tok.type} '${tok.value}' at ${tok.line}:${tok.column}`,
+                );
+            }
+            this.advance();
         }
 
         this.expect(TokenType.RPAREN);
@@ -1919,9 +1941,22 @@ export class Parser {
                 args.push(this.parseExpression());
             }
 
-            if (this.match(TokenType.COMMA)) {
-                this.advance();
+            // Every argument (positional or named) MUST be followed by a
+            // comma or the closing paren — Pine never separates call
+            // arguments by whitespace. Tolerating a missing comma silently
+            // re-lexes `ta.rsi(close 14)` as two arguments and ships code the
+            // author did not write.
+            this.skipNewlines();
+            if (this.match(TokenType.RPAREN)) {
+                break;
             }
+            if (!this.match(TokenType.COMMA)) {
+                const tok = this.peek();
+                throw new Error(
+                    `Expected ',' between call arguments but got ${tok.type} '${tok.value}' at ${tok.line}:${tok.column}`,
+                );
+            }
+            this.advance();
             this.skipNewlines();
         }
 

@@ -1,7 +1,21 @@
 # Change Log
 
 
-## [Unreleased] - 2026-08-25 - Multi-range session parsing + percent_of_equity FX conversion (1625 fix, VIN-134)
+## [Unreleased] - 2026-09-29 - Strict Pine mode: non-Pine identifiers and loose call syntax are compile errors
+
+### Fixed
+
+- **Missing argument/parameter separators are now compile errors**: `ta.rsi(close 14)`, `strategy.entry("L" strategy.long)` and `ta.sma(close 20 5)` previously parsed as if the missing commas existed, silently shipping code the author did not write (same tolerance existed in function/method parameter lists). Call arguments and parameters must now be comma-separated (newlines and trailing commas stay legal); the error carries the offending token's line and column.
+- **Explicit `//@version=5|6` sources can no longer reference non-Pine identifiers**: any identifier that is neither declared in the script (variables, params, loop vars, functions, methods, types, enums, tuple destructures) nor a Pine built-in/namespace/keyword-represented-as-identifier now fails compilation with a line-numbered message. JS globals (`process`, `globalThis`, `fetch`, `require`, `eval`, `Function`, `Math`, `Object`, `Reflect`, `Proxy`, `console`, `Infinity`, `undefined`, …) previously passed through the transpiler as bare JS globals in the executing realm. Member accesses of `constructor` / `__proto__` / `prototype` are rejected outright, so prototype chains (`x.constructor.constructor(...)`) cannot reach `Function`.
+
+### Changed
+
+- **Strictness is scoped to Pine mode with an explicit `//@version=5|6` header.** Version-less PineTS/JS sources (a library feature — the Studio engine rejects version-less input itself) and explicit v4 legacy sources keep their previous behavior: v4 flat builtins (`sma(close, 14)`) still lower and compile, and JS-mode sources are untouched.
+
+### Added
+
+- **`validatePineIdentifiers` pass** (`src/transpiler/pineToJS/identifierValidator.ts`) over the parsed Pine AST, before codegen, gated on an explicit version ≥ 5 (`src/transpiler/pineToJS/pineToJS.index.ts`). The whitelist reuses the existing `CONTEXT_*`/namespace tables plus the v5/v6 built-ins they did not cover (`study`, `tickerid`, `tick`, `plotstyle`, `calendar`, `this`, `return`/`break`/`continue`, contextual keywords).
+- **Tests** (`tests/transpiler/strict-pine-identifiers.test.ts`): rejection of every missing-separator shape and of non-Pine identifiers/prototype chains (with line info), acceptance of valid Pine using `ta.*`/`math.*`/`str.*`/`color.*`/`input.*`/`strategy.*`, `request.security` tuple returns, `var`, arrays, enums, UDTs and methods, plus library-behavior guards for v4 and version-less sources. One pre-existing test pinned a bare JS global (`Infinity`) passing through v5 compilation — that pin asserted the vulnerability, so the branch/assertion were dropped.
 
 ### Fixed
 

@@ -7,6 +7,7 @@
 import { Lexer } from './lexer';
 import { Parser } from './parser';
 import { CodeGenerator } from './codegen';
+import { validatePineIdentifiers } from './identifierValidator';
 import { lowerV4LegacyBuiltins } from './v4LegacyLowering';
 import { lowerV4InputCalls } from './v4InputLowering';
 
@@ -91,6 +92,16 @@ export function pineToJS(sourceCode: string, options: any = {}) {
         const parser = new Parser(tokens, version);
         const ast = parser.parse();
         validateRiskPositionSizeScope(ast);
+
+        // Strict Pine mode: explicit v5/v6 sources must only reference
+        // declared names and Pine built-ins — never JS globals (process,
+        // globalThis, Math, Function, …) or prototype chains
+        // (x.constructor.constructor). Version-less sources (PineTS/JS mode
+        // and the forced-v5 fallback retry) and v4 legacy sources keep their
+        // existing library behavior.
+        if (declaredVersion !== null && declaredVersion >= 5) {
+            validatePineIdentifiers(ast);
+        }
 
         // Step 2b: v4 legacy lowering — rewrite flat builtins in call
         // position into their v5 namespaced equivalents (ta.*, math.*, …),
