@@ -51,56 +51,74 @@ import { swap_rows as swap_rows_factory } from './methods/swap_rows';
 import { trace as trace_factory } from './methods/trace';
 import { transpose as transpose_factory } from './methods/transpose';
 
+const methodTables = new WeakMap<object, any>();
+
+function createMethods(context: any) {
+    return {
+        add_col: add_col_factory(context),
+        add_row: add_row_factory(context),
+        avg: avg_factory(context),
+        col: col_factory(context),
+        columns: columns_factory(context),
+        concat: concat_factory(context),
+        copy: copy_factory(context),
+        det: det_factory(context),
+        diff: diff_factory(context),
+        eigenvalues: eigenvalues_factory(context),
+        eigenvectors: eigenvectors_factory(context),
+        elements_count: elements_count_factory(context),
+        fill: fill_factory(context),
+        get: get_factory(context),
+        inv: inv_factory(context),
+        is_antidiagonal: is_antidiagonal_factory(context),
+        is_antisymmetric: is_antisymmetric_factory(context),
+        is_binary: is_binary_factory(context),
+        is_diagonal: is_diagonal_factory(context),
+        is_identity: is_identity_factory(context),
+        is_square: is_square_factory(context),
+        is_stochastic: is_stochastic_factory(context),
+        is_symmetric: is_symmetric_factory(context),
+        is_triangular: is_triangular_factory(context),
+        is_zero: is_zero_factory(context),
+        kron: kron_factory(context),
+        max: max_factory(context),
+        median: median_factory(context),
+        min: min_factory(context),
+        mode: mode_factory(context),
+        mult: mult_factory(context),
+        pinv: pinv_factory(context),
+        pow: pow_factory(context),
+        rank: rank_factory(context),
+        remove_col: remove_col_factory(context),
+        remove_row: remove_row_factory(context),
+        reshape: reshape_factory(context),
+        reverse: reverse_factory(context),
+        row: row_factory(context),
+        rows: rows_factory(context),
+        set: set_factory(context),
+        sort: sort_factory(context),
+        submatrix: submatrix_factory(context),
+        sum: sum_factory(context),
+        swap_columns: swap_columns_factory(context),
+        swap_rows: swap_rows_factory(context),
+        trace: trace_factory(context),
+        transpose: transpose_factory(context),
+    };
+}
+
+function methodsFor(context: any) {
+    if (context === null || typeof context !== 'object') return createMethods(context);
+    let methods = methodTables.get(context);
+    if (!methods) {
+        methods = createMethods(context);
+        methodTables.set(context, methods);
+    }
+    return methods;
+}
+
 export class PineMatrixObject {
     public matrix: any[][];
-    private _add_col: any;
-    private _add_row: any;
-    private _avg: any;
-    private _col: any;
-    private _columns: any;
-    private _concat: any;
-    private _copy: any;
-    private _det: any;
-    private _diff: any;
-    private _eigenvalues: any;
-    private _eigenvectors: any;
-    private _elements_count: any;
-    private _fill: any;
-    private _get: any;
-    private _inv: any;
-    private _is_antidiagonal: any;
-    private _is_antisymmetric: any;
-    private _is_binary: any;
-    private _is_diagonal: any;
-    private _is_identity: any;
-    private _is_square: any;
-    private _is_stochastic: any;
-    private _is_symmetric: any;
-    private _is_triangular: any;
-    private _is_zero: any;
-    private _kron: any;
-    private _max: any;
-    private _median: any;
-    private _min: any;
-    private _mode: any;
-    private _mult: any;
-    private _pinv: any;
-    private _pow: any;
-    private _rank: any;
-    private _remove_col: any;
-    private _remove_row: any;
-    private _reshape: any;
-    private _reverse: any;
-    private _row: any;
-    private _rows: any;
-    private _set: any;
-    private _sort: any;
-    private _submatrix: any;
-    private _sum: any;
-    private _swap_columns: any;
-    private _swap_rows: any;
-    private _trace: any;
-    private _transpose: any;
+    private _methods: any;
 
     constructor(
         rows: number = 0,
@@ -114,54 +132,7 @@ export class PineMatrixObject {
                 this.matrix.push(Array(cols).fill(initialValue));
             }
         }
-        this._add_col = add_col_factory(this.context);
-        this._add_row = add_row_factory(this.context);
-        this._avg = avg_factory(this.context);
-        this._col = col_factory(this.context);
-        this._columns = columns_factory(this.context);
-        this._concat = concat_factory(this.context);
-        this._copy = copy_factory(this.context);
-        this._det = det_factory(this.context);
-        this._diff = diff_factory(this.context);
-        this._eigenvalues = eigenvalues_factory(this.context);
-        this._eigenvectors = eigenvectors_factory(this.context);
-        this._elements_count = elements_count_factory(this.context);
-        this._fill = fill_factory(this.context);
-        this._get = get_factory(this.context);
-        this._inv = inv_factory(this.context);
-        this._is_antidiagonal = is_antidiagonal_factory(this.context);
-        this._is_antisymmetric = is_antisymmetric_factory(this.context);
-        this._is_binary = is_binary_factory(this.context);
-        this._is_diagonal = is_diagonal_factory(this.context);
-        this._is_identity = is_identity_factory(this.context);
-        this._is_square = is_square_factory(this.context);
-        this._is_stochastic = is_stochastic_factory(this.context);
-        this._is_symmetric = is_symmetric_factory(this.context);
-        this._is_triangular = is_triangular_factory(this.context);
-        this._is_zero = is_zero_factory(this.context);
-        this._kron = kron_factory(this.context);
-        this._max = max_factory(this.context);
-        this._median = median_factory(this.context);
-        this._min = min_factory(this.context);
-        this._mode = mode_factory(this.context);
-        this._mult = mult_factory(this.context);
-        this._pinv = pinv_factory(this.context);
-        this._pow = pow_factory(this.context);
-        this._rank = rank_factory(this.context);
-        this._remove_col = remove_col_factory(this.context);
-        this._remove_row = remove_row_factory(this.context);
-        this._reshape = reshape_factory(this.context);
-        this._reverse = reverse_factory(this.context);
-        this._row = row_factory(this.context);
-        this._rows = rows_factory(this.context);
-        this._set = set_factory(this.context);
-        this._sort = sort_factory(this.context);
-        this._submatrix = submatrix_factory(this.context);
-        this._sum = sum_factory(this.context);
-        this._swap_columns = swap_columns_factory(this.context);
-        this._swap_rows = swap_rows_factory(this.context);
-        this._trace = trace_factory(this.context);
-        this._transpose = transpose_factory(this.context);
+        this._methods = methodsFor(this.context);
     }
 
     toString(): string {
@@ -174,194 +145,194 @@ export class PineMatrixObject {
     }
 
     add_col(...args: any[]) {
-        return this._add_col(this, ...args);
+        return this._methods.add_col(this, ...args);
     }
 
     add_row(...args: any[]) {
-        return this._add_row(this, ...args);
+        return this._methods.add_row(this, ...args);
     }
 
     avg(...args: any[]) {
-        return this._avg(this, ...args);
+        return this._methods.avg(this, ...args);
     }
 
     col(...args: any[]) {
-        return this._col(this, ...args);
+        return this._methods.col(this, ...args);
     }
 
     columns(...args: any[]) {
-        return this._columns(this, ...args);
+        return this._methods.columns(this, ...args);
     }
 
     concat(...args: any[]) {
-        return this._concat(this, ...args);
+        return this._methods.concat(this, ...args);
     }
 
     copy(...args: any[]) {
-        return this._copy(this, ...args);
+        return this._methods.copy(this, ...args);
     }
 
     det(...args: any[]) {
-        return this._det(this, ...args);
+        return this._methods.det(this, ...args);
     }
 
     diff(...args: any[]) {
-        return this._diff(this, ...args);
+        return this._methods.diff(this, ...args);
     }
 
     eigenvalues(...args: any[]) {
-        return this._eigenvalues(this, ...args);
+        return this._methods.eigenvalues(this, ...args);
     }
 
     eigenvectors(...args: any[]) {
-        return this._eigenvectors(this, ...args);
+        return this._methods.eigenvectors(this, ...args);
     }
 
     elements_count(...args: any[]) {
-        return this._elements_count(this, ...args);
+        return this._methods.elements_count(this, ...args);
     }
 
     fill(...args: any[]) {
-        return this._fill(this, ...args);
+        return this._methods.fill(this, ...args);
     }
 
     get(...args: any[]) {
-        return this._get(this, ...args);
+        return this._methods.get(this, ...args);
     }
 
     inv(...args: any[]) {
-        return this._inv(this, ...args);
+        return this._methods.inv(this, ...args);
     }
 
     is_antidiagonal(...args: any[]) {
-        return this._is_antidiagonal(this, ...args);
+        return this._methods.is_antidiagonal(this, ...args);
     }
 
     is_antisymmetric(...args: any[]) {
-        return this._is_antisymmetric(this, ...args);
+        return this._methods.is_antisymmetric(this, ...args);
     }
 
     is_binary(...args: any[]) {
-        return this._is_binary(this, ...args);
+        return this._methods.is_binary(this, ...args);
     }
 
     is_diagonal(...args: any[]) {
-        return this._is_diagonal(this, ...args);
+        return this._methods.is_diagonal(this, ...args);
     }
 
     is_identity(...args: any[]) {
-        return this._is_identity(this, ...args);
+        return this._methods.is_identity(this, ...args);
     }
 
     is_square(...args: any[]) {
-        return this._is_square(this, ...args);
+        return this._methods.is_square(this, ...args);
     }
 
     is_stochastic(...args: any[]) {
-        return this._is_stochastic(this, ...args);
+        return this._methods.is_stochastic(this, ...args);
     }
 
     is_symmetric(...args: any[]) {
-        return this._is_symmetric(this, ...args);
+        return this._methods.is_symmetric(this, ...args);
     }
 
     is_triangular(...args: any[]) {
-        return this._is_triangular(this, ...args);
+        return this._methods.is_triangular(this, ...args);
     }
 
     is_zero(...args: any[]) {
-        return this._is_zero(this, ...args);
+        return this._methods.is_zero(this, ...args);
     }
 
     kron(...args: any[]) {
-        return this._kron(this, ...args);
+        return this._methods.kron(this, ...args);
     }
 
     max(...args: any[]) {
-        return this._max(this, ...args);
+        return this._methods.max(this, ...args);
     }
 
     median(...args: any[]) {
-        return this._median(this, ...args);
+        return this._methods.median(this, ...args);
     }
 
     min(...args: any[]) {
-        return this._min(this, ...args);
+        return this._methods.min(this, ...args);
     }
 
     mode(...args: any[]) {
-        return this._mode(this, ...args);
+        return this._methods.mode(this, ...args);
     }
 
     mult(...args: any[]) {
-        return this._mult(this, ...args);
+        return this._methods.mult(this, ...args);
     }
 
     pinv(...args: any[]) {
-        return this._pinv(this, ...args);
+        return this._methods.pinv(this, ...args);
     }
 
     pow(...args: any[]) {
-        return this._pow(this, ...args);
+        return this._methods.pow(this, ...args);
     }
 
     rank(...args: any[]) {
-        return this._rank(this, ...args);
+        return this._methods.rank(this, ...args);
     }
 
     remove_col(...args: any[]) {
-        return this._remove_col(this, ...args);
+        return this._methods.remove_col(this, ...args);
     }
 
     remove_row(...args: any[]) {
-        return this._remove_row(this, ...args);
+        return this._methods.remove_row(this, ...args);
     }
 
     reshape(...args: any[]) {
-        return this._reshape(this, ...args);
+        return this._methods.reshape(this, ...args);
     }
 
     reverse(...args: any[]) {
-        return this._reverse(this, ...args);
+        return this._methods.reverse(this, ...args);
     }
 
     row(...args: any[]) {
-        return this._row(this, ...args);
+        return this._methods.row(this, ...args);
     }
 
     rows(...args: any[]) {
-        return this._rows(this, ...args);
+        return this._methods.rows(this, ...args);
     }
 
     set(...args: any[]) {
-        return this._set(this, ...args);
+        return this._methods.set(this, ...args);
     }
 
     sort(...args: any[]) {
-        return this._sort(this, ...args);
+        return this._methods.sort(this, ...args);
     }
 
     submatrix(...args: any[]) {
-        return this._submatrix(this, ...args);
+        return this._methods.submatrix(this, ...args);
     }
 
     sum(...args: any[]) {
-        return this._sum(this, ...args);
+        return this._methods.sum(this, ...args);
     }
 
     swap_columns(...args: any[]) {
-        return this._swap_columns(this, ...args);
+        return this._methods.swap_columns(this, ...args);
     }
 
     swap_rows(...args: any[]) {
-        return this._swap_rows(this, ...args);
+        return this._methods.swap_rows(this, ...args);
     }
 
     trace(...args: any[]) {
-        return this._trace(this, ...args);
+        return this._methods.trace(this, ...args);
     }
 
     transpose(...args: any[]) {
-        return this._transpose(this, ...args);
+        return this._methods.transpose(this, ...args);
     }
 }

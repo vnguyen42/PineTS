@@ -13,31 +13,40 @@ import { remove as remove_factory } from './methods/remove';
 import { size as size_factory } from './methods/size';
 import { values as values_factory } from './methods/values';
 
+const methodTables = new WeakMap<object, any>();
+
+function createMethods(context: any) {
+    return {
+        clear: clear_factory(context),
+        contains: contains_factory(context),
+        copy: copy_factory(context),
+        get: get_factory(context),
+        keys: keys_factory(context),
+        put: put_factory(context),
+        put_all: put_all_factory(context),
+        remove: remove_factory(context),
+        size: size_factory(context),
+        values: values_factory(context),
+    };
+}
+
+function methodsFor(context: any) {
+    if (context === null || typeof context !== 'object') return createMethods(context);
+    let methods = methodTables.get(context);
+    if (!methods) {
+        methods = createMethods(context);
+        methodTables.set(context, methods);
+    }
+    return methods;
+}
+
 export class PineMapObject {
     public map: Map<any, any>;
-    private _clear: any;
-    private _contains: any;
-    private _copy: any;
-    private _get: any;
-    private _keys: any;
-    private _put: any;
-    private _put_all: any;
-    private _remove: any;
-    private _size: any;
-    private _values: any;
+    private _methods: any;
 
     constructor(public context: any) {
         this.map = new Map();
-        this._clear = clear_factory(this.context);
-        this._contains = contains_factory(this.context);
-        this._copy = copy_factory(this.context);
-        this._get = get_factory(this.context);
-        this._keys = keys_factory(this.context);
-        this._put = put_factory(this.context);
-        this._put_all = put_all_factory(this.context);
-        this._remove = remove_factory(this.context);
-        this._size = size_factory(this.context);
-        this._values = values_factory(this.context);
+        this._methods = methodsFor(this.context);
     }
 
     toString(): string {
@@ -45,42 +54,42 @@ export class PineMapObject {
     }
 
     clear(...args: any[]) {
-        return this._clear(this, ...args);
+        return this._methods.clear(this, ...args);
     }
 
     contains(...args: any[]) {
-        return this._contains(this, ...args);
+        return this._methods.contains(this, ...args);
     }
 
     copy(...args: any[]) {
-        return this._copy(this, ...args);
+        return this._methods.copy(this, ...args);
     }
 
     get(...args: any[]) {
-        return this._get(this, ...args);
+        return this._methods.get(this, ...args);
     }
 
     keys(...args: any[]) {
-        return this._keys(this, ...args);
+        return this._methods.keys(this, ...args);
     }
 
     put(...args: any[]) {
-        return this._put(this, ...args);
+        return this._methods.put(this, ...args);
     }
 
     put_all(...args: any[]) {
-        return this._put_all(this, ...args);
+        return this._methods.put_all(this, ...args);
     }
 
     remove(...args: any[]) {
-        return this._remove(this, ...args);
+        return this._methods.remove(this, ...args);
     }
 
     size(...args: any[]) {
-        return this._size(this, ...args);
+        return this._methods.size(this, ...args);
     }
 
     values(...args: any[]) {
-        return this._values(this, ...args);
+        return this._methods.values(this, ...args);
     }
 }

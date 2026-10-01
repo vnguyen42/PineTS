@@ -40,14 +40,35 @@ async function generateIndex() {
 
         const objectImports = objectMethods.map((m) => `import { ${m.export} as ${m.export}_factory } from './methods/${m.file}';`).join('\n');
 
-        const objectPrivateProps = objectMethods.map((m) => `    private _${m.classProp}: any;`).join('\n');
+        // Method closures depend only on the context: one table per context, shared by every object
+        // of a run. One closure per method per object made each object weigh kilobytes, which
+        // exhausted the heap on long runs that create objects on every bar.
+        const sharedMethods = `const methodTables = new WeakMap<object, any>();
 
-        const objectInitProps = objectMethods.map((m) => `        this._${m.classProp} = ${m.export}_factory(this.context);`).join('\n');
+function createMethods(context: any) {
+    return {
+${objectMethods.map((m) => `        ${m.classProp}: ${m.export}_factory(context),`).join('\n')}
+    };
+}
+
+function methodsFor(context: any) {
+    if (context === null || typeof context !== 'object') return createMethods(context);
+    let methods = methodTables.get(context);
+    if (!methods) {
+        methods = createMethods(context);
+        methodTables.set(context, methods);
+    }
+    return methods;
+}`;
+
+        const objectPrivateProps = `    private _methods: any;`;
+
+        const objectInitProps = `        this._methods = methodsFor(this.context);`;
 
         const objectMethodDefs = objectMethods
             .map((m) => {
                 return `    ${m.classProp}(...args: any[]) {
-        return this._${m.classProp}(this, ...args);
+        return this._methods.${m.classProp}(this, ...args);
     }`;
             })
             .join('\n\n');
@@ -57,6 +78,8 @@ async function generateIndex() {
 // Run: npm run generate:matrix-index
 
 ${objectImports}
+
+${sharedMethods}
 
 export class PineMatrixObject {
     public matrix: any[][];
