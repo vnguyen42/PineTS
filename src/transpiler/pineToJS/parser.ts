@@ -375,12 +375,13 @@ export class Parser {
 
         let stmt;
 
-        // Enum definition
-        if (this.match(TokenType.KEYWORD, 'enum')) {
+        // Enum / type definition: `enum Name` / `type Name`. Both are contextual
+        // keywords, so any other continuation (`type = input(...)`, legal in v4
+        // and as a v5 variable name) falls through to the expression path below.
+        if (this.match(TokenType.KEYWORD, 'enum') && this.isIdentifierLike(this.peek(1))) {
             stmt = this.parseEnumDefinition();
         }
-        // Type definition
-        else if (this.match(TokenType.KEYWORD, 'type')) {
+        else if (this.match(TokenType.KEYWORD, 'type') && this.isIdentifierLike(this.peek(1))) {
             stmt = this.parseTypeDefinition();
         }
         // Variable declaration (var/varip)
@@ -1856,26 +1857,27 @@ export class Parser {
                     }
                 }
 
+                // Type arguments only exist on a call (`array.new<float>(…)`); without
+                // the `(` this was a comparison, e.g. the arguments `a[1] < b, b > 70`.
+                if (isGeneric && !this.match(TokenType.LPAREN)) {
+                    isGeneric = false;
+                    this.pos = saved;
+                }
+                if (!isGeneric) {
+                    // Not a generic, break and let comparison operator handle it
+                    break;
+                }
+
                 // For known types, rewrite callee: array.new<float> → array.new_float
                 // Only for array/matrix (not map, which uses map.new<K,V> with two type params)
-                if (isGeneric && expr.type === 'MemberExpression'
+                if (expr.type === 'MemberExpression'
                     && expr.property.name === 'new'
                     && (expr.object.name === 'array' || expr.object.name === 'matrix')
                     && KNOWN_GENERIC_TYPES.has(genericType)) {
                     expr.property = new Identifier('new_' + genericType);
                 }
-
-                // If we successfully parsed generic and next is (, parse call
-                if (isGeneric && this.match(TokenType.LPAREN)) {
-                    expr = this.parseCallExpression(expr);
-                    continue;
-                } else if (!isGeneric) {
-                    // Not a generic, break and let comparison operator handle it
-                    break;
-                } else {
-                    // Generic but no call - just continue
-                    continue;
-                }
+                expr = this.parseCallExpression(expr);
+                continue;
             }
             // Call expression
             else if (this.match(TokenType.LPAREN)) {
