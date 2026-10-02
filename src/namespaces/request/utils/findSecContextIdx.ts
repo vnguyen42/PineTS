@@ -73,3 +73,40 @@ export function findSecContextIdx(
     }
     return myCloseTime >= closeTime[i] ? i : i - 1;
 }
+
+/** Last i with values[i] <= time on non-decreasing values (binary search), else -1. */
+function lastAtOrBefore(time: number, values: number[]): number {
+    if (!nonDecreasing(values)) {
+        for (let i = values.length - 1; i >= 0; i--) if (values[i] <= time) return i;
+        return -1;
+    }
+    let lo = 0;
+    let hi = values.length;
+    while (lo < hi) {
+        const mid = (lo + hi) >>> 1;
+        if (values[mid] <= time) lo = mid + 1;
+        else hi = mid;
+    }
+    return lo - 1;
+}
+
+/**
+ * Strict-lookahead alignment of ANOTHER symbol (same or higher timeframe), whose bars need not
+ * line up with the chart's (other sessions, weekends, half-days, a series that starts late or
+ * ends early). No future information by construction:
+ * - lookahead off: the last secondary bar CLOSED by the chart bar's close (closeTime <= myCloseTime),
+ *   held over secondary gaps (a stock's weekend seen from a coin chart);
+ * - lookahead on: the last secondary bar OPENED by the chart bar's open (openTime <= myOpenTime),
+ *   only reached for expressions known at that bar's open (`open`, `time`, `x[n]` with n >= 1),
+ *   which the strict guard enforces first.
+ * -1 (na) when there is no such bar (secondary data starting after the chart bar).
+ */
+export function findOtherSymbolIdx(
+    myOpenTime: number,
+    myCloseTime: number,
+    openTime: number[],
+    closeTime: number[],
+    lookahead: boolean,
+): number {
+    return lookahead ? lastAtOrBefore(myOpenTime, openTime) : lastAtOrBefore(myCloseTime, closeTime);
+}

@@ -4,7 +4,7 @@ import { PineTS } from '../../../PineTS.class';
 import { Series } from '../../../Series';
 import { splitTickerModifier, withTickerModifier } from '../../../tickerModifier';
 import { timeframeToMinutes } from '../utils/TIMEFRAMES';
-import { findSecContextIdx } from '../utils/findSecContextIdx';
+import { findOtherSymbolIdx, findSecContextIdx } from '../utils/findSecContextIdx';
 import { findLTFContextIdx } from '../utils/findLTFContextIdx';
 import { parseArgsForPineParams } from '../../utils';
 import { LookaheadLeakError } from '../../../errors/LookaheadLeakError';
@@ -212,17 +212,6 @@ export function security(context: any) {
             throw new Error('Invalid timeframe');
         }
 
-        // Strict lookahead: a higher-timeframe read with lookahead on sees the final values
-        // of the higher-timeframe bar in progress unless the transpiler proved the call
-        // site's expression is known at that bar's open (LookaheadSafety). Unknown sites
-        // (no expression name, untranspiled code) are refused too.
-        if (context.strictLookahead && _lookahead && reqTimeframeMinutes > ctxTimeframeMinutes) {
-            const site = typeof _expression_name === 'string' ? _expression_name.match(/p\d+$/)?.[0] : undefined;
-            if (!site || !context._lookaheadSafeExpressions.has(site)) {
-                throw new LookaheadLeakError(String(rawSymbol), _timeframe);
-            }
-        }
-
         // Same-timeframe shortcut is only valid when the requested symbol is the
         // chart's symbol — at that point the secondary would just re-evaluate the
         // same data. If the symbol differs, the shortcut would return the chart's
@@ -236,6 +225,22 @@ export function security(context: any) {
         const reqParts = typeof _symbol === 'string' ? splitTickerModifier(_symbol) : { symbol: _symbol, modifier: null };
         const reqModifier = reqParts.modifier === 'standard' ? null : reqParts.modifier; // ";standard" ≡ no modifier
         const isSameSymbol = !_symbol || _symbol === '' || (reqParts.symbol === ctxParts.symbol && reqModifier === chartModifier);
+        // Under strict lookahead, another symbol's bars need not line up with the chart's (other
+        // sessions, weekends, late start, early end): they are aligned on bar close/open times
+        // (findOtherSymbolIdx) and lookahead on is guarded on every timeframe, the chart's included.
+        // A chart-type modifier alone (";heikinashi" of the chart symbol) keeps the chart's bar times.
+        const strictOtherSymbol = context.strictLookahead && !!_symbol && reqParts.symbol !== ctxParts.symbol;
+
+        // Strict lookahead: a higher-timeframe (or other-symbol) read with lookahead on sees the
+        // final values of the requested bar in progress unless the transpiler proved the call
+        // site's expression is known at that bar's open (LookaheadSafety). Unknown sites
+        // (no expression name, untranspiled code) are refused too.
+        if (context.strictLookahead && _lookahead && (reqTimeframeMinutes > ctxTimeframeMinutes || strictOtherSymbol)) {
+            const site = typeof _expression_name === 'string' ? _expression_name.match(/p\d+$/)?.[0] : undefined;
+            if (!site || !context._lookaheadSafeExpressions.has(site)) {
+                throw new LookaheadLeakError(String(rawSymbol), _timeframe);
+            }
+        }
 
         if (ctxTimeframeMinutes === reqTimeframeMinutes && isSameSymbol) {
             // Resolve any helper objects (TimeComponentHelper, NAHelper, Series, etc.)
@@ -256,8 +261,19 @@ export function security(context: any) {
         // are historical even the last one, so isRealtime stays false.
         const isRealtime = context.idx === context.length - 1 && myCloseTime > Date.now();
 
+        // A provider that resolves exchange-qualified tickers itself (`qualifiedTickers`) receives
+        // the requested ticker with its "EXCHANGE:" prefix ("CBOE:VIX", not "VIX"): the prefix tells
+        // an index from a stock of the same name. Other providers get the bare ticker.
+        const secTicker = context.source?.qualifiedTickers === true && typeof resolvedSymbol === 'string' ? resolvedSymbol : _symbol;
+        const secIdx = (secContext: { data: { openTime: { data: number[] }; closeTime: { data: number[] } } }) =>
+            isLTF
+                ? findLTFContextIdx(myOpenTime, myCloseTime, secContext.data.openTime.data, secContext.data.closeTime.data, _lookahead)
+                : strictOtherSymbol
+                  ? findOtherSymbolIdx(myOpenTime, myCloseTime, secContext.data.openTime.data, secContext.data.closeTime.data, _lookahead)
+                  : findSecContextIdx(myOpenTime, myCloseTime, secContext.data.openTime.data, secContext.data.closeTime.data, _lookahead, isRealtime);
+
         // Cache key must be unique per symbol+timeframe+expression to avoid collisions
-        const cacheKey = `${_symbol}_${_timeframe}_${_expression_name}`;
+        const cacheKey = `${secTicker}_${_timeframe}_${_expression_name}`;
         // Cache key for tracking previous bar index (for gaps detection)
         const gapCacheKey = `${cacheKey}_prevIdx`;
 
@@ -271,15 +287,7 @@ export function security(context: any) {
             }
 
             const secContext = cached.context;
-            const secContextIdx = isLTF
-                ? findLTFContextIdx(
-                      myOpenTime,
-                      myCloseTime,
-                      secContext.data.openTime.data,
-                      secContext.data.closeTime.data,
-                      _lookahead
-                  )
-                : findSecContextIdx(myOpenTime, myCloseTime, secContext.data.openTime.data, secContext.data.closeTime.data, _lookahead, isRealtime);
+            const secContextIdx = secIdx(secContext);
 
             if (secContextIdx == -1) {
                 return NaN;
@@ -359,7 +367,7 @@ export function security(context: any) {
 
         // Pass calc_bars_count as `periods` so the secondary fetches that many bars
         // ending at secEDate — gives the script the historical depth it asked for.
-        const pineTS = new PineTS(context.source, _symbol, _timeframe, _calc_bars_count, adjustedSDate, secEDate);
+        const pineTS = new PineTS(context.source, secTicker, _timeframe, _calc_bars_count, adjustedSDate, secEDate);
 
         // Mark as secondary context to prevent infinite recursion
         pineTS.markAsSecondary();
@@ -381,15 +389,7 @@ export function security(context: any) {
 
         context.cache[cacheKey] = { pineTS, context: secContext, dataVersion: context.dataVersion };
 
-        const secContextIdx = isLTF
-            ? findLTFContextIdx(
-                  myOpenTime,
-                  myCloseTime,
-                  secContext.data.openTime.data,
-                  secContext.data.closeTime.data,
-                  _lookahead
-              )
-            : findSecContextIdx(myOpenTime, myCloseTime, secContext.data.openTime.data, secContext.data.closeTime.data, _lookahead, isRealtime);
+        const secContextIdx = secIdx(secContext);
 
         if (secContextIdx == -1) {
             return NaN;
