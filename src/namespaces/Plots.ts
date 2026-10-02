@@ -3,6 +3,36 @@ import { Series } from '../Series';
 import { parseArgsForPineParams, extractCallsiteId } from './utils';
 import { silentInSecondary } from './silentInSecondary';
 
+type PointOptions = Record<string, unknown>;
+
+/** Options of the previous point, per plot (see pushPoint). */
+const lastPointOptions = new WeakMap<object, PointOptions>();
+
+function sameFields(a: PointOptions, b: PointOptions): boolean {
+    const keys = Object.keys(b);
+    if (keys.length !== Object.keys(a).length) return false;
+    for (const key of keys) {
+        if (!Object.hasOwn(a, key) || !Object.is(a[key], b[key])) return false;
+    }
+    return true;
+}
+
+/**
+ * Appends a per-bar point to a plot. Point options mostly repeat bar after bar (same color, same
+ * offset): when they equal the plot's previous point options field for field, that object is reused,
+ * so a long run keeps one options object per change instead of one per bar (readers never mutate
+ * point options).
+ */
+function pushPoint(plot: { data: unknown[] }, point: { options?: PointOptions; [field: string]: unknown }) {
+    const options = point.options;
+    if (options) {
+        const previous = lastPointOptions.get(plot);
+        if (previous && sameFields(previous, options)) point.options = previous;
+        else lastPointOptions.set(plot, options);
+    }
+    plot.data.push(point);
+}
+
 //prettier-ignore
 const PLOT_SIGNATURE = [
     'series', 'title', 'color', 'linewidth', 'style', 'trackprice', 'histbase', 'offset',
@@ -232,7 +262,7 @@ export class PlotHelper {
 
         const value = Series.from(series).get(0);
 
-        this.context.plots[plotKey].data.push({
+        pushPoint(this.context.plots[plotKey], {
             title,
             time: this.context.marketData[this.context.idx].openTime,
             value: value,
@@ -284,7 +314,7 @@ export class PlotHelper {
         const pointOptions: any = { color: pointColor };
         if ('offset' in others) pointOptions.offset = options.offset;
 
-        this.context.plots[plotKey].data.push({
+        pushPoint(this.context.plots[plotKey], {
             title,
             time: this.context.marketData[this.context.idx].openTime,
             value: value,
@@ -311,7 +341,7 @@ export class PlotHelper {
             };
         }
         const value = Series.from(series).get(0);
-        this.context.plots[plotKey].data.push({
+        pushPoint(this.context.plots[plotKey], {
             title,
             time: this.context.marketData[this.context.idx].openTime,
             value: value,
@@ -345,7 +375,7 @@ export class PlotHelper {
             this.context.plots[plotKey] = { data: [], options: { ...options, style: 'shape', overlay }, title, _plotKey: plotKey, _callsiteId: callsiteId };
         }
 
-        this.context.plots[plotKey].data.push({
+        pushPoint(this.context.plots[plotKey], {
             title,
             time: this.context.marketData[this.context.idx].openTime,
             value: value,
@@ -380,7 +410,7 @@ export class PlotHelper {
 
         const value = [Series.from(open).get(0), Series.from(high).get(0), Series.from(low).get(0), Series.from(close).get(0)];
 
-        this.context.plots[plotKey].data.push({
+        pushPoint(this.context.plots[plotKey], {
             title,
             time: this.context.marketData[this.context.idx].openTime,
             value: value,
@@ -403,7 +433,7 @@ export class PlotHelper {
 
         const value = [Series.from(open).get(0), Series.from(high).get(0), Series.from(low).get(0), Series.from(close).get(0)];
 
-        this.context.plots[plotKey].data.push({
+        pushPoint(this.context.plots[plotKey], {
             title,
             time: this.context.marketData[this.context.idx].openTime,
             value: value,
@@ -425,7 +455,7 @@ export class PlotHelper {
             this.context.plots[plotKey] = { data: [], options: { ...options, style: 'background', overlay }, title, _plotKey: plotKey, _callsiteId: callsiteId };
         }
 
-        this.context.plots[plotKey].data.push({
+        pushPoint(this.context.plots[plotKey], {
             title,
             time: this.context.marketData[this.context.idx].openTime,
             value: options.color && options.color !== 'na' && options?.color.toString() !== 'NaN',
@@ -444,7 +474,7 @@ export class PlotHelper {
             this.context.plots[plotKey] = { data: [], options: { ...options, style: 'barcolor' }, title, _plotKey: plotKey, _callsiteId: callsiteId };
         }
 
-        this.context.plots[plotKey].data.push({
+        pushPoint(this.context.plots[plotKey], {
             title,
             time: this.context.marketData[this.context.idx].openTime,
             value: options.color && options.color !== 'na' && options?.color.toString() !== 'NaN',
@@ -542,7 +572,7 @@ export class FillHelper {
             }
 
             // Push per-bar gradient data
-            this.context.plots[fillKey].data.push({
+            pushPoint(this.context.plots[fillKey], {
                 time: this.context.marketData[this.context.idx].openTime,
                 value: null,
                 options: { top_value, bottom_value, top_color, bottom_color },
@@ -582,7 +612,7 @@ export class FillHelper {
 
             // Always push per-bar color data so dynamic colors (e.g. green/red flip) work.
             // The fill renderer will use per-bar colors when the data array is populated.
-            this.context.plots[fillKey].data.push({
+            pushPoint(this.context.plots[fillKey], {
                 time: this.context.marketData[this.context.idx].openTime,
                 value: null,
                 options: { color: resolvedColor },
