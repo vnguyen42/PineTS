@@ -104,6 +104,61 @@ interface DateParts {
     dayOfWeek: number; // JS convention: 0=Sun, 1=Mon, ..., 6=Sat
 }
 
+const tzFormatters = new Map<string, Intl.DateTimeFormat>();
+/** Per timezone: UTC hour → offset (ms) valid for the whole hour, or null when the hour holds a transition. */
+const tzHourOffsets = new Map<string, Map<number, number | null>>();
+const MAX_CACHED_HOURS = 500_000;
+
+function tzFormatter(timezone: string): Intl.DateTimeFormat {
+    let formatter = tzFormatters.get(timezone);
+    if (!formatter) {
+        formatter = new Intl.DateTimeFormat('en-US', {
+            timeZone: timezone,
+            year: 'numeric',
+            month: 'numeric',
+            day: 'numeric',
+            hour: 'numeric',
+            minute: 'numeric',
+            second: 'numeric',
+            weekday: 'short',
+            hour12: false,
+        });
+        tzFormatters.set(timezone, formatter);
+    }
+    return formatter;
+}
+
+/** Wall-clock time of `timestamp` (whole seconds) in the formatter's timezone, as UTC milliseconds. */
+function wallClockMs(formatter: Intl.DateTimeFormat, timestamp: number): number {
+    const parts = formatter.formatToParts(new Date(timestamp));
+    const get = (type: string) => parseInt(parts.find((p) => p.type === type)?.value || '0', 10);
+    const hour = get('hour');
+    return Date.UTC(get('year'), get('month') - 1, get('day'), hour === 24 ? 0 : hour, get('minute'), get('second'));
+}
+
+/**
+ * UTC offset of an IANA timezone at `timestamp`, computed once per UTC hour: the offset at the first
+ * and last second of the hour must agree, else (a transition inside the hour) null.
+ */
+function hourlyOffset(timezone: string, timestamp: number): number | null {
+    let byHour = tzHourOffsets.get(timezone);
+    if (!byHour || byHour.size > MAX_CACHED_HOURS) {
+        byHour = new Map();
+        tzHourOffsets.set(timezone, byHour);
+    }
+    const hour = Math.floor(timestamp / 3_600_000);
+    let offset = byHour.get(hour);
+    if (offset === undefined) {
+        const formatter = tzFormatter(timezone);
+        const start = hour * 3_600_000;
+        const end = start + 3_599_000;
+        const first = wallClockMs(formatter, start) - start;
+        offset = first === wallClockMs(formatter, end) - end ? first : null;
+        byHour.set(hour, offset);
+    }
+    return offset;
+}
+
 /**
  * Decompose a UTC-millisecond timestamp into calendar parts
  * interpreted in the given timezone.
@@ -144,20 +199,22 @@ export function getDatePartsInTimezone(timestamp: number, timezone: string): Dat
         };
     }
 
-    // IANA timezone name — use Intl.DateTimeFormat
+    // IANA timezone name — use Intl.DateTimeFormat (cached per timezone; offsets cached per hour)
     try {
-        const formatter = new Intl.DateTimeFormat('en-US', {
-            timeZone: timezone,
-            year: 'numeric',
-            month: 'numeric',
-            day: 'numeric',
-            hour: 'numeric',
-            minute: 'numeric',
-            second: 'numeric',
-            weekday: 'short',
-            hour12: false,
-        });
-        const parts = formatter.formatToParts(new Date(timestamp));
+        const offset = hourlyOffset(timezone, timestamp);
+        if (offset !== null) {
+            const d = new Date(timestamp + offset);
+            return {
+                year: d.getUTCFullYear(),
+                month: d.getUTCMonth() + 1,
+                day: d.getUTCDate(),
+                hour: d.getUTCHours(),
+                minute: d.getUTCMinutes(),
+                second: d.getUTCSeconds(),
+                dayOfWeek: d.getUTCDay(),
+            };
+        }
+        const parts = tzFormatter(timezone).formatToParts(new Date(timestamp));
         const get = (type: string) => parseInt(parts.find((p) => p.type === type)?.value || '0', 10);
 
         let hour = get('hour');

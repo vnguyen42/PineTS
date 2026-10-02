@@ -15,19 +15,18 @@ export function valuewhen(context: any) {
         if (!context.taState[stateKey]) {
             context.taState[stateKey] = {
                 lastIdx: -1,
-                // Committed state
-                prevValues: [],
-                // Tentative state
-                currentValues: [],
+                // Captured values: the first `committed` come from earlier bars, at most one more from
+                // the current bar (tentative: redone on every evaluation of that bar). One array grown
+                // in place: copying the whole history on every call made long runs quadratic.
+                values: [],
+                committed: 0,
             };
         }
         const state = context.taState[stateKey];
 
         // Commit logic
         if (context.idx > state.lastIdx) {
-            if (state.lastIdx >= 0) {
-                state.prevValues = [...state.currentValues];
-            }
+            state.committed = state.values.length;
             state.lastIdx = context.idx;
         }
 
@@ -35,15 +34,12 @@ export function valuewhen(context: any) {
         const val = Series.from(source).get(0);
         const occurrence = Series.from(_occurrence).get(0);
 
-        // Use committed values as base
-        const values = [...state.prevValues];
-
+        // Committed values as base, plus this evaluation's capture
+        const values: unknown[] = state.values;
+        values.length = state.committed;
         if (cond) {
             values.push(val);
         }
-
-        // Update tentative state
-        state.currentValues = values;
 
         if (isNaN(occurrence) || occurrence < 0) {
             return NaN;
