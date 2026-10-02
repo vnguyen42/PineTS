@@ -489,6 +489,11 @@ export interface StrategyState {
     // opened in the run — the anchor for the buy-and-hold benchmark. Latched
     // once in openTrade and never overwritten.
     _first_entry_price?: number;
+    // Internal: syminfo.mintick at each bar index a trade opened on (set in
+    // openTrade). Tick-based exit legs (profit / loss / trail_points /
+    // trail_offset) use their entry bar's tick, so a host whose mintick
+    // varies per bar (split-adjusted history) keeps a held bracket's distance.
+    _entry_ticks?: Map<number, number>;
 
     // Internal: per-bar intrabar-sequencing state for
     // `calc_on_order_fills = true` (see CofBarState). Set at the start of

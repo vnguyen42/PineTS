@@ -1925,6 +1925,8 @@ export function openTrade(
         strategy._intraday_loss.unvaluedEntryPrice = price;
     }
     strategy.opentrades.push(trade);
+    // The tick in force when this lot opened: tick-based exit legs are measured in it.
+    (strategy._entry_ticks ??= new Map()).set(context.idx, context.pine?.syminfo?.mintick ?? 0.01);
 
     // Latch the slippage-adjusted entry price of the FIRST trade ever opened —
     // the anchor for the buy-and-hold benchmark (see finalizeStrategyRun).
@@ -3121,6 +3123,12 @@ export function processExitOrders(
         }
         const avgEntry = totalCost / matchingQty;
         const isLong = matchingDir === 1;
+        // Tick legs (trail_points / trail_offset; profit / loss per trade below) keep
+        // the tick in force when their entry filled. syminfo.mintick is constant on a
+        // normal run; a host that varies it per bar (split-adjusted history, where an
+        // older bar's tick is smaller) must not stretch a held bracket at a split.
+        const firstEntryBar = matching[0]?._activation_entry_bar_index ?? matching[0]?.entry_bar_index;
+        const trailTick = (firstEntryBar !== undefined ? strategy._entry_ticks?.get(firstEntryBar) : undefined) ?? mintick;
 
         // Shared absolute legs (validated below); per-trade tick legs are
         // computed inside the bracket loop further down.
@@ -3159,7 +3167,7 @@ export function processExitOrders(
             let armPrice: number | undefined;
             if (order.trail_price !== undefined) armPrice = order.trail_price;
             else if (order.trail_points !== undefined) {
-                armPrice = isLong ? avgEntry + order.trail_points * mintick : avgEntry - order.trail_points * mintick;
+                armPrice = isLong ? avgEntry + order.trail_points * trailTick : avgEntry - order.trail_points * trailTick;
             }
             if (armPrice !== undefined) {
                 const armed = isLong
@@ -3255,13 +3263,14 @@ export function processExitOrders(
                 tQty = quantizeToQtyStep(context, tQty) ?? tQty;
             }
             let tp = absTp;
+            const entryTick = strategy._entry_ticks?.get(t._activation_entry_bar_index ?? t.entry_bar_index) ?? mintick;
             if (tp === undefined && order.profit !== undefined) {
-                const derivedTp = isLong ? entry + order.profit * mintick : entry - order.profit * mintick;
+                const derivedTp = isLong ? entry + order.profit * entryTick : entry - order.profit * entryTick;
                 tp = roundToMintick(derivedTp, entry, mintick);
             }
             let sl = absSl;
             if (sl === undefined && order.loss !== undefined) {
-                const derivedSl = isLong ? entry - order.loss * mintick : entry + order.loss * mintick;
+                const derivedSl = isLong ? entry - order.loss * entryTick : entry + order.loss * entryTick;
                 sl = roundToMintick(derivedSl, entry, mintick);
             }
 
@@ -3523,8 +3532,8 @@ export function processExitOrders(
             };
             const triggerFromPeak = (peak: number = order.trail_peak as number): number => {
                 const raw = isLong
-                    ? peak - whole * mintick
-                    : peak + whole * mintick;
+                    ? peak - whole * trailTick
+                    : peak + whole * trailTick;
                 return roundTrailLevel(raw);
             };
             const emitTrail = (price: number, forcedSegment?: number, gap = false) => {
