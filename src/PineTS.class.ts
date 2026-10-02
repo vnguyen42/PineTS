@@ -126,6 +126,19 @@ export class PineTS {
         this._alertMode = mode;
     }
 
+    private _strictLookahead = false;
+
+    /**
+     * Refuse future-leaking higher-timeframe requests (off by default, as on
+     * TradingView): with `true`, a `request.security` call that reads a higher
+     * timeframe with lookahead on throws `LookaheadLeakError` unless its
+     * expression is `open`, `time`, `x[n]` with a literal n ≥ 1, or a tuple of
+     * those (values known when the higher-timeframe bar opens).
+     */
+    public setStrictLookahead(strict: boolean) {
+        this._strictLookahead = strict;
+    }
+
     // ── Visible-range / host environment ────────────────────────────────
     // Values come from the host (UI). When unset, Pine built-ins like
     // `chart.left_visible_bar_time` fall back to marketData-derived defaults
@@ -1155,6 +1168,7 @@ export class PineTS {
 
         context.__maxLoops = this._maxLoops;
         context._alertMode = this._alertMode;
+        context.strictLookahead = this._strictLookahead;
 
         // User-explicit prop overrides flow from the Indicator to the runtime.
         // Read by Core.indicator() and initializeStrategy/strategy.any() to
@@ -1188,6 +1202,7 @@ export class PineTS {
         const contextVarNames = ['const', 'var', 'let', 'params'];
         context.pineVersion = (transpiledFn as Function & { _pineVersion?: number | null })._pineVersion ?? context.pineVersion;
         context._strategyHistorySeries = (transpiledFn as Function & { _strategyHistorySeries?: string[] })._strategyHistorySeries;
+        context._lookaheadSafeExpressions = new Set((transpiledFn as Function & { _lookaheadSafeExpressions?: string[] })._lookaheadSafeExpressions);
 
         for (let i = startIdx; i < endIdx; i++) {
             context.idx = i;

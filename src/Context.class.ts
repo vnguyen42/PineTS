@@ -32,6 +32,29 @@ import { PolylineHelper } from './namespaces/polyline/PolylineHelper';
 import { TableHelper } from './namespaces/table/TableHelper';
 import { Ticker } from './namespaces/Ticker';
 import type { IndicatorOptions } from './types/PineTypes';
+import { PineArrayObject } from './namespaces/array/PineArrayObject';
+import { PineMatrixObject } from './namespaces/matrix/PineMatrixObject';
+import { PineMapObject } from './namespaces/map/PineMapObject';
+import { LineObject } from './namespaces/line/LineObject';
+import { LabelObject } from './namespaces/label/LabelObject';
+import { BoxObject } from './namespaces/box/BoxObject';
+import { TableObject } from './namespaces/table/TableObject';
+import { LinefillObject } from './namespaces/linefill/LinefillObject';
+import { PolylineObject } from './namespaces/polyline/PolylineObject';
+import { PineRuntimeError } from './errors/PineRuntimeError';
+
+/** Built-in object types that carry methods, by Pine type name (for `Context.dotMethod`). */
+const BUILTIN_RECEIVERS: [string, Function][] = [
+    ['array', PineArrayObject],
+    ['matrix', PineMatrixObject],
+    ['map', PineMapObject],
+    ['line', LineObject],
+    ['label', LabelObject],
+    ['box', BoxObject],
+    ['table', TableObject],
+    ['linefill', LinefillObject],
+    ['polyline', PolylineObject],
+];
 
 export class Context {
     public data: any = {
@@ -59,6 +82,10 @@ export class Context {
     public _strategyHistorySeries?: string[];
     /** Absolute bar index represented by the most recent strategy history snapshot. */
     public _strategyHistorySnapshotBar?: number;
+    /** Refuse future-leaking higher-timeframe requests (PineTS.setStrictLookahead). */
+    public strictLookahead: boolean = false;
+    /** Static expression-param names (`pN`) of request.security calls safe under lookahead_on. */
+    public _lookaheadSafeExpressions: Set<string> = new Set();
 
     public __maxLoops: number = 500000;
     public NA: any = NaN;
@@ -933,6 +960,41 @@ export class Context {
         } finally {
             this.popId();
         }
+    }
+
+    private _dotMethods = new WeakMap<Function, Map<string, Function>>();
+
+    /**
+     * Target of `x.name(…)` when `name` is a user-defined method and `x` is not
+     * statically known as a UDT instance: the receiver's own built-in method of
+     * that name when it has one, else the user method (called like its function
+     * form, `name(x, …)`). A user method that overrides a built-in method of the
+     * same receiver kind (`method sum(array<float> a)` called as `a.sum()`) throws:
+     * telling the two apart would need the element types.
+     */
+    public dotMethod(fn: Function, name: string): Function {
+        let byName = this._dotMethods.get(fn);
+        if (!byName) this._dotMethods.set(fn, (byName = new Map()));
+        let target = byName.get(name);
+        if (!target) {
+            target = (receiver: any, ...args: any[]) => {
+                const self = this.get(receiver, 0);
+                const native =
+                    self !== null && typeof self === 'object' && !(self instanceof PineTypeObject) && !(name in Object.prototype) ? self[name] : undefined;
+                if (typeof native !== 'function') return fn(receiver, ...args);
+                const declared = String(Object.values((fn as any).__pineParamTypes__ ?? {})[0] ?? '').replace(/^(?:(?:series|simple|const|input)\s+)+/, '');
+                const kind = BUILTIN_RECEIVERS.find(([, type]) => self instanceof type)?.[0];
+                if (kind && (declared === kind || declared.startsWith(`${kind}<`) || (kind === 'array' && declared.endsWith('[]')))) {
+                    throw new PineRuntimeError(
+                        `The user-defined method \`${name}\` overrides the built-in \`${kind}.${name}\`, which the engine cannot tell apart in \`x.${name}(…)\`: rename the method or call it as a function, \`${name}(x, …)\`.`,
+                        name,
+                    );
+                }
+                return native.apply(self, args.map((arg) => this.get(arg, 0)));
+            };
+            byName.set(name, target);
+        }
+        return target;
     }
 
     //#endregion

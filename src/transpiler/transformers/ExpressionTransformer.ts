@@ -5,7 +5,7 @@ import * as walk from 'acorn-walk';
 import ScopeManager from '../analysis/ScopeManager';
 import { inferDirectUdtFactoryType } from '../analysis/AnalysisPass';
 import { ASTFactory, CONTEXT_NAME } from '../utils/ASTFactory';
-import { KNOWN_NAMESPACES, NAMESPACES_LIKE, ASYNC_METHODS, CALLSITE_ID_NAMESPACES } from '../settings';
+import { KNOWN_NAMESPACES, NAMESPACES_LIKE, ASYNC_METHODS, CALLSITE_ID_NAMESPACES, CONTEXT_DATA_VARS } from '../settings';
 import { STRATEGY_SERIES_NAMES } from '../../namespaces/strategy/series';
 
 const UNDEFINED_ARG = {
@@ -1894,13 +1894,15 @@ export function transformCallExpression(node: any, scopeManager: ScopeManager, n
         // Continue processing to handle arguments transformation
     }
 
-    // Check if this is a namespace method call (e.g., ta.ema, math.abs)
+    // Check if this is a namespace method call (e.g., ta.ema, math.abs). A user method
+    // called on a built-in series (`close.twice()`) is a method call, not a namespace one.
     const isNamespaceCall =
         node.callee &&
         node.callee.type === 'MemberExpression' &&
         node.callee.object &&
         node.callee.object.type === 'Identifier' &&
-        (scopeManager.isContextBound(node.callee.object.name) || node.callee.object.name === 'math' || node.callee.object.name === 'ta');
+        (scopeManager.isContextBound(node.callee.object.name) || node.callee.object.name === 'math' || node.callee.object.name === 'ta') &&
+        !(CONTEXT_DATA_VARS.includes(node.callee.object.name) && scopeManager.isUserMethod(node.callee.property.name));
 
     if (isNamespaceCall) {
         // Exclude internal context methods from parameter wrapping
@@ -2323,7 +2325,13 @@ export function transformCallExpression(node: any, scopeManager: ScopeManager, n
         // no-ops, leaving nested UDT fields uninitialized.
         const isChainedPropertyMethod = _obj.type === 'MemberExpression' && !isReceiverUdtInstance;
 
-        if (isUserFunction && isUserMethod && !scopeManager.isContextBound(methodName) && !isBuiltinMethodOnParam && !isChainedPropertyMethod && isReceiverUdtInstance) {
+        // A user method called with dot syntax on a receiver not known as a UDT instance
+        // (array, matrix, map, primitive, function parameter, call result) goes through
+        // `$.dotMethod`, which calls the receiver's own built-in method of that name when it
+        // has one and the user method otherwise. A bare `x?.name?.()` would silently skip it.
+        const isDynamicReceiver = !isReceiverUdtInstance && (_obj.type === 'Identifier' || _obj.type === 'CallExpression');
+        const isUdtRetarget = !isBuiltinMethodOnParam && !isChainedPropertyMethod && isReceiverUdtInstance;
+        if (isUserFunction && isUserMethod && !scopeManager.isContextBound(methodName) && (isUdtRetarget || isDynamicReceiver)) {
             // It's a user variable/function.
             // Transform obj.method(args) -> method(obj, args)
             // 1. Get the object (first arg)
@@ -2385,8 +2393,16 @@ export function transformCallExpression(node: any, scopeManager: ScopeManager, n
             // the call against the prefixed JS identifier.
             // Mark with _skipTransformation to prevent the identifier from being resolved
             // to a same-named variable (e.g. `isSame2` function vs `isSame2` variable).
-            const functionRef = ASTFactory.createIdentifier(`$M_${methodName}`);
-            functionRef._skipTransformation = true;
+            const methodRef = ASTFactory.createIdentifier(`$M_${methodName}`);
+            methodRef._skipTransformation = true;
+            const functionRef = isUdtRetarget
+                ? methodRef
+                : {
+                      type: 'CallExpression',
+                      callee: ASTFactory.createMemberExpression(ASTFactory.createContextIdentifier(), ASTFactory.createIdentifier('dotMethod')),
+                      arguments: [methodRef, { type: 'Literal', value: methodName, raw: JSON.stringify(methodName) }],
+                      _transformed: true,
+                  };
 
             const newArgs = [functionRef, callId, transformedObj, ...transformedArgs];
 

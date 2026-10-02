@@ -7,6 +7,7 @@ import { timeframeToMinutes } from '../utils/TIMEFRAMES';
 import { findSecContextIdx } from '../utils/findSecContextIdx';
 import { findLTFContextIdx } from '../utils/findLTFContextIdx';
 import { parseArgsForPineParams } from '../../utils';
+import { LookaheadLeakError } from '../../../errors/LookaheadLeakError';
 
 // Pine signature (v5/v6):
 //   request.security(symbol, timeframe, expression, gaps, lookahead, ignore_invalid_symbol, currency, calc_bars_count)
@@ -144,6 +145,10 @@ export function security(context: any) {
         // `gaps` positional slot.
         const argNames: (string | undefined)[] = [];
         const args = unwrapParamTuples(rawArgs, argNames);
+        // The named-args bag is the last argument, not a positional slot: without this,
+        // `request.security(sym, tf, expression = x)` named its expression after the bag.
+        const bagAt = args.findIndex((a) => a !== null && typeof a === 'object' && Object.getPrototypeOf(a) === Object.prototype);
+        if (bagAt >= 0) argNames.length = bagAt;
         const parsed = parseArgsForPineParams<any>(args, SECURITY_SIGNATURES, SECURITY_TYPES);
 
         // Slots filled via named-args bag may still contain wrapped [val, name] tuples
@@ -177,8 +182,9 @@ export function security(context: any) {
         // It identifies the expression's call-site so that secContext.params lookup
         // can find the per-bar evaluated values.
         const _expression_name = resolveSlotName('expression', SECURITY_SIGNATURES, argNames, parsed.expression);
-        const _gapsRaw = gapsSlot;
-        const _lookaheadRaw = lookaheadSlot;
+        // A named `gaps=`/`lookahead=` holding a variable arrives as its Series.
+        const _gapsRaw = gapsSlot instanceof Series ? gapsSlot.get(0) : gapsSlot;
+        const _lookaheadRaw = lookaheadSlot instanceof Series ? lookaheadSlot.get(0) : lookaheadSlot;
         // barmerge.gaps_off/on and barmerge.lookahead_off/on are string enums ('gaps_off', 'gaps_on', etc.)
         // Convert to boolean for correct behavior in findLTFContextIdx/findSecContextIdx
         const _gaps = _gapsRaw === true || _gapsRaw === 'gaps_on';
@@ -204,6 +210,17 @@ export function security(context: any) {
 
         if (ctxTimeframeMinutes === null || reqTimeframeMinutes === null) {
             throw new Error('Invalid timeframe');
+        }
+
+        // Strict lookahead: a higher-timeframe read with lookahead on sees the final values
+        // of the higher-timeframe bar in progress unless the transpiler proved the call
+        // site's expression is known at that bar's open (LookaheadSafety). Unknown sites
+        // (no expression name, untranspiled code) are refused too.
+        if (context.strictLookahead && _lookahead && reqTimeframeMinutes > ctxTimeframeMinutes) {
+            const site = typeof _expression_name === 'string' ? _expression_name.match(/p\d+$/)?.[0] : undefined;
+            if (!site || !context._lookaheadSafeExpressions.has(site)) {
+                throw new LookaheadLeakError(String(rawSymbol), _timeframe);
+            }
         }
 
         // Same-timeframe shortcut is only valid when the requested symbol is the

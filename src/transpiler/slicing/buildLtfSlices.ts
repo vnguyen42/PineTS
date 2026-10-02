@@ -203,11 +203,13 @@ function canonicalFnName(id: { name?: string; __pineName?: string } | string | n
 
 /**
  * Extract the user-function name from the first argument of a
- * `$.call(fnRef, id, …)` invocation. The codegen emits two shapes:
+ * `$.call(fnRef, id, …)` invocation. The codegen emits three shapes:
  *   - `$.call(fnName, "_fn0", …)`         — bare function reference
  *   - `$.call($.get(fnName, 0), "_fn0", …)` — via a `$.get` wrapper
- *     (function parameters bound to a Series of fn refs). Both must be
- *     recognized when locating runtime invocations of a user function.
+ *     (function parameters bound to a Series of fn refs)
+ *   - `$.call($.dotMethod($M_name, "name"), "_fn0", …)` — a method dot-call
+ *     on a receiver not known as a UDT instance.
+ * All must be recognized when locating runtime invocations of a user function.
  */
 function dollarCallRefName(arg0: any): string | null {
     if (!arg0 || typeof arg0 !== 'object') return null;
@@ -215,7 +217,7 @@ function dollarCallRefName(arg0: any): string | null {
     if (arg0.type === 'CallExpression' && arg0.callee?.type === 'MemberExpression') {
         const obj = arg0.callee.object;
         const prop = arg0.callee.property;
-        if (obj?.name === '$' && prop?.name === 'get' && arg0.arguments?.[0]?.type === 'Identifier') {
+        if (obj?.name === '$' && (prop?.name === 'get' || prop?.name === 'dotMethod') && arg0.arguments?.[0]?.type === 'Identifier') {
             return canonicalFnName(arg0.arguments[0].name);
         }
     }

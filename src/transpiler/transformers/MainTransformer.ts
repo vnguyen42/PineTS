@@ -70,14 +70,15 @@ export function propagateAsyncAwait(ast: any): void {
     }
 
     // Helper: extract function name from $.call() first argument
-    // Handles both: $.call(funcName, ...) and $.call($.get(funcName, 0), ...)
+    // Handles $.call(funcName, ...), $.call($.get(funcName, 0), ...) and the
+    // method dot-call shape $.call($.dotMethod($M_name, "name"), ...)
     function getCallTargetName(arg: any): string | null {
         if (!arg) return null;
         if (arg.type === 'Identifier') return canonicalFnName(arg);
         if (arg.type === 'CallExpression' &&
             arg.callee?.type === 'MemberExpression' &&
             arg.callee.object?.name === '$' &&
-            arg.callee.property?.name === 'get' &&
+            (arg.callee.property?.name === 'get' || arg.callee.property?.name === 'dotMethod') &&
             arg.arguments?.[0]?.type === 'Identifier') {
             return canonicalFnName(arg.arguments[0]);
         }

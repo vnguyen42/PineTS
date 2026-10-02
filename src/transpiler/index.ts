@@ -54,6 +54,7 @@ import { normalizeNativeImports } from './transformers/NormalizationTransformer'
 import { wrapInContextFunction } from './transformers/WrapperTransformer';
 import { transformNestedArrowFunctions, preProcessContextBoundVars, preProcessUdtRegistry, runAnalysisPass, renameMethodVariants, renameFunctionArityVariants, markExplicitQtyPrecisionFunctions } from './analysis/AnalysisPass';
 import { runTypeInferencePass } from './analysis/TypeInferencePass';
+import { collectLookaheadSafeExpressions } from './analysis/LookaheadSafety';
 import { runTransformationPass, transformEqualityChecks, propagateAsyncAwait } from './transformers/MainTransformer';
 import { extractPineScriptVersion, pineToJS } from './pineToJS/pineToJS.index';
 import { buildLtfSlices } from './slicing/buildLtfSlices';
@@ -289,6 +290,10 @@ export function transpile(source: string | Function, options: { debug: boolean; 
     }
     (mainFn as Function & { _strategyHistorySeries?: string[] })._strategyHistorySeries = scopeManager.getStrategyHistorySeries();
     (mainFn as Function & { _pineVersion: number | null })._pineVersion = pineVersion;
+    // Expression params of the request.security call sites that may run with
+    // lookahead_on on a higher timeframe without reading the future (see
+    // LookaheadSafety). Read by the runtime only under setStrictLookahead.
+    (mainFn as Function & { _lookaheadSafeExpressions: string[] })._lookaheadSafeExpressions = collectLookaheadSafeExpressions(ast);
     return mainFn;
 }
 

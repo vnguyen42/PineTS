@@ -6,6 +6,7 @@ import { Context } from './Context.class';
 import { Provider } from './marketData/Provider.class';
 import { Indicator } from './Indicator';
 import { PineRuntimeError } from './errors/PineRuntimeError';
+import { LookaheadLeakError } from './errors/LookaheadLeakError';
 
 // Provider classes for direct instantiation
 export { BaseProvider } from './marketData/BaseProvider';
@@ -21,6 +22,6 @@ export { aggregateCandles, selectSubTimeframe, getAggregationRatio } from './mar
 
 export { splitTickerModifier, stripTickerModifier, withTickerModifier } from './tickerModifier';
 
-export { PineTS, Context, Provider, Indicator, PineRuntimeError };
+export { PineTS, Context, Provider, Indicator, PineRuntimeError, LookaheadLeakError };
 export type { IPineInput, IPineProp, PineInputType, PineInputDisplay, PinePropType, PreparedScript } from './Indicator';
 export { INDICATOR_PROPS, STRATEGY_PROPS, propsForDeclaration } from './Indicator';
