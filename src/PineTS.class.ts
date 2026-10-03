@@ -1203,6 +1203,7 @@ export class PineTS {
         context.pineVersion = (transpiledFn as Function & { _pineVersion?: number | null })._pineVersion ?? context.pineVersion;
         context._strategyHistorySeries = (transpiledFn as Function & { _strategyHistorySeries?: string[] })._strategyHistorySeries;
         context._lookaheadSafeExpressions = new Set((transpiledFn as Function & { _lookaheadSafeExpressions?: string[] })._lookaheadSafeExpressions);
+        context._lookaheadSafeOtherSymbol = new Set((transpiledFn as Function & { _lookaheadSafeOtherSymbol?: string[] })._lookaheadSafeOtherSymbol);
 
         for (let i = startIdx; i < endIdx; i++) {
             context.idx = i;

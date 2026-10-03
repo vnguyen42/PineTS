@@ -294,6 +294,8 @@ export function transpile(source: string | Function, options: { debug: boolean; 
     // lookahead_on on a higher timeframe without reading the future (see
     // LookaheadSafety). Read by the runtime only under setStrictLookahead.
     (mainFn as Function & { _lookaheadSafeExpressions: string[] })._lookaheadSafeExpressions = collectLookaheadSafeExpressions(ast);
+    // The same for another symbol, where a bare `open` is not known at the chart bar's open.
+    (mainFn as Function & { _lookaheadSafeOtherSymbol: string[] })._lookaheadSafeOtherSymbol = collectLookaheadSafeExpressions(ast, false);
     return mainFn;
 }
 

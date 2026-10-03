@@ -119,7 +119,11 @@ function paramName(nameArg: Node): string | undefined {
     return /^'?(p\d+)'?$/.exec(text)?.[1];
 }
 
-/** A value known when the higher-timeframe bar opens. */
+/**
+ * A value known when the requested bar opens. `open` only when `trusted` has it: another symbol's
+ * bar opens at its window's nominal start, possibly before its first trade (an index's daily window
+ * at 00:00 UTC, first print at 08:15), so its `open` is not known at the chart bar's open.
+ */
 function isConfirmedValue(node: Node, trusted: Set<string>): boolean {
     if (node?.type === 'Identifier') return node.name === 'open' && trusted.has('open');
     if (isMember(node, 'time', '__value')) return trusted.has('time');
@@ -132,8 +136,13 @@ function isConfirmedValue(node: Node, trusted: Set<string>): boolean {
     return false;
 }
 
-export function collectLookaheadSafeExpressions(ast: Node): string[] {
+/**
+ * Expression params safe under lookahead_on. `withOpen: false` drops bare `open` (the set for
+ * another symbol under strict lookahead); `time` and `x[n]`, n ≥ 1, stay.
+ */
+export function collectLookaheadSafeExpressions(ast: Node, withOpen = true): string[] {
     const trusted = trustedBuiltins(ast);
+    if (!withOpen) trusted.delete('open');
     const params = new Map<string, Node>();
     walk(ast, (node) => {
         if (node.type === 'VariableDeclarator' && isIdentifier(node.id) && isParamCall(node.init)) {

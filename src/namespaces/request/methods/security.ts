@@ -224,12 +224,20 @@ export function security(context: any) {
         // secondary context, and vice versa on a standard chart.
         const reqParts = typeof _symbol === 'string' ? splitTickerModifier(_symbol) : { symbol: _symbol, modifier: null };
         const reqModifier = reqParts.modifier === 'standard' ? null : reqParts.modifier; // ";standard" ≡ no modifier
-        const isSameSymbol = !_symbol || _symbol === '' || (reqParts.symbol === ctxParts.symbol && reqModifier === chartModifier);
+        // A provider resolving qualified tickers decides whether one names the chart's symbol
+        // ("INDEX:COMP" on a COMP stock chart is the index COMP.IDX, not the chart); others compare
+        // the ticker without its exchange prefix.
+        const sameBase =
+            typeof context.source?.isChartTicker === 'function' && typeof resolvedSymbol === 'string' && resolvedSymbol !== ''
+                ? context.source.isChartTicker(splitTickerModifier(resolvedSymbol).symbol) === true
+                : reqParts.symbol === ctxParts.symbol;
+        const isSameSymbol = !_symbol || _symbol === '' || (sameBase && reqModifier === chartModifier);
         // Under strict lookahead, another symbol's bars need not line up with the chart's (other
         // sessions, weekends, late start, early end): they are aligned on bar close/open times
-        // (findOtherSymbolIdx) and lookahead on is guarded on every timeframe, the chart's included.
+        // (findOtherSymbolIdx) and lookahead on is guarded on every timeframe, the chart's included,
+        // without bare `open` (a bar's nominal start can precede its first trade).
         // A chart-type modifier alone (";heikinashi" of the chart symbol) keeps the chart's bar times.
-        const strictOtherSymbol = context.strictLookahead && !!_symbol && reqParts.symbol !== ctxParts.symbol;
+        const strictOtherSymbol = context.strictLookahead && !!_symbol && !sameBase;
 
         // Strict lookahead: a higher-timeframe (or other-symbol) read with lookahead on sees the
         // final values of the requested bar in progress unless the transpiler proved the call
@@ -237,7 +245,8 @@ export function security(context: any) {
         // (no expression name, untranspiled code) are refused too.
         if (context.strictLookahead && _lookahead && (reqTimeframeMinutes > ctxTimeframeMinutes || strictOtherSymbol)) {
             const site = typeof _expression_name === 'string' ? _expression_name.match(/p\d+$/)?.[0] : undefined;
-            if (!site || !context._lookaheadSafeExpressions.has(site)) {
+            const safe = strictOtherSymbol ? context._lookaheadSafeOtherSymbol : context._lookaheadSafeExpressions;
+            if (!site || !safe.has(site)) {
                 throw new LookaheadLeakError(String(rawSymbol), _timeframe);
             }
         }

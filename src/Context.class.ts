@@ -86,6 +86,8 @@ export class Context {
     public strictLookahead: boolean = false;
     /** Static expression-param names (`pN`) of request.security calls safe under lookahead_on. */
     public _lookaheadSafeExpressions: Set<string> = new Set();
+    /** The same for another symbol under strict lookahead: bare `open` excluded. */
+    public _lookaheadSafeOtherSymbol: Set<string> = new Set();
 
     public __maxLoops: number = 500000;
     public NA: any = NaN;

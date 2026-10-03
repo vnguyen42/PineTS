@@ -38,13 +38,19 @@ for (const b of stock) {
     } else stockDaily.push({ ...b });
 }
 
+// An index whose daily window opens at 00:00 UTC but whose first print (its `open`) is at 08:15:
+// a chart bar opening at 00:00 must not see that open.
+const index: Bar[] = Array.from({ length: 10 }, (_, day) => bar(START + day * DAY, START + (day + 1) * DAY, 20 + day));
+
 function provider(requested: string[]) {
     return {
         qualifiedTickers: true,
+        isChartTicker: (ticker: string) => ticker === 'EX:CHART' || ticker === 'CHART',
         configure() {},
         async getMarketData(ticker: string, timeframe: string) {
             requested.push(`${ticker}|${timeframe}`);
             if (ticker.endsWith('STK')) return (timeframe === 'D' ? stockDaily : stock).map((b) => ({ ...b }));
+            if (ticker.endsWith('IDX')) return index.map((b) => ({ ...b }));
             return chart.map((b) => ({ ...b }));
         },
         async getSymbolInfo(ticker: string) {
@@ -126,5 +132,29 @@ describe('strict lookahead, another symbol', () => {
     it("the chart's own Heikin-Ashi series keeps the chart's alignment and lookahead rule", async () => {
         const values = await run('v = request.security(ticker.heikinashi(syminfo.tickerid), "60", close, lookahead=barmerge.lookahead_on)');
         expect(values.filter(Number.isFinite).length).toBe(chart.length);
+    });
+
+    it('lookahead on with a bare `open` of another symbol is refused (its bar opens before its first print)', async () => {
+        await expect(run('v = request.security("EX:IDX", "D", open, lookahead=barmerge.lookahead_on)')).rejects.toBeInstanceOf(LookaheadLeakError);
+        await expect(run('v = request.security("EX:STK", "60", open, lookahead=barmerge.lookahead_on)')).rejects.toBeInstanceOf(LookaheadLeakError);
+        await expect(run('[v, w] = request.security("EX:IDX", "D", [open, close[1]], lookahead=barmerge.lookahead_on)')).rejects.toBeInstanceOf(LookaheadLeakError);
+        // `time` (the bar's nominal start) and `open[1]` stay served.
+        const times = await run('v = request.security("EX:IDX", "D", time, lookahead=barmerge.lookahead_on)');
+        expect(times).toEqual(chart.map((c) => index[last(index, 'openTime', c.openTime)].openTime));
+        const previous = await run('v = request.security("EX:IDX", "D", open[1], lookahead=barmerge.lookahead_on)');
+        expect(previous).toEqual(chart.map((c) => index[last(index, 'openTime', c.openTime) - 1]?.open ?? NaN));
+    });
+
+    it('the provider decides which qualified tickers name the chart symbol', async () => {
+        const requested: string[] = [];
+        // Same ticker, other exchange: another symbol for this provider (an index sharing a stock's ticker).
+        const values = await run('v = request.security("IDX:CHART", "60", close)', requested);
+        expect(requested).toContain('IDX:CHART|60');
+        expect(values).toEqual(chart.map((c) => c.close));
+        await expect(run('v = request.security("IDX:CHART", "60", close, lookahead=barmerge.lookahead_on)')).rejects.toBeInstanceOf(LookaheadLeakError);
+        // The chart's own tickerid keeps the same-symbol shortcut (no data request).
+        const own: string[] = [];
+        await run('v = request.security("EX:CHART", "60", close, lookahead=barmerge.lookahead_on)', own);
+        expect(own.filter((r) => r !== 'EX:CHART|60')).toEqual([]);
     });
 });
