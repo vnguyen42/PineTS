@@ -68,14 +68,11 @@ export class TableObject {
         this._deleted = false;
         this.merges = [];
 
-        // Initialize cells grid (rows × columns) with nulls
-        this.cells = [];
-        for (let r = 0; r < rows; r++) {
-            this.cells[r] = [];
-            for (let c = 0; c < columns; c++) {
-                this.cells[r][c] = null;
-            }
-        }
+        // Rows are allocated on their first write. A table created on every
+        // bar (`t := table.new(...)` outside `var`) keeps each bar's instance
+        // alive in the variable's history: a dense rows × columns grid per
+        // instance exhausted the heap (144 × 69 cells × 82k hourly bars).
+        this.cells = new Array(rows);
     }
 
     delete(): void {
@@ -84,8 +81,11 @@ export class TableObject {
 
     toPlotData(): any {
         // Deep-copy cells to avoid exposing internal mutable state
-        const cellsCopy = this.cells.map(row =>
-            row.map(cell => cell ? { ...cell } : null)
+        const cellsCopy = Array.from({ length: this.rows }, (_, r) =>
+            Array.from({ length: this.columns }, (_, c) => {
+                const cell = this.cells[r]?.[c];
+                return cell ? { ...cell } : null;
+            }),
         );
         return {
             id: this.id,
@@ -107,7 +107,7 @@ export class TableObject {
     setCell(column: number, row: number, props: Partial<TableCell>): void {
         if (row < 0 || row >= this.rows || column < 0 || column >= this.columns) return;
 
-        const existing = this.cells[row][column];
+        const existing = this.cells[row]?.[column] ?? null;
         if (existing && existing._merged && existing._merge_parent) {
             // Redirect to merge parent (guard against self-reference to prevent infinite recursion)
             const [pc, pr] = existing._merge_parent;
@@ -123,17 +123,17 @@ export class TableObject {
 
         const cell = existing || this._defaultCell();
         Object.assign(cell, props);
-        this.cells[row][column] = cell;
+        (this.cells[row] ??= [])[column] = cell;
     }
 
     getCell(column: number, row: number): TableCell | null {
         if (row < 0 || row >= this.rows || column < 0 || column >= this.columns) return null;
-        return this.cells[row][column];
+        return this.cells[row]?.[column] ?? null;
     }
 
     clearCell(column: number, row: number): void {
         if (row < 0 || row >= this.rows || column < 0 || column >= this.columns) return;
-        this.cells[row][column] = null;
+        if (this.cells[row]) this.cells[row][column] = null;
     }
 
     // ── Helper injection (mirrors PineArrayObject pattern) ──────

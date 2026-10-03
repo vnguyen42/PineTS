@@ -2326,10 +2326,12 @@ export function transformCallExpression(node: any, scopeManager: ScopeManager, n
         const isChainedPropertyMethod = _obj.type === 'MemberExpression' && !isReceiverUdtInstance;
 
         // A user method called with dot syntax on a receiver not known as a UDT instance
-        // (array, matrix, map, primitive, function parameter, call result) goes through
-        // `$.dotMethod`, which calls the receiver's own built-in method of that name when it
-        // has one and the user method otherwise. A bare `x?.name?.()` would silently skip it.
-        const isDynamicReceiver = !isReceiverUdtInstance && (_obj.type === 'Identifier' || _obj.type === 'CallExpression');
+        // (array, matrix, map, primitive, function parameter, call result, a parenthesized
+        // ternary `(c ? a : b).name()`) goes through `$.dotMethod`, which calls the receiver's
+        // own built-in method of that name when it has one and the user method otherwise. A
+        // bare `x?.name?.()` would silently skip it.
+        const isDynamicReceiver = !isReceiverUdtInstance &&
+            (_obj.type === 'Identifier' || _obj.type === 'CallExpression' || _obj.type === 'ConditionalExpression');
         const isUdtRetarget = !isBuiltinMethodOnParam && !isChainedPropertyMethod && isReceiverUdtInstance;
         if (isUserFunction && isUserMethod && !scopeManager.isContextBound(methodName) && (isUdtRetarget || isDynamicReceiver)) {
             // It's a user variable/function.
@@ -2353,9 +2355,10 @@ export function transformCallExpression(node: any, scopeManager: ScopeManager, n
                  // Use transformIdentifier logic but we need it as an argument
                  // transformFunctionArgument handles identifiers correctly
                  transformedObj = transformFunctionArgument(obj, CONTEXT_NAME, scopeManager);
-            } else if (obj.type === 'CallExpression') {
-                 // If object is a call expression, transform it first
-                 transformCallExpression(obj, scopeManager);
+            } else if (obj.type === 'CallExpression' || obj.type === 'ConditionalExpression') {
+                 // A call or ternary receiver is evaluated like a function argument
+                 // (a ternary's identifiers and calls are lowered, the value hoisted).
+                 if (obj.type === 'CallExpression') transformCallExpression(obj, scopeManager);
                  transformedObj = transformFunctionArgument(obj, CONTEXT_NAME, scopeManager);
             } else if (obj.type === 'MemberExpression') {
                  // UDT-field receiver (`this.schema.init(…)`): the callee-object

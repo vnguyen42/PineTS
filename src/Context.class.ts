@@ -56,6 +56,21 @@ const BUILTIN_RECEIVERS: [string, Function][] = [
     ['polyline', PolylineObject],
 ];
 
+/** A user-function call's local context (`$$`), one per call path. */
+interface LocalContext {
+    id: string;
+    let: Record<string, unknown>;
+    const: Record<string, unknown>;
+    var: Record<string, unknown>;
+}
+
+/** One interned call path: its `|`-joined id string, its lctx entry once created, its callees. */
+interface CallPathNode {
+    path: string;
+    ctx: LocalContext | null;
+    children: Map<string, CallPathNode>;
+}
+
 export class Context {
     public data: any = {
         open: new Series([]),
@@ -898,18 +913,27 @@ export class Context {
      * must keep state independent per path. Keying lctx by the path (rather than
      * the immediate site id) makes `$$.var.*` slots and `$$.id + '_taN'` ta
      * callsite ids correctly path-scoped without any transpiler changes.
+     *
+     * Paths are interned in a trie (one node per distinct path, children keyed
+     * by call-site id) that also caches the path's lctx entry: a call no longer
+     * builds and hashes its whole path string, which grows with the call depth.
      */
-    private _pathStack: string[] = [];
+    private _pathRoot: CallPathNode = { path: '', ctx: null, children: new Map() };
+    private _pathStack: CallPathNode[] = [];
 
     /**
      * Pushes a call ID onto the stack
      * @param id - The call ID
      */
     public pushId(id: string) {
-        const parent = this._pathStack.length > 0 ? this._pathStack[this._pathStack.length - 1] : '';
-        const path = parent ? parent + '|' + id : id;
+        const parent = this._pathStack.length > 0 ? this._pathStack[this._pathStack.length - 1] : this._pathRoot;
+        let node = parent.children.get(id);
+        if (!node) {
+            node = { path: parent.path ? parent.path + '|' + id : id, ctx: null, children: new Map() };
+            parent.children.set(id, node);
+        }
         this._callStack.push(id);
-        this._pathStack.push(path);
+        this._pathStack.push(node);
     }
 
     /**
@@ -925,7 +949,7 @@ export class Context {
      * of the stack. Used as the lctx key for the current function call.
      */
     public peekId() {
-        return this._pathStack.length > 0 ? this._pathStack[this._pathStack.length - 1] : '';
+        return this._pathStack.length > 0 ? this._pathStack[this._pathStack.length - 1].path : '';
     }
 
     /**
@@ -933,19 +957,21 @@ export class Context {
      * Creates it if it doesn't exist.
      */
     public peekCtx() {
-        const id = this.peekId();
-        if (!id) return this; // Fallback to global context if not in a function call
+        const node = this._pathStack.length > 0 ? this._pathStack[this._pathStack.length - 1] : null;
+        if (!node || !node.path) return this; // Fallback to global context if not in a function call
+        if (node.ctx) return node.ctx;
 
-        let ctx = this.lctx.get(id);
+        let ctx = this.lctx.get(node.path);
         if (!ctx) {
             ctx = {
-                id: id,
+                id: node.path,
                 let: {},
                 const: {},
                 var: {},
             };
-            this.lctx.set(id, ctx);
+            this.lctx.set(node.path, ctx);
         }
+        node.ctx = ctx;
         return ctx;
     }
 

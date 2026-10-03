@@ -991,6 +991,16 @@ export class Parser {
                 paramType = (paramType || '') + this.advance().value;
             }
 
+            // Dotted type: chart.point p, chart.point[] pts, lib.Type t
+            if (
+                this.peek().type === TokenType.IDENTIFIER &&
+                this.peek(1).type === TokenType.DOT &&
+                this.peek(2).type === TokenType.IDENTIFIER
+            ) {
+                const dottedType = this.parseTypeExpression();
+                paramType = paramType ? paramType + ' ' + dottedType : dottedType;
+            }
+
             // Handle generic type: array<float>, map<string, float>, etc.
             if (
                 this.peek().type === TokenType.IDENTIFIER &&
@@ -1092,6 +1102,16 @@ export class Parser {
                     paramType += ' ';
                 }
                 paramType = (paramType || '') + this.advance().value;
+            }
+
+            // Dotted type: chart.point p, chart.point[] pts, lib.Type t
+            if (
+                this.peek().type === TokenType.IDENTIFIER &&
+                this.peek(1).type === TokenType.DOT &&
+                this.peek(2).type === TokenType.IDENTIFIER
+            ) {
+                const dottedType = this.parseTypeExpression();
+                paramType = paramType ? paramType + ' ' + dottedType : dottedType;
             }
 
             // Handle generic type: array<float>, map<string, float>, etc.
