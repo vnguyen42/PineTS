@@ -511,6 +511,11 @@ export interface StrategyState {
     // varies per bar (split-adjusted history) keeps a held bracket's distance.
     _entry_ticks?: Map<number, number>;
 
+    // Internal: quantity of the reversing order being filled when the
+    // commission has host bounds (min/max): its exit and entry legs share one
+    // bounded fee pro rata (executeOrder). Undefined outside that fill.
+    _bounded_order_qty?: number;
+
     // Internal: per-bar intrabar-sequencing state for
     // `calc_on_order_fills = true` (see CofBarState). Set at the start of
     // each bar by the execution loop, null outside the COF processing.

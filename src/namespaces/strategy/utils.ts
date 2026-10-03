@@ -887,7 +887,7 @@ export function calculateOrderQty(context: any, specifiedQty: number | undefined
             // fee itself. With fee(q) = min(max(c·q, min), max% · notional), the
             // largest q whose notional plus fee fits the position value is
             // max(min((N − min) / unit, N / (unit + c)), N / (unit · (1 + max%))).
-            if (commissionRate > 0 || perContract > 0) {
+            if (boundedCommission(strategy.config)) {
                 const minFee = Number(strategy.config.commission_min) || 0;
                 const maxPct = Number(strategy.config.commission_max_pct) || 0;
                 const unit = sizingPrice * pointValue;
@@ -1747,12 +1747,14 @@ export function cashPerContract(config: StrategyConfig | undefined, tick: number
  * Host bounds (StrategyConfig.commission_min / commission_max_pct, percent and
  * cash_per_contract only): at least the minimum, then at most max_pct % of the
  * leg notional (the maximum wins when it is below the minimum, as IBKR assesses it).
+ * A minimum also applies with a zero rate (a flat fee per order). Callers bound
+ * a whole order once (`qty` = the order's quantity) and share it pro rata.
  * `tick` is the fill bar's syminfo.mintick (see cashPerContract).
  */
 export function legCommission(config: StrategyConfig | undefined, qty: number, price: number, pointValue: number, tick: number | undefined): number {
     const type = config?.commission_type ?? 'percent';
     const value = config?.commission_value ?? 0;
-    if (!value || value === 0) return 0;
+    if (!value && !boundedCommission(config)) return 0;
     let fee: number;
     switch (type) {
         case 'percent':
@@ -1773,6 +1775,13 @@ export function legCommission(config: StrategyConfig | undefined, qty: number, p
     if (min > 0) fee = Math.max(fee, min);
     if (maxPct > 0) fee = Math.min(fee, Math.abs(qty) * price * pointValue * (maxPct / 100));
     return fee;
+}
+
+/** The config's commission has host bounds (min/max), so it is charged once per order. */
+export function boundedCommission(config: StrategyConfig | undefined): boolean {
+    const type = config?.commission_type ?? 'percent';
+    return (type === 'percent' || type === 'cash_per_contract')
+        && ((Number(config?.commission_min) || 0) > 0 || (Number(config?.commission_max_pct) || 0) > 0);
 }
 
 /**
@@ -1931,7 +1940,8 @@ export function openTrade(
     // matching TV's 50/50 split of the order's flat fee between the two legs.
     const commTypeOpen = strategy.config.commission_type ?? 'percent';
     const halveFlat = isReversalOpen && commTypeOpen === 'cash_per_order';
-    const rawEntryCommission = legCommission(strategy.config, qty, price, context.pine?.syminfo?.pointvalue ?? 1, context.pine?.syminfo?.mintick);
+    const orderQty = boundedCommission(strategy.config) ? (strategy._bounded_order_qty ?? qty) : qty;
+    const rawEntryCommission = legCommission(strategy.config, orderQty, price, context.pine?.syminfo?.pointvalue ?? 1, context.pine?.syminfo?.mintick) * (qty / orderQty);
     const entryCommission = halveFlat ? rawEntryCommission / 2 : rawEntryCommission;
 
     const trade: Trade = {
@@ -2118,6 +2128,9 @@ function executeOrder(
         // half-charge in closePartialPosition; the new openTrade is told
         // separately to apply the same half-charge.
         const isReversal = remainingQty > 0;
+        // A bounded commission (host min/max) applies once to the whole
+        // reversing order: its exit and entry legs share one fee pro rata.
+        if (isReversal && boundedCommission(strategy.config)) strategy._bounded_order_qty = order.qty;
         closePartialPosition(context, qtyToClose, fillPrice, fillTime, {
             exitId: order.id,
             exitComment: order.comment,
@@ -2140,6 +2153,7 @@ function executeOrder(
                 openTrade(context, order.id, direction, remainingQty, fillPrice, fillTime, order.comment, /* isReversalOpen */ true, entryPathPosition);
             }
         }
+        strategy._bounded_order_qty = undefined;
     } else {
         // We are increasing position or opening fresh
         //
@@ -2221,11 +2235,16 @@ export function closePartialPosition(context: any, qtyToClose: number, exitPrice
     const strategy: StrategyState = context.strategy;
     const pointValue = context.pine?.syminfo?.pointvalue ?? 1;
     // One close order may span several FIFO lots. A flat commission belongs
-    // to the order, so distribute it over the quantity actually closed.
+    // to the order, so distribute it over the quantity actually closed; a
+    // bounded fee (host commission_min / commission_max_pct) is likewise
+    // bounded once for the whole order (a reversal: exit + entry, see
+    // executeOrder's _bounded_order_qty) and shared pro rata.
     const commType = strategy.config.commission_type ?? 'percent';
-    const totalClosingQty = commType === 'cash_per_order'
+    const bounded = boundedCommission(strategy.config);
+    const totalClosingQty = commType === 'cash_per_order' || bounded
         ? Math.min(qtyToClose, strategy.opentrades.reduce((sum, trade) => sum + Math.abs(trade.size), 0))
         : 0;
+    const orderQty = strategy._bounded_order_qty ?? totalClosingQty;
     let remainingQty = qtyToClose;
     const remainingActivation = activationSegmentsAfterClose(
         strategy.opentrades,
@@ -2263,8 +2282,10 @@ export function closePartialPosition(context: any, qtyToClose: number, exitPrice
         // pair shares the single order's fee pro-rata — recomputing per part
         // would charge the flat fee TWICE (review L1 round 2).
         const halveFlat = closeInfo?.isImplicitReversal && commType === 'cash_per_order';
-        const rawExitCommission = legCommission(strategy.config, qtyClosing, exitPrice, pointValue, context.pine?.syminfo?.mintick)
-            * (commType === 'cash_per_order' ? qtyClosing / totalClosingQty : 1);
+        const rawExitCommission = bounded
+            ? legCommission(strategy.config, orderQty, exitPrice, pointValue, context.pine?.syminfo?.mintick) * (qtyClosing / orderQty)
+            : legCommission(strategy.config, qtyClosing, exitPrice, pointValue, context.pine?.syminfo?.mintick)
+                * (commType === 'cash_per_order' ? qtyClosing / totalClosingQty : 1);
         const exitCommissionTotal = halveFlat ? rawExitCommission / 2 : rawExitCommission;
 
         const emitClosedRow = (sizeParts: number) => {

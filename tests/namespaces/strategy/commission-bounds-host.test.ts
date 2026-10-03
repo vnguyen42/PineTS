@@ -121,4 +121,61 @@ plot(close)`;
         // 100 adjusted contracts = 50 real shares × 0.005 per leg, two legs.
         expect(ctx.strategy.closedtrades[0].commission).toBeCloseTo(0.5, 10);
     });
+
+    it('bounds a reversal once: the exit and entry legs of one order share one minimum', async () => {
+        // Long 10 on bar 1, then a short entry of 10 reverses it on bar 2 (one order of 20 shares):
+        // IBKR bills that order max(0.005 × 20, 1) = USD 1, shared 0.50 / 0.50.
+        const source = `
+//@version=6
+strategy('rev', overlay=true, default_qty_type=strategy.fixed, default_qty_value=10, initial_capital=100000)
+if bar_index == 0
+    strategy.entry('L', strategy.long)
+if bar_index == 1
+    strategy.entry('S', strategy.short)
+plot(close)`;
+        const ind = new Indicator(source);
+        ind.prop.commission_type = 'cash_per_contract';
+        ind.prop.commission_value = 0.005;
+        ind.prop.commission_min = 1;
+        ind.prop.commission_max_pct = 1;
+        const ctx = await new PineTS(candles(25)).run(ind);
+        expect(ctx.strategy.closedtrades).toHaveLength(1);
+        expect(ctx.strategy.opentrades).toHaveLength(1);
+        // Long: its own entry order (USD 1) + half of the reversing order.
+        expect(ctx.strategy.closedtrades[0].commission).toBeCloseTo(1.5, 10);
+        expect(ctx.strategy.opentrades[0].commission).toBeCloseTo(0.5, 10);
+    });
+
+    it('bounds a close of several pyramided lots once', async () => {
+        // Three entries of 5 shares (three orders, USD 1 each), one strategy.close of 15 shares (USD 1).
+        const source = `
+//@version=6
+strategy('pyr', overlay=true, default_qty_type=strategy.fixed, default_qty_value=5, pyramiding=3, initial_capital=100000)
+if bar_index <= 2
+    strategy.entry('L', strategy.long)
+if bar_index == 3
+    strategy.close('L')
+plot(close)`;
+        const ind = new Indicator(source);
+        ind.prop.commission_type = 'cash_per_contract';
+        ind.prop.commission_value = 0.005;
+        ind.prop.commission_min = 1;
+        ind.prop.commission_max_pct = 1;
+        const bars = [...candles(25), ...candles(25).map((bar, i) => ({ ...bar, openTime: bar.openTime + (4 + i) * 86_400_000, closeTime: bar.closeTime + (4 + i) * 86_400_000 }))];
+        const ctx = await new PineTS(bars).run(ind);
+        const rows = ctx.strategy.closedtrades;
+        expect(rows).toHaveLength(3);
+        const total = rows.reduce((sum: number, trade: { commission: number }) => sum + trade.commission, 0);
+        expect(total).toBeCloseTo(4, 10);
+        for (const row of rows) expect(row.commission).toBeCloseTo(1 + 1 / 3, 10);
+    });
+
+    it('charges the minimum as a flat fee per order when the rate is 0', async () => {
+        const ind = new Indicator(fixedQty(100));
+        ind.prop.commission_type = 'percent';
+        ind.prop.commission_value = 0;
+        ind.prop.commission_min = 5;
+        const ctx = await new PineTS(candles(25)).run(ind);
+        expect(ctx.strategy.closedtrades[0].commission).toBeCloseTo(10, 10);
+    });
 });
