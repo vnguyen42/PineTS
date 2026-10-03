@@ -27,6 +27,22 @@ export interface StrategyConfig {
     slippage?: number;
     commission_type?: string;
     commission_value?: number;
+    /**
+     * Host extension, not a Pine argument (set through `Indicator.prop`): per-fill bounds of a
+     * `percent` or `cash_per_contract` commission, as brokers publish them (e.g. IBKR Pro Fixed:
+     * USD 0.005 per share, minimum USD 1, maximum 1 % of the trade value). The minimum is in the
+     * account currency; the maximum is a percent of the fill's value and wins over the minimum
+     * (IBKR assesses the maximum when it is below the minimum). 0 or absent = no bound.
+     */
+    commission_min?: number;
+    commission_max_pct?: number;
+    /**
+     * Host extension: the syminfo.mintick at which a cash_per_contract commission_value is
+     * quoted (e.g. 0.01 for US stocks). On split-adjusted history, where the host's
+     * syminfo.mintick follows the splits, the fee per adjusted contract scales by
+     * mintick / basis so it stays a fee per real share. 0 or absent = no scaling.
+     */
+    commission_tick_basis?: number;
     process_orders_on_close?: boolean;
     close_entries_rule?: string;
     margin_long?: number;

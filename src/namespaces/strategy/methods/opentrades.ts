@@ -2,6 +2,7 @@
 // Copyright (C) 2026 LuxAlgo
 
 import { Trade } from '../types';
+import { legCommission } from '../utils';
 
 /**
  * Pine's `strategy.opentrades` mirrors strategy.closedtrades' dual-role
@@ -44,26 +45,6 @@ export function opentrades(context: any) {
         // 1 for crypto/forex; can be >1 for futures (e.g. $50 per point on ES).
         const pointValue: number = context.pine?.syminfo?.pointvalue ?? 1;
 
-        // Helper: hypothetical exit commission if the trade closed right now
-        // at current price. TV's open-trade profit deducts BOTH the entry
-        // commission (already charged on trade.commission) AND this
-        // hypothetical exit commission, so profit reflects "what would I
-        // realize if I closed at this price".
-        const hypotheticalExitComm = (t: Trade, cp: number): number => {
-            const cfg = context.strategy?.config;
-            const type = cfg?.commission_type ?? 'percent';
-            const value = cfg?.commission_value ?? 0;
-            if (!value) return 0;
-            const qty = Math.abs(t.size);
-            switch (type) {
-                // Notional = qty × price × pointValue, commission = value% of it.
-                case 'percent':           return qty * cp * pointValue * (value / 100);
-                case 'cash_per_contract': return qty * value;
-                case 'cash_per_order':    return value;
-                default: return 0;
-            }
-        };
-
         // Per-trade cost-basis denominator for the * _percent getters.
         // TV uses entry notional + entry commission (the trade's true cost
         // basis), not just notional — the formula in the Pine docs
@@ -78,7 +59,10 @@ export function opentrades(context: any) {
             if (!Number.isFinite(cp)) return NaN;
             const dir = Math.sign(t.size);
             const priceChange = dir === 1 ? cp - t.entry_price : t.entry_price - cp;
-            return priceChange * Math.abs(t.size) * pointValue - (t.commission ?? 0) - hypotheticalExitComm(t, cp);
+            // Hypothetical exit commission if the trade closed right now at the
+            // current price: TV's open-trade profit deducts BOTH the entry
+            // commission (already charged on trade.commission) AND this exit leg.
+            return priceChange * Math.abs(t.size) * pointValue - (t.commission ?? 0) - legCommission(context.strategy?.config, t.size, cp, pointValue, context.pine?.syminfo?.mintick);
         };
         result.profit_percent = (i: any) => {
             const t = at(i);

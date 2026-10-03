@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright (C) 2026 LuxAlgo
 
-import { Order, StrategyState, Trade } from './types';
+import { Order, StrategyConfig, StrategyState, Trade } from './types';
 import { Series } from '../../Series';
 import { getDatePartsInTimezone } from '../Time';
 import { defaultStrategyMargin } from './defaults';
@@ -851,12 +851,12 @@ export function calculateOrderQty(context: any, specifiedQty: number | undefined
             const commissionReserve = strategy.config.commission_type === 'cash_per_order'
                 ? Number(strategy.config.commission_value) || 0
                 : 0;
-            const cashPerContract = strategy.config.commission_type === 'cash_per_contract'
-                ? Number(strategy.config.commission_value) || 0
+            const perContract = strategy.config.commission_type === 'cash_per_contract'
+                ? cashPerContract(strategy.config, context.pine?.syminfo?.mintick)
                 : 0;
             const positionValue = convertAccountToSymbol(context, ((sizingEquity + accountCurrencyResidual) * qtyValue) / 100 - commissionReserve, sizingTimeMs, 'identity');
             // VIN-B-2096: cash_per_contract is an amount per contract with no
-            // pointValue factor (same unit contract as computeLegCommission),
+            // pointValue factor (same unit contract as legCommission),
             // so it belongs to the per-contract cost of the denominator:
             // rawQty = N / (price + c) is directly proved on 2096 SEIUSDT
             // (1000/(0.1501+0.1) = 3998.400, 190/190).
@@ -872,7 +872,7 @@ export function calculateOrderQty(context: any, specifiedQty: number | undefined
             //    and without a host FX series. A TV capture combining
             //    cash_per_contract with a non-account symbol currency is
             //    required to decide it.
-            const commissionPerContract = convertAccountToSymbol(context, cashPerContract, sizingTimeMs, 'identity');
+            const commissionPerContract = convertAccountToSymbol(context, perContract, sizingTimeMs, 'identity');
             // VIN-2205: the equity notional is converted to CONTRACTS at the
             // symbol's contract multiplier. Futures price in units of
             // pointvalue × price (NYMEX:CL1! pointvalue=1000: TV computes
@@ -883,6 +883,19 @@ export function calculateOrderQty(context: any, specifiedQty: number | undefined
             // strategy.default_entry_qty both share this function.
             const pointValue = context.pine?.syminfo?.pointvalue ?? 1;
             rawQty = positionValue / (sizingPrice * pointValue * (1 + commissionRate) + commissionPerContract);
+            // Host commission bounds (legCommission): the reserve is the bounded
+            // fee itself. With fee(q) = min(max(c·q, min), max% · notional), the
+            // largest q whose notional plus fee fits the position value is
+            // max(min((N − min) / unit, N / (unit + c)), N / (unit · (1 + max%))).
+            if (commissionRate > 0 || perContract > 0) {
+                const minFee = Number(strategy.config.commission_min) || 0;
+                const maxPct = Number(strategy.config.commission_max_pct) || 0;
+                const unit = sizingPrice * pointValue;
+                if (minFee > 0) {
+                    rawQty = Math.min(rawQty, Math.max(0, (positionValue - convertAccountToSymbol(context, minFee, sizingTimeMs, 'identity')) / unit));
+                }
+                if (maxPct > 0) rawQty = Math.max(rawQty, positionValue / (unit * (1 + maxPct / 100)));
+            }
             qtyPrecision = PERCENT_QTY_PRECISION;
             // VIN-95: TV truncates percent_of_equity quantities at the same
             // instrument qty step as cash (integer shares on stocks: a 0.41
@@ -1711,31 +1724,55 @@ export function parseEntryDirection(raw: unknown): number {
 }
 
 /**
- * Charge commission for one fill leg (entry OR exit) given the qty filled and
- * the price at fill. Returns the dollar amount to deduct.
+ * A cash_per_contract commission per contract at a bar whose syminfo.mintick is `tick`.
+ * Host extension (StrategyConfig.commission_tick_basis): on split-adjusted history the host's
+ * syminfo.mintick follows the splits (the real tick divided by the later splits), and so does a
+ * contract, so a fee set per real share at `commission_tick_basis` scales by tick / basis.
+ * Without a basis the value applies as is.
+ */
+export function cashPerContract(config: StrategyConfig | undefined, tick: number | undefined): number {
+    const value = Number(config?.commission_value) || 0;
+    const basis = Number(config?.commission_tick_basis) || 0;
+    return basis > 0 && tick !== undefined && tick > 0 ? value * (tick / basis) : value;
+}
+
+/**
+ * Commission of one fill leg of `qty` at `price` under `config`, in account currency.
  *
  * Pine commission types:
  *   - strategy.commission.percent          : commission_value % of leg notional
  *   - strategy.commission.cash_per_contract: commission_value per contract filled
  *   - strategy.commission.cash_per_order   : commission_value flat per fill leg
+ *
+ * Host bounds (StrategyConfig.commission_min / commission_max_pct, percent and
+ * cash_per_contract only): at least the minimum, then at most max_pct % of the
+ * leg notional (the maximum wins when it is below the minimum, as IBKR assesses it).
+ * `tick` is the fill bar's syminfo.mintick (see cashPerContract).
  */
-function computeLegCommission(context: any, strategy: StrategyState, qty: number, price: number): number {
-    const type = strategy.config.commission_type ?? 'percent';
-    const value = strategy.config.commission_value ?? 0;
+export function legCommission(config: StrategyConfig | undefined, qty: number, price: number, pointValue: number, tick: number | undefined): number {
+    const type = config?.commission_type ?? 'percent';
+    const value = config?.commission_value ?? 0;
     if (!value || value === 0) return 0;
-    const pointValue = context.pine?.syminfo?.pointvalue ?? 1;
+    let fee: number;
     switch (type) {
         case 'percent':
             // Notional = qty × price × pointValue, commission is value% of it.
-            return Math.abs(qty) * price * pointValue * (value / 100);
+            fee = Math.abs(qty) * price * pointValue * (value / 100);
+            break;
         case 'cash_per_contract':
             // value is in account currency per contract — no pointValue factor.
-            return Math.abs(qty) * value;
+            fee = Math.abs(qty) * cashPerContract(config, tick);
+            break;
         case 'cash_per_order':
             return value;
         default:
             return 0;
     }
+    const min = Number(config?.commission_min) || 0;
+    const maxPct = Number(config?.commission_max_pct) || 0;
+    if (min > 0) fee = Math.max(fee, min);
+    if (maxPct > 0) fee = Math.min(fee, Math.abs(qty) * price * pointValue * (maxPct / 100));
+    return fee;
 }
 
 /**
@@ -1894,7 +1931,7 @@ export function openTrade(
     // matching TV's 50/50 split of the order's flat fee between the two legs.
     const commTypeOpen = strategy.config.commission_type ?? 'percent';
     const halveFlat = isReversalOpen && commTypeOpen === 'cash_per_order';
-    const rawEntryCommission = computeLegCommission(context, strategy, qty, price);
+    const rawEntryCommission = legCommission(strategy.config, qty, price, context.pine?.syminfo?.pointvalue ?? 1, context.pine?.syminfo?.mintick);
     const entryCommission = halveFlat ? rawEntryCommission / 2 : rawEntryCommission;
 
     const trade: Trade = {
@@ -2226,7 +2263,7 @@ export function closePartialPosition(context: any, qtyToClose: number, exitPrice
         // pair shares the single order's fee pro-rata — recomputing per part
         // would charge the flat fee TWICE (review L1 round 2).
         const halveFlat = closeInfo?.isImplicitReversal && commType === 'cash_per_order';
-        const rawExitCommission = computeLegCommission(context, strategy, qtyClosing, exitPrice)
+        const rawExitCommission = legCommission(strategy.config, qtyClosing, exitPrice, pointValue, context.pine?.syminfo?.mintick)
             * (commType === 'cash_per_order' ? qtyClosing / totalClosingQty : 1);
         const exitCommissionTotal = halveFlat ? rawExitCommission / 2 : rawExitCommission;
 

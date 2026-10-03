@@ -128,6 +128,14 @@ export const STRATEGY_PROPS: IPineProp[] = [
     // >= 0 — commission per leg in units determined by commission_type
     { name: 'commission_value', type: 'float', defval: 0, minval: 0, mutable: true, appliesTo: 'strategy' },
 
+    // Host extensions (no Pine argument): per-fill bounds of a percent / cash_per_contract
+    // commission — >= 0 minimum in account currency, 0..100 maximum as % of the fill value —
+    // and the syminfo.mintick a cash_per_contract value is quoted at (split-adjusted history).
+    // 0 = no bound / no scaling (see StrategyConfig.commission_min, commission_tick_basis).
+    { name: 'commission_min', type: 'float', defval: 0, minval: 0, mutable: true, appliesTo: 'strategy' },
+    { name: 'commission_max_pct', type: 'float', defval: 0, minval: 0, maxval: 100, mutable: true, appliesTo: 'strategy' },
+    { name: 'commission_tick_basis', type: 'float', defval: 0, minval: 0, mutable: true, appliesTo: 'strategy' },
+
     // true | false — execute orders after each bar closes
     { name: 'process_orders_on_close', type: 'bool', defval: false, mutable: true, appliesTo: 'strategy' },
 
