@@ -435,6 +435,71 @@ function comparePathPositions(left: IntrabarPathPosition, right: IntrabarPathPos
         || left.distanceAlongSegment - right.distanceAlongSegment;
 }
 
+/** Prices of the assumed path's points (extremes, close) strictly after `position`. */
+function pathPricesAfter(path: readonly number[], position: IntrabarPathPosition): number[] {
+    const prices: number[] = [];
+    for (let point = 1; point < path.length; point++) {
+        if (comparePathPositions({ pathSegment: point - 1, distanceAlongSegment: 1 }, position) > 0) prices.push(path[point]);
+    }
+    return prices;
+}
+
+/** The execution-context fields the margin-path helpers read. */
+interface MarginPathContext {
+    idx: number;
+    strategy?: StrategyState;
+    data: { open: unknown; high: unknown; low: unknown; close: unknown };
+}
+
+function currentBarMarginPath(context: MarginPathContext): NonNullable<StrategyState['_bar_margin_path']> | null {
+    const state = context.strategy?._bar_margin_path;
+    return state && state.bar === context.idx ? state : null;
+}
+
+/**
+ * Margin checkpoints that precede the bar's first intrabar entry fill,
+ * evaluated on the position held before it (outside COF). `beforeExits`
+ * runs the open and an adverse-first extreme, `afterExits` the extreme of
+ * a favorable-first bar — the same order relative to exit fills as the
+ * bar-level checkpoints in the execution loop.
+ */
+function checkMarginBeforeIntrabarFill(context: MarginPathContext, fillPosition: IntrabarPathPosition, stage: 'beforeExits' | 'afterExits'): void {
+    const state = currentBarMarginPath(context);
+    if (!state || state.entry) return;
+    if (stage === 'beforeExits' && !state.openChecked) {
+        processMarginCall(context, 'open');
+        state.openChecked = true;
+    }
+    if (state.extremeChecked || !context.strategy?.position_size) return;
+    const adverseFirst = isAdverseFirstBar(context);
+    if (adverseFirst !== (stage === 'beforeExits')) return;
+    const extremePosition = { pathSegment: adverseFirst ? 0 : 1, distanceAlongSegment: 1 };
+    if (comparePathPositions(extremePosition, fillPosition) >= 0) return;
+    processMarginCall(context, 'extreme');
+    state.extremeChecked = true;
+}
+
+/**
+ * Whether the bar's adverse margin checkpoint precedes its exit fills
+ * (outside COF). After an intrabar entry, the checkpoint is the worst path
+ * point after that fill: before exits when it is the very next point.
+ */
+export function marginExtremeBeforeExits(context: MarginPathContext): boolean {
+    const state = currentBarMarginPath(context);
+    if (!state?.entry) return isAdverseFirstBar(context);
+    const dir = Math.sign(context.strategy?.position_size ?? 0);
+    if (dir === 0) return false;
+    const after = pathPricesAfter(assumedIntrabarPath(
+        Series.from(context.data.open).get(0),
+        Series.from(context.data.high).get(0),
+        Series.from(context.data.low).get(0),
+        Series.from(context.data.close).get(0),
+    ), state.entry);
+    if (after.length === 0) return false;
+    const worst = dir === 1 ? Math.min(...after) : Math.max(...after);
+    return after[0] === worst;
+}
+
 /**
  * Find the first point satisfying a monotonic price condition after `start`.
  * A segment of -1 denotes the bar's open before any intrabar movement.
@@ -943,6 +1008,12 @@ export function processStrategyOrders(context: any, phase: 'open' | 'close' = 'o
     // processed once at that bar's close.
     const processOnClose = strategy.config.process_orders_on_close === true;
     const closePhase = phase === 'close' && processOnClose;
+    // Outside COF the bar's fills follow the assumed path in one pass; the
+    // margin checkpoints must see the position each path point held.
+    const tracksMarginPath = !usesIntrabarPath && phase === 'open' && !reversalEntriesOnly;
+    if (tracksMarginPath) {
+        strategy._bar_margin_path = { bar: context.idx, openChecked: false, extremeChecked: false, entry: null };
+    }
     // Number of orders filled by this call — the execution loop uses it to
     // decide whether to recalculate the strategy (TV: recalc after each fill).
     let fills = 0;
@@ -1378,6 +1449,20 @@ export function processStrategyOrders(context: any, phase: 'open' | 'close' = 'o
             processExitOrders(context, 'close', true);
         }
 
+        // Where on the bar's assumed path this order fills (outside COF):
+        // segment -1 is the open (market, gapped or marketable orders).
+        const intrabarFillPosition = shouldFill && tracksMarginPath && order.type !== 'market'
+            ? entryFillPathPosition(
+                order,
+                parseDirection(order.direction),
+                snapExecutionPrices && order.type === 'stop' ? displayedIntrabarPath : intrabarPath,
+                null,
+                false,
+            )
+            : null;
+        const fillsInsideBar = intrabarFillPosition !== null && intrabarFillPosition.pathSegment >= 0;
+        if (fillsInsideBar) checkMarginBeforeIntrabarFill(context, intrabarFillPosition, 'beforeExits');
+
         if (shouldFill && !usesIntrabarPath && !closePhase && order.type !== 'market') {
             // TV interleaves an active exit with a crossed opposite
             // price-based entry along the assumed path. Process the exit
@@ -1399,6 +1484,7 @@ export function processStrategyOrders(context: any, phase: 'open' | 'close' = 'o
                 processExitOrders(context, 'intrabar', false, entryPathPosition);
             }
         }
+        if (fillsInsideBar) checkMarginBeforeIntrabarFill(context, intrabarFillPosition, 'afterExits');
 
         if (shouldFill) {
             // Risk rules run below, after the reversal close-qty adjustments.
@@ -1564,18 +1650,27 @@ export function processStrategyOrders(context: any, phase: 'open' | 'close' = 'o
 
                 if (newOpenQty > 0) {
                     const pointValue = context.pine?.syminfo?.pointvalue ?? 1;
-                    // Equity is already MtM'd at the phase's fill price at
-                    // the top of processStrategyOrders, so strategy.equity is
-                    // the current account value. Subtract margin held by
-                    // positions that will REMAIN after this order:
+                    // Available equity = the account valued where this order
+                    // fills on the path, less margin held by positions that
+                    // will REMAIN after this order:
                     //   - reversal: nothing remains from old position.
                     //   - pyramiding (same dir): existing held margin stays.
                     //   - fresh entry: nothing held to begin with.
+                    // That point is the open, the close (POC), or the order's
+                    // own level or tick after the open (inside the bar, or a
+                    // later COF pass): a reversal stop far below the open
+                    // realizes the old position's loss first.
+                    // (strategy.equity is marked at the open, or at the
+                    // close by the exit prefix above.)
+                    const fillsAfterOpen = fillsInsideBar || (cofState !== null && cofState.pass > 0 && !closePhase);
+                    const admissionPrice = fillsAfterOpen ? executionBase : closePhase ? closePrice : openPrice;
+                    const admissionEquity = strategy.initial_capital + strategy.netprofit
+                        + openProfitAt(context, snapExecutionPrice(admissionPrice, mintick));
                     let heldMarginRemaining = 0;
                     if (oldSign === direction) {
-                        heldMarginRemaining = computeHeldMargin(context, closePhase ? closePrice : openPrice);
+                        heldMarginRemaining = computeHeldMargin(context, admissionPrice);
                     }
-                    const availableEquity = strategy.equity - heldMarginRemaining;
+                    const availableEquity = admissionEquity - heldMarginRemaining;
                     // VIN-161: admission uses the actual execution price.
                     // Known-step quantities have already been quantized at
                     // placement; a pre-snap price can admit excess notional.
@@ -1639,6 +1734,12 @@ export function processStrategyOrders(context: any, phase: 'open' | 'close' = 'o
                 ? {pathSegment: cofState!.pass - 1, distanceAlongSegment: 1}
                 : entryFillPathPosition(order, direction, fillPath, cofState, fillsAtClose);
             executeOrder(context, order, fillPrice, currentTime, fillPathPosition, fillsAtClose);
+            if (fillsInsideBar) {
+                const marginPath = currentBarMarginPath(context);
+                if (marginPath && (!marginPath.entry || comparePathPositions(fillPathPosition, marginPath.entry) > 0)) {
+                    marginPath.entry = fillPathPosition;
+                }
+            }
             if (cofState && order.bar === context.idx) cofState.currentBarEntryFilled = true;
             if (cofState && cofState.pass > 0 && order.type !== 'market' && !gapExecution) {
                 const level = order.type === 'stop' ? order.stop : order.limit;
@@ -4049,7 +4150,24 @@ export function processMarginCall(context: any, checkpoint: 'open' | 'extreme' |
 
     const pointValue = context.pine?.syminfo?.pointvalue ?? 1;
 
-    const rawAdversePrice = checkpoint === 'open' ? openPrice : checkpoint === 'close' ? closePrice : positionDir === 1 ? lowPrice : highPrice;
+    let rawAdversePrice = checkpoint === 'open' ? openPrice : checkpoint === 'close' ? closePrice : positionDir === 1 ? lowPrice : highPrice;
+    // Outside COF: a position changed by an entry filled inside the bar did
+    // not exist at the open nor at an extreme reached before that fill (both
+    // were checked on the previous position before it). Its adverse
+    // checkpoint is the worst path point after the fill, possibly the close:
+    // a sell stop filled at 45 on the way down from a 100 high is never
+    // valued at the 95 open it followed.
+    const marginPath = checkpoint === 'close' ? null : currentBarMarginPath(context);
+    if (marginPath && checkpoint === 'open' && (marginPath.openChecked || marginPath.entry)) return 0;
+    if (marginPath && checkpoint === 'extreme') {
+        if (marginPath.entry) {
+            const after = pathPricesAfter(assumedIntrabarPath(openPrice, highPrice, lowPrice, closePrice), marginPath.entry);
+            if (after.length === 0) return 0;
+            rawAdversePrice = positionDir === 1 ? Math.min(...after) : Math.max(...after);
+        } else if (marginPath.extremeChecked) {
+            return 0;
+        }
+    }
     // VIN-161: UNI historical high 3.0853 is valued and filled at 3.085.
     const adversePrice = snapExecutionPrice(rawAdversePrice, context.pine?.syminfo?.mintick ?? 0);
     const totalQty = Math.abs(strategy.position_size);

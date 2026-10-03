@@ -520,6 +520,17 @@ export interface StrategyState {
     // `calc_on_order_fills = true` (see CofBarState). Set at the start of
     // each bar by the execution loop, null outside the COF processing.
     _cof?: CofBarState | null;
+    // Internal: margin checkpoints of the current bar outside COF. A
+    // price-based entry filling inside the bar (not at the open) changes the
+    // position mid-path: the open and an earlier adverse extreme are checked
+    // on the position held BEFORE that fill, and later checkpoints only on
+    // path points AFTER it (`entry`, its path position).
+    _bar_margin_path?: {
+        bar: number;
+        openChecked: boolean;
+        extremeChecked: boolean;
+        entry: { pathSegment: number; distanceAlongSegment: number } | null;
+    };
     // Values of Pine's series-qualified strategy variables at the last script
     // execution for each bar. POC snapshots are taken before a non-COF close
     // fill; a COF post-fill recalculation replaces its current-bar snapshot.

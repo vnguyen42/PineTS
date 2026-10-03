@@ -5,7 +5,7 @@ import { Context } from './Context.class';
 import { splitTickerModifier, stripTickerModifier, transformHeikinAshi, transformHeikinAshiCandle, withTickerModifier } from './tickerModifier';
 import { Series } from './Series';
 import { Indicator } from './Indicator';
-import { processConsecutiveLossDay, finalizeConsecutiveLossDay, intradayLossHalted, processIntradayLoss, processStrategyOrders, processExitOrders, processMarginCall, finalizeStrategyBar, finalizeStrategyRun, isAdverseFirstBar, applyPendingCloseMarginCall, applyPendingOpenMarginCall, snapshotStrategyState, restoreStrategyState, markToMarket } from './namespaces/strategy/utils';
+import { processConsecutiveLossDay, finalizeConsecutiveLossDay, intradayLossHalted, processIntradayLoss, processStrategyOrders, processExitOrders, processMarginCall, finalizeStrategyBar, finalizeStrategyRun, isAdverseFirstBar, marginExtremeBeforeExits, applyPendingCloseMarginCall, applyPendingOpenMarginCall, snapshotStrategyState, restoreStrategyState, markToMarket } from './namespaces/strategy/utils';
 
 // ── Timeframe duration utility ──────────────────────────────────────
 //prettier-ignore
@@ -1392,9 +1392,12 @@ export class PineTS {
                     // extreme precedes the favorable exits on the path), AFTER
                     // them otherwise (favorable exits free margin first). The
                     // 'extreme' checkpoint may schedule a deferred second
-                    // margin call at this bar's close (phantom re-check).
+                    // margin call at this bar's close (phantom re-check). An
+                    // entry filled inside the bar moves both checkpoints after
+                    // its fill (processStrategyOrders checked the earlier ones
+                    // on the previous position).
                     processMarginCall(context, 'open');
-                    const adverseFirst = isAdverseFirstBar(context);
+                    const adverseFirst = marginExtremeBeforeExits(context);
                     if (adverseFirst) processMarginCall(context, 'extreme');
                     processExitOrders(context, 'intrabar');
                     if (!adverseFirst) processMarginCall(context, 'extreme');
