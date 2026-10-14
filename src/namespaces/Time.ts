@@ -31,8 +31,11 @@ export { normalizeTimeframe };
  * ('D'/'W'/'M' et '1D'/'1W'/'1M' — zéro régression, les témoins en dépendent).
  *
  * For intraday TFs (minutes): floor to the nearest multiple of the TF duration within the day.
+ *
+ * `session` (an overnight trading session, see overnightSession): buckets follow the trading day
+ * instead (alignToTradingDay); null keeps the UTC alignment above.
  */
-export function alignToTimeframe(timestamp: number, tf: string): number {
+export function alignToTimeframe(timestamp: number, tf: string, session: TradingDaySession | null = null): number {
     const MS_MIN = 60_000;
     const MS_DAY = 86_400_000;
 
@@ -46,6 +49,7 @@ export function alignToTimeframe(timestamp: number, tf: string): number {
     const cal = parseCalendarMultiplier(tf);
     const unit = cal === null ? tf.slice(-1).toUpperCase() : cal.unit;
     const n = cal === null ? 1 : cal.n;
+    if (session) return alignToTradingDay(timestamp, unit, n, parseMinuteTimeframe(tf), session);
 
     if (unit === 'M') {
         // Buckets of N calendar months: monthIndex = year*12+month, floor(monthIndex/N)*N
@@ -247,6 +251,110 @@ export function getDatePartsInTimezone(timestamp: number, timezone: string): Dat
     }
 }
 
+// ── Overnight trading days (futures, forex) ─────────────────────────
+
+/** An overnight session: opens at `open` (minute of the local day in `timezone`) the evening before its trading day. */
+export type TradingDaySession = { timezone: string; open: number };
+/** The part of a run context the trading-day helpers read. */
+type SyminfoContext = { pine?: { syminfo?: { session?: unknown; timezone?: string } | null } } | null | undefined;
+
+const MS_DAY = 86_400_000;
+const overnightSessions = new Map<string, TradingDaySession | null>();
+
+/**
+ * The chart symbol's overnight trading session, or null. TradingView's futures and forex sessions
+ * ("1700-1600" CME equity futures in America/Chicago, "1800-1700" NYMEX/COMEX in America/New_York,
+ * "1700-1700" forex) open the evening before the trading day they belong to: the Monday session
+ * starts on Sunday evening, and a bar opening at or after the open belongs to the next local day.
+ * Day sessions ("0930-1600"), "0000-0000", "24x7", "24x5" and other values give null: the
+ * calendar day in syminfo.timezone stays the day (behaviour unchanged for those symbols).
+ */
+export function overnightSession(context: SyminfoContext): TradingDaySession | null {
+    const syminfo = context?.pine?.syminfo;
+    const session = syminfo?.session;
+    if (typeof session !== 'string') return null;
+    const timezone = syminfo.timezone || 'UTC';
+    const key = `${session}|${timezone}`;
+    let found = overnightSessions.get(key);
+    if (found === undefined) {
+        found = null;
+        const match = /^(\d\d)(\d\d)-(\d\d)(\d\d)(?::|$)/.exec(session);
+        if (match) {
+            const open = Number(match[1]) * 60 + Number(match[2]);
+            const close = Number(match[3]) * 60 + Number(match[4]);
+            if (open > close || (open === close && open !== 0)) found = { timezone, open };
+        }
+        overnightSessions.set(key, found);
+    }
+    return found;
+}
+
+/** UTC offset (ms) of `timezone` at `timestamp`. */
+function zoneOffset(timestamp: number, timezone: string): number {
+    const p = getDatePartsInTimezone(timestamp, timezone);
+    return Date.UTC(p.year, p.month - 1, p.day, p.hour, p.minute, p.second) - Math.floor(timestamp / 1000) * 1000;
+}
+
+/** UTC instant of the local wall-clock time `local` (ms) in `timezone`, `near` an instant with a close offset. */
+function localToUtc(local: number, timezone: string, near: number): number {
+    const guess = local - zoneOffset(near, timezone);
+    return local - zoneOffset(guess, timezone);
+}
+
+/**
+ * The trading day holding `timestamp` on an overnight session: its start (UTC ms of the session
+ * open) and its label (00:00 UTC of the trading day's date, TradingView's `time_tradingday`).
+ */
+export function tradingDayOf(timestamp: number, session: TradingDaySession): { start: number; label: number } {
+    const local = timestamp + zoneOffset(timestamp, session.timezone);
+    let openLocal = Math.floor(local / MS_DAY) * MS_DAY + session.open * 60_000;
+    if (local < openLocal) openLocal -= MS_DAY;
+    return {
+        start: localToUtc(openLocal, session.timezone, timestamp),
+        label: Math.floor(openLocal / MS_DAY) * MS_DAY + MS_DAY,
+    };
+}
+
+/** Start (UTC ms) of the overnight trading day labelled `label` (00:00 UTC of its date). */
+function tradingDayStart(label: number, session: TradingDaySession, near: number): number {
+    return localToUtc(label - MS_DAY + session.open * 60_000, session.timezone, near);
+}
+
+/**
+ * Calendar parts of the day a bar opening at `timestamp` trades on: the date of its overnight
+ * trading day, else its date in syminfo.timezone (session.isfirstbar/islastbar, ta.vwap resets,
+ * intraday risk rules).
+ */
+export function sessionDateParts(context: SyminfoContext, timestamp: number): DateParts {
+    const session = overnightSession(context);
+    if (!session) return getDatePartsInTimezone(timestamp, context?.pine?.syminfo?.timezone || 'UTC');
+    return getDatePartsInTimezone(tradingDayOf(timestamp, session).label, 'UTC');
+}
+
+/**
+ * `alignToTimeframe` on an overnight session: intraday buckets from the trading day's open (ES 4h:
+ * 17:00, 21:00, 01:00… Chicago), days = trading days, weeks and months grouped by the trading
+ * day's date (the Monday trading day opens on Sunday evening).
+ */
+function alignToTradingDay(timestamp: number, unit: string, n: number, tfMinutes: number, session: TradingDaySession): number {
+    const { start, label } = tradingDayOf(timestamp, session);
+    if (unit === 'M') {
+        const d = new Date(label);
+        const bucketMonth = Math.floor((d.getUTCFullYear() * 12 + d.getUTCMonth()) / n) * n;
+        return tradingDayStart(Date.UTC(Math.floor(bucketMonth / 12), bucketMonth % 12, 1), session, timestamp);
+    }
+    const labelDay = Math.floor(label / MS_DAY);
+    if (unit === 'W') {
+        const bucketWeek = Math.floor(Math.floor((labelDay - 4) / 7) / n) * n;
+        return tradingDayStart((4 + bucketWeek * 7) * MS_DAY, session, timestamp);
+    }
+    if (unit === 'D' || tfMinutes >= 1440) {
+        return n === 1 ? start : tradingDayStart(Math.floor(labelDay / n) * n * MS_DAY, session, timestamp);
+    }
+    const tfMs = tfMinutes * 60_000;
+    return start + Math.floor((timestamp - start) / tfMs) * tfMs;
+}
+
 // ── ISO week number helper ───────────────────────────────────────────
 
 /**
@@ -340,7 +448,8 @@ export class TimeHelper {
                 throw new Error('Invalid timeframe');
             }
             // Compute the opening timestamp of the higher-timeframe bar that contains this bar
-            htfBarTime = alignToTimeframe(currentTime, normalizedTF);
+            // (trading-day buckets on overnight sessions)
+            htfBarTime = alignToTimeframe(currentTime, normalizedTF, overnightSession(this.context));
         }
 
         // Session filtering

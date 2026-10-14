@@ -3,13 +3,13 @@
 
 import { Order, StrategyConfig, StrategyState, Trade } from './types';
 import { Series } from '../../Series';
-import { getDatePartsInTimezone } from '../Time';
+import { sessionDateParts } from '../Time';
 import { defaultStrategyMargin } from './defaults';
 import { convertAccountToSymbol, currentBarTimeMs, symbolToAccountResidual } from './currency';
 
 function riskTradingDayKey(context: any): string {
-    const time = Series.from(context.data.openTime).get(0);
-    const parts = getDatePartsInTimezone(time, context.pine?.syminfo?.timezone ?? 'UTC');
+    // The trading day (overnight sessions start the evening before), as TradingView's intraday rules.
+    const parts = sessionDateParts(context, Series.from(context.data.openTime).get(0));
     return `${parts.year}-${parts.month}-${parts.day}`;
 }
 

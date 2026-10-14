@@ -1,5 +1,5 @@
 import { Series } from '../Series';
-import { alignToTimeframe, normalizeTimeframe } from './Time';
+import { alignToTimeframe, normalizeTimeframe, overnightSession } from './Time';
 import { parseCalendarMultiplier, isCalendarForm } from './request/utils/TIMEFRAMES';
 
 export class Timeframe {
@@ -84,8 +84,10 @@ export class Timeframe {
 
         if (isNaN(currentTime) || isNaN(prevTime)) return false;
 
-        const currentAligned = alignToTimeframe(currentTime, normalizedTarget);
-        const prevAligned = alignToTimeframe(prevTime, normalizedTarget);
+        // Overnight sessions (futures, forex) change days at the session open, not at midnight.
+        const session = overnightSession(this.context);
+        const currentAligned = alignToTimeframe(currentTime, normalizedTarget, session);
+        const prevAligned = alignToTimeframe(prevTime, normalizedTarget, session);
 
         return currentAligned !== prevAligned;
     }

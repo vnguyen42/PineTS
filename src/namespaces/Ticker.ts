@@ -63,13 +63,14 @@ export class Ticker {
      * ticker.new(prefix, ticker, session?, adjustment?, ...) → simple string
      *
      * Returns "prefix:ticker". Modifier arguments are accepted but
-     * ignored — see class-level note. Returns an empty string if
-     * either prefix or ticker is empty (matches TV).
+     * ignored — see class-level note — except `backadjustment.off` on a
+     * continuous future (refused, see assertBackAdjusted). Returns an empty
+     * string if either prefix or ticker is empty (matches TV).
      */
-    new(prefix: any, ticker: any, _session?: any, _adjustment?: any,
-        _backadjustment?: any, _settlement_as_close?: any): string {
+    new(prefix: any, ticker: any, ...modifiers: unknown[]): string {
         const p = this._coerce(prefix);
         const t = this._coerce(ticker);
+        this.assertBackAdjusted(t, modifiers);
         if (!p) return t;
         if (!t) return p;
         return `${p}:${t}`;
@@ -79,11 +80,35 @@ export class Ticker {
      * ticker.modify(tickerid, session?, adjustment?, ...) → simple string
      *
      * Returns the tickerid unchanged — modifier args are accepted but
-     * ignored.
+     * ignored, except `backadjustment.off` on a continuous future (refused).
      */
-    modify(tickerid: any, _session?: any, _adjustment?: any,
-        _backadjustment?: any, _settlement_as_close?: any): string {
-        return this._coerce(tickerid);
+    modify(tickerid: any, ...modifiers: unknown[]): string {
+        const id = this._coerce(tickerid);
+        this.assertBackAdjusted(id, modifiers);
+        return id;
+    }
+
+    /**
+     * Continuous futures are served back-adjusted only (the provider has no unadjusted series), so
+     * an explicit `backadjustment.off` on one — a `…1!` ticker, or the chart's own symbol when it is
+     * a future — is refused instead of silently reading adjusted prices. Other symbols ignore the
+     * flag, as on TradingView.
+     */
+    private assertBackAdjusted(tickerid: string, modifiers: unknown[]): void {
+        // Named arguments arrive as one trailing object (`backadjustment=backadjustment.off`).
+        const named = modifiers.find(
+            (arg): arg is { backadjustment: unknown } => typeof arg === 'object' && arg !== null && !(arg instanceof Series) && 'backadjustment' in arg,
+        );
+        // Positional modifiers: session, adjustment, backadjustment, settlement_as_close.
+        const raw = named ? named.backadjustment : modifiers[2];
+        const value = raw instanceof Series ? raw.get(0) : raw;
+        if (value !== 'off') return;
+        const syminfo = this.context?.pine?.syminfo;
+        const name = stripTickerModifier(tickerid).split(':').pop() ?? '';
+        if (!/\d!$/.test(name) && !(syminfo?.type === 'futures' && name === syminfo?.ticker)) return;
+        throw new Error(
+            `backadjustment.off is not available for ${tickerid}: continuous futures are served back-adjusted only (roll gaps removed). Remove the backadjustment argument.`,
+        );
     }
 
     /**

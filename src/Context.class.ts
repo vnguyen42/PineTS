@@ -9,7 +9,7 @@ import { Barstate } from './namespaces/Barstate';
 import { Session } from './namespaces/Session';
 import { Core, NAHelper, AlertHelper } from './namespaces/Core';
 import { PineColor } from './namespaces/color/PineColor';
-import { TimeHelper, TimeComponentHelper, EXTRACTORS, getDatePartsInTimezone } from './namespaces/Time';
+import { TimeHelper, TimeComponentHelper, EXTRACTORS, getDatePartsInTimezone, overnightSession, tradingDayOf } from './namespaces/Time';
 import { Input } from './namespaces/input/input.index';
 import PineMath from './namespaces/math/math.index';
 import { PineRequest } from './namespaces/request/request.index';
@@ -307,8 +307,15 @@ export class Context {
             },
             get time_tradingday() {
                 // TradingView returns 00:00 UTC of the trading day the bar belongs to.
-                // For daily+ timeframes on 24/7 markets, this equals the bar's close date
-                // (i.e. the date the bar settles / completes).
+                // Overnight sessions (futures, forex): the day the session opened the
+                // evening before belongs to (an ES bar opening Monday 17:00 CT → Tuesday).
+                // Otherwise, for daily+ timeframes on 24/7 markets, this equals the bar's
+                // close date (i.e. the date the bar settles / completes).
+                const session = overnightSession(_this);
+                if (session) {
+                    const openTime = Series.from(_this.data.openTime).get(0);
+                    return isNaN(openTime) ? NaN : tradingDayOf(openTime, session).label;
+                }
                 const closeTime = Series.from(_this.data.closeTime).get(0);
                 if (isNaN(closeTime)) return NaN;
                 const timezone = _this.pine?.syminfo?.timezone || 'UTC';

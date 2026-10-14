@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright (C) 2026 LuxAlgo
 
-import { getDatePartsInTimezone } from './Time';
+import { sessionDateParts } from './Time';
 
 /**
  * `session` namespace (Pine v5+).
@@ -12,9 +12,12 @@ import { getDatePartsInTimezone } from './Time';
  *   session.islastbar — "Is true if the current bar is the last bar of the
  *   day's session, and false otherwise."
  *
- * The boundary is the calendar day in the symbol's exchange timezone
- * (syminfo.timezone; UTC fallback): a bar is the last of its day when the
- * NEXT bar opens on a different day. On 1D+ charts every bar is its own
+ * The boundary is the trading day: the calendar day in the symbol's exchange
+ * timezone (syminfo.timezone; UTC fallback), or on an overnight session
+ * (syminfo.session "1700-1600", "1800-1700", "1700-1700": futures, forex) the
+ * day that starts at the session open the evening before (TradingView: the
+ * first ES bar of Tuesday's session is Monday 17:00 CT). A bar is the last of
+ * its day when the NEXT bar opens on a different day. On 1D+ charts every bar is its own
  * session day, so the variable is true on every bar; on intraday charts it
  * fires on the last bar of each trading day. The chart's final bar is
  * always the last bar of its (loaded) day.
@@ -23,8 +26,8 @@ export class Session {
     constructor(private context: any) {}
 
     private dayKey(openTimeMs: number): string {
-        const tz = this.context.pine?.syminfo?.timezone || 'UTC';
-        const parts = getDatePartsInTimezone(openTimeMs, tz);
+        // Overnight sessions (futures, forex): the trading day, which starts the evening before.
+        const parts = sessionDateParts(this.context, openTimeMs);
         return `${parts.year}-${String(parts.month).padStart(2, '0')}-${String(parts.day).padStart(2, '0')}`;
     }
 
