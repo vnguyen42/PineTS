@@ -125,10 +125,6 @@ export function exit(context: any) {
         const positionReference = isStock && Number.isFinite(context.strategy.position_avg_price)
             ? context.strategy.position_avg_price
             : currentClose;
-        const stopRounding: 'up' | 'down' | undefined = isStock && positionDirection !== 0
-            ? positionDirection === 1 ? 'down' : 'up'
-            : undefined;
-        const stop        = stopRaw       !== undefined ? roundToMintick(stopRaw,       positionReference, mintick, stopRounding) : undefined;
         const trailPrice  = trailPriceRaw !== undefined ? roundToMintick(trailPriceRaw, currentClose, mintick) : undefined;
         const fromEntryId = fromEntry ?? '';
         const exitId = idValue ?? 'exit';
@@ -233,6 +229,16 @@ export function exit(context: any) {
         const limit = limitRaw !== undefined
             ? roundToMintick(limitRaw, positionReference, mintick, limitRounding)
             : undefined;
+        // An absolute stop rounds against the position it closes (long → down,
+        // short → up) on stocks and futures, even when it lies on the far side
+        // of the current close: CBOT_MINI:YM1! 240 (script 2537), long stop
+        // 42305.67 placed at close 42305 fills at 42305, not 42306. A bracket
+        // bound to a pending entry closes that entry's side (reversal brackets).
+        const stopDirection = boundDirection ?? positionDirection;
+        const stopRounding: 'up' | 'down' | undefined = (isStock || context.pine?.syminfo?.type === 'futures') && stopDirection !== 0
+            ? stopDirection === 1 ? 'down' : 'up'
+            : undefined;
+        const stop        = stopRaw       !== undefined ? roundToMintick(stopRaw,       positionReference, mintick, stopRounding) : undefined;
         const lifecycle = context.strategy._filled_exit_trade_ids?.get(lifecycleKey);
         const sameBarLifecycle = lifecycle?.bar === context.idx ? lifecycle : undefined;
         const partialExit = (explicitQtyCap && Number(qty) > 0) || Number(qtyPercent) > 0;
