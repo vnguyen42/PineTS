@@ -3734,10 +3734,13 @@ export function processExitOrders(
 
             const priorPeak = order.trail_peak as number;
             const priorTrigger = Number.isFinite(priorPeak) ? triggerFromPeak(priorPeak) : undefined;
+            // An open AT the armed stop executes there, like a stop entry
+            // touched by the open (2280 CME_MINI:ES1! bar 1824: peak 4160.5,
+            // 1-tick offset, open 4160.25 → TV exits at that open).
             const gapAtOpen = atOpenTick
                 && !trailArmedThisBar
                 && priorTrigger !== undefined
-                && (isLong ? openPrice < priorTrigger : openPrice > priorTrigger);
+                && (isLong ? touchedAtOrBelow(priorTrigger, openPrice) : touchedAtOrAbove(priorTrigger, openPrice));
             if (gapAtOpen) {
                 emitTrail(openPrice, undefined, true);
             } else if (trailArmedThisBar) {
