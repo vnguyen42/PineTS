@@ -115,6 +115,11 @@ export function exit(context: any) {
         const normalizedQty = qty !== undefined && qty !== null
             ? calculateOrderQty(context, Number(qty), 0, currentClose)
             : undefined;
+        // A positive request that floors to zero is not an inert order: TV
+        // fills it as if qty were omitted (MCX:NATURALGAS1! script 2565,
+        // qty = 0.5 on a 1-contract position: all 182 bracket exits are
+        // this leg at its limit, the sibling stop never fills).
+        const explicitQtyCap = normalizedQty !== undefined && !(normalizedQty === 0 && Number(qty) > 0);
         const isStock = context.pine?.syminfo?.type === 'stock';
         const positionDirection = Math.sign(context.strategy.position_size);
         const positionReference = isStock && Number.isFinite(context.strategy.position_avg_price)
@@ -230,7 +235,7 @@ export function exit(context: any) {
             : undefined;
         const lifecycle = context.strategy._filled_exit_trade_ids?.get(lifecycleKey);
         const sameBarLifecycle = lifecycle?.bar === context.idx ? lifecycle : undefined;
-        const partialExit = Number(qty) > 0 || Number(qtyPercent) > 0;
+        const partialExit = (explicitQtyCap && Number(qty) > 0) || Number(qtyPercent) > 0;
         const activationLifecycle = partialExit ? lifecycle : sameBarLifecycle;
         const excludedActivationTradeIds = (activationLifecycle?.activationTradeIds ?? [])
             .filter((tradeId: string) => matchingTradeIds.includes(tradeId));
@@ -248,7 +253,7 @@ export function exit(context: any) {
             id: exitId,
             direction: 0,           // resolved at trigger based on matching trades
             qty: normalizedQty ?? 0,
-            _explicit_qty_cap: qty !== undefined && qty !== null,
+            _explicit_qty_cap: explicitQtyCap,
             qty_percent: qtyPercent,
             type: 'market',
             bar: context.idx,

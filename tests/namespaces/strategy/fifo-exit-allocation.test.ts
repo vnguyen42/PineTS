@@ -137,37 +137,6 @@ describe('strategy exit global FIFO allocation', () => {
         expect(context.strategy.closedtrades.every((closed) => Number.isInteger(closed.size))).toBe(true);
         expect(context.strategy.position_size).toBe(0);
     });
-    it('keeps an explicit sub-step exit pending inert and refreshable', () => {
-        const context = makeContext();
-        context.pine.qtyStep = 1;
-        const trade = lot('trade_1', 'L', 1800, 0);
-        trade.size = 1;
-        context.strategy.opentrades = [trade];
-        context.strategy.position_size = 1;
-        context.strategy.position_avg_price = 1800;
-        context.strategy.position_entry_name = 'L';
-
-        exit(context)('substep', 'L', { limit: 1880, qty: 0.5 });
-
-        expect(context.strategy.pending_orders).toHaveLength(1);
-        const initialOrder = context.strategy.pending_orders[0];
-        expect(initialOrder).toMatchObject({ qty: 0, _explicit_qty_cap: true, limit: 1880, status: 'pending' });
-        expect(processExitOrders(context)).toBe(0);
-        expect(context.strategy.closedtrades).toHaveLength(0);
-        expect(context.strategy.opentrades.map((open) => open.size)).toEqual([1]);
-        expect(context.strategy.position_size).toBe(1);
-        expect(context.strategy.pending_orders).toHaveLength(1);
-
-        exit(context)('substep', 'L', { limit: 1881, qty: 0.5 });
-
-        expect(context.strategy.pending_orders).toHaveLength(1);
-        expect(context.strategy.pending_orders[0]).toBe(initialOrder);
-        expect(context.strategy.pending_orders[0]).toMatchObject({ qty: 0, _explicit_qty_cap: true, limit: 1881, status: 'pending' });
-        expect(processExitOrders(context)).toBe(0);
-        expect(context.strategy.closedtrades).toHaveLength(0);
-        expect(context.strategy.position_size).toBe(1);
-    });
-
     it('re-derives the cap when a same-id exit refresh crosses the qty step boundary', () => {
         const zeroToPositive = makeContext();
         zeroToPositive.pine.qtyStep = 1;
@@ -179,7 +148,7 @@ describe('strategy exit global FIFO allocation', () => {
         zeroToPositive.strategy.position_entry_name = 'L';
 
         exit(zeroToPositive)('substep', 'L', { limit: 1880, qty: 0.5 });
-        expect(zeroToPositive.strategy.pending_orders[0]).toMatchObject({ qty: 0, _explicit_qty_cap: true });
+        expect(zeroToPositive.strategy.pending_orders[0]).toMatchObject({ qty: 0, _explicit_qty_cap: false });
         exit(zeroToPositive)('substep', 'L', { limit: 1880, qty: 2 });
 
         expect(zeroToPositive.strategy.pending_orders).toHaveLength(1);
@@ -202,10 +171,11 @@ describe('strategy exit global FIFO allocation', () => {
         exit(positiveToZero)('substep', 'L', { limit: 1880, qty: 0.5 });
 
         expect(positiveToZero.strategy.pending_orders).toHaveLength(1);
-        expect(positiveToZero.strategy.pending_orders[0]).toMatchObject({ qty: 0, _explicit_qty_cap: true });
-        expect(processExitOrders(positiveToZero)).toBe(0);
-        expect(positiveToZero.strategy.closedtrades).toHaveLength(0);
-        expect(positiveToZero.strategy.position_size).toBe(1);
+        // 2565: a sub-step request is not inert, it exits the whole position.
+        expect(positiveToZero.strategy.pending_orders[0]).toMatchObject({ qty: 0, _explicit_qty_cap: false });
+        expect(processExitOrders(positiveToZero)).toBe(1);
+        expect(positiveToZero.strategy.closedtrades).toHaveLength(1);
+        expect(positiveToZero.strategy.position_size).toBe(0);
     });
 
 
