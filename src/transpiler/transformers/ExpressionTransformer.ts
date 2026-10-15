@@ -2229,8 +2229,12 @@ export function transformCallExpression(node: any, scopeManager: ScopeManager, n
         } else {
             // Transform arguments using $.param
             node.arguments = node.arguments.map((arg: any) => {
-                // If argument is already a param call, don't wrap it again
-                if (arg._isParamCall) {
+                // If argument is already a param call, don't wrap it again.
+                // A bare `undefined` is the gap placeholder pineToJS emits for a
+                // parameter skipped by named args (`f(1, c = 5)` → `f(1, undefined, 5)`):
+                // it must reach the callee unwrapped so the JS default applies —
+                // `$.param(undefined)` is a Series that defeats the default.
+                if (arg._isParamCall || (arg.type === 'Identifier' && arg.name === 'undefined')) {
                     return arg;
                 }
                 return transformFunctionArgument(arg, CONTEXT_NAME, scopeManager);
