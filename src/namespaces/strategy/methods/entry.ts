@@ -359,7 +359,13 @@ export function entry(context: any) {
         // Keep the market sizing reference and stop / stop-limit handling unchanged.
         const limitReference = stopValue === undefined ? cofCurrentTick(strategy) ?? currentPrice : currentPrice;
         const limitValueRounded = limitValue !== undefined ? roundToMintick(limitValue, limitReference, mintick) : undefined;
-        const stopValueRounded  = stopValue  !== undefined ? roundToMintick(stopValue,  currentPrice, mintick) : undefined;
+        // A stop level rounds in its trigger direction (buy up, sell down):
+        // the first tick at or beyond the raw level. Away from the close
+        // only agrees while the stop lies beyond it; 1830 (CME:6E1! 60) bar
+        // 7133 places a buy stop at 1.0887143 under the 1.08875 close — TV
+        // rounds it to 1.08875 and fills there on bar 7134, not at the
+        // 1.0887 open.
+        const stopValueRounded  = stopValue  !== undefined ? roundToMintick(stopValue,  currentPrice, mintick, dir === 1 ? 'up' : 'down') : undefined;
         // A stop already beyond the signal bar's close is marketable at
         // submission (VIN-95): it uses the market sizing reference (VIN-165)
         // and fills at the next admissible open (at the signal bar's close
