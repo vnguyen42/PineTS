@@ -72,7 +72,11 @@ export function opentrades(context: any) {
             const basis = costBasis(t);
             return basis > 0 ? (100 * p) / basis : NaN;
         };
-        result.size = (i: any) => at(i)?.size ?? NaN;
+        // TradingView answers 0 (no contracts), not na, for a trade number with
+        // no open trade: 2120 (NASDAQ:DOCU 60) gates its flat-time exits on
+        // `strategy.opentrades.size(strategy.opentrades - 1) <= 0`, and TV
+        // fills the exit placed on the flat signal bar 8640 (stop 57.09).
+        result.size = (i: any) => at(i)?.size ?? 0;
         result.commission = (i: any) => at(i)?.commission ?? NaN;
         result.entry_price = (i: any) => at(i)?.entry_price ?? NaN;
         result.entry_bar_index = (i: any) => at(i)?.entry_bar_index ?? NaN;
