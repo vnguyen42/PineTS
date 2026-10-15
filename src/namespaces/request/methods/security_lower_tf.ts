@@ -85,7 +85,7 @@ const BUILTIN_TO_CANDLE_FIELD: Record<string, (c: any) => any> = {
     volume:  (c) => c.volume,
     hl2:     (c) => (c.high + c.low) / 2,
     hlc3:    (c) => (c.high + c.low + c.close) / 3,
-    ohlc4:   (c) => (c.high + c.low + c.open + c.close) / 4,
+    ohlc4:   (c) => (c.open + c.high + c.low + c.close) / 4,
     hlcc4:   (c) => (c.high + c.low + c.close + c.close) / 4,
     time:    (c) => c.openTime,
     openTime:  (c) => c.openTime,

@@ -259,7 +259,11 @@ export class PineTS {
                 const _volume = marketData.map((d) => d.volume);
                 const _hlc3 = marketData.map((d) => (d.high + d.low + d.close) / 3);
                 const _hl2 = marketData.map((d) => (d.high + d.low) / 2);
-                const _ohlc4 = marketData.map((d) => (d.high + d.low + d.open + d.close) / 4);
+                // ohlc4 sums in TradingView's operand order open+high+low+close:
+                // the float result differs from high+low+open+close at the ulp
+                // (OKX:CROUSDT 240, script 2701, 2019-11-10 20:00: 0.035375 vs
+                // 0.035375000000000004) and decides ta.crossover at equality.
+                const _ohlc4 = marketData.map((d) => (d.open + d.high + d.low + d.close) / 4);
                 const _hlcc4 = marketData.map((d) => (d.high + d.low + d.close + d.close) / 4);
                 const _openTime = marketData.map((d) => d.openTime);
                 // Providers should supply closeTime as session close time (TV convention).
@@ -826,7 +830,7 @@ export class PineTS {
         this.volume[index] = materialized.volume;
         this.hl2[index] = (materialized.high + materialized.low) / 2;
         this.hlc3[index] = (materialized.high + materialized.low + materialized.close) / 3;
-        this.ohlc4[index] = (materialized.high + materialized.low + materialized.open + materialized.close) / 4;
+        this.ohlc4[index] = (materialized.open + materialized.high + materialized.low + materialized.close) / 4;
         this.hlcc4[index] = (materialized.high + materialized.low + materialized.close + materialized.close) / 4;
         this.openTime[index] = materialized.openTime;
         this.closeTime[index] = materialized.closeTime;
@@ -848,7 +852,7 @@ export class PineTS {
         this.volume.push(materialized.volume);
         this.hl2.push((materialized.high + materialized.low) / 2);
         this.hlc3.push((materialized.high + materialized.low + materialized.close) / 3);
-        this.ohlc4.push((materialized.high + materialized.low + materialized.open + materialized.close) / 4);
+        this.ohlc4.push((materialized.open + materialized.high + materialized.low + materialized.close) / 4);
         this.hlcc4.push((materialized.high + materialized.low + materialized.close + materialized.close) / 4);
         this.openTime.push(materialized.openTime);
         this.closeTime.push(materialized.closeTime);
