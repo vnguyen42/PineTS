@@ -618,16 +618,9 @@ export function transformMemberExpression(memberNode: any, originalParamName: st
         if (!memberNode.object._transformed) {
             transformCallExpression(memberNode.object, scopeManager);
         }
-        const callCallee = memberNode.object.callee;
-        const isRequestSecurityCall =
-            callCallee?.type === 'MemberExpression' &&
-            callCallee.object?.type === 'Identifier' &&
-            callCallee.object.name === 'request' &&
-            callCallee.property?.type === 'Identifier' &&
-            ASYNC_METHODS.includes(`request.${callCallee.property.name}`);
         if (memberNode.property.type === 'CallExpression') {
             transformCallExpression(memberNode.property, scopeManager);
-        } else if (memberNode.property.type === 'Identifier' && !isRequestSecurityCall) {
+        } else if (memberNode.property.type === 'Identifier') {
             // Variable index on a call result (`ta.highest(14)[check]`): the
             // index must be scoped and unwrapped to its current scalar, or it
             // escapes the context rename and fails at runtime with a
@@ -635,12 +628,6 @@ export function transformMemberExpression(memberNode: any, originalParamName: st
             // variables are plain JS identifiers and stay raw; function
             // parameters are hoisted and only need the scalar unwrap; global
             // variables are context-bound (`$.let.glb1_*`).
-            //
-            // request.security results are resolved through a secondary
-            // context. Preserve its legacy raw offset handling: unwrapping a
-            // function parameter at this boundary changes request execution
-            // for the v5 corpus helper (1936) and turns its SILENT result into
-            // an unrelated runtime timeframe error.
             const indexName = memberNode.property.name;
             if (scopeManager.isLoopVariable(indexName)) {
                 // leave raw — loop variables are JS-scoped
