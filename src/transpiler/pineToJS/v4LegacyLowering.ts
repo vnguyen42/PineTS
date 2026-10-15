@@ -121,6 +121,11 @@ const LEGACY_CALL_TARGETS: Record<string, NamespaceTarget> = {
     mfi: { ns: 'ta', name: 'mfi' },
     wpr: { ns: 'ta', name: 'wpr' },
     bb: { ns: 'ta', name: 'bb' },
+    // v4 `vwap(source)` — the function form of the `vwap` built-in (the bare
+    // value form is lowered by LEGACY_VALUE_TARGETS). Absent from the 190-source
+    // count above; revealed by Studio script 1557 (`rsi(vwap(close), len)`),
+    // where the unlowered callee reached JS as a free `vwap` (ReferenceError).
+    vwap: { ns: 'ta', name: 'vwap' },
     // math.* scalar/rounding helpers
     max: { ns: 'math', name: 'max' },
     min: { ns: 'math', name: 'min' },
