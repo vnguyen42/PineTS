@@ -1747,7 +1747,7 @@ export function processStrategyOrders(context: any, phase: 'open' | 'close' = 'o
                 : intrabarPath;
             const fillPathPosition = interiorMarketableLimit
                 ? {pathSegment: cofState!.pass - 1, distanceAlongSegment: 1}
-                : entryFillPathPosition(order, direction, fillPath, cofState, fillsAtClose);
+                : entryFillPathPosition(order, direction, fillPath, cofState, fillsAtClose || closeMarketableLimit(order));
             executeOrder(context, order, fillPrice, currentTime, fillPathPosition, fillsAtClose);
             if (fillsInsideBar) {
                 const marginPath = currentBarMarginPath(context);
@@ -3860,6 +3860,49 @@ export function processExitOrders(
         || left.distanceAlongSegment - right.distanceAlongSegment
         || left.orderSequence - right.orderSequence,
     );
+    // Brackets each bound to ONE activation, those activations filled
+    // together at one bar's CLOSE, execute newest activation first when they
+    // trigger at the same path point; the lots they consume stay FIFO.
+    // Measured on limits already marketable at that close under
+    // process_orders_on_close — TV 2640 (BINANCE:UNIUSDT), 57/57 such close
+    // batches, e.g. SO1/SO2/SO3 filled at 5.98 on 2024-01-10 02:00: the SO3
+    // bracket closes SO1 + SO2 + 1.472 of SO3, then SO2's and SO1's brackets
+    // close the rest of SO3. The batch is re-placed into the slots it already
+    // occupies, so every other event keeps its path/queue position.
+    const activationIndex = new Map<string, number>();
+    strategy.opentrades.forEach((trade, index) => {
+        const id = trade._activation_id ?? trade.id;
+        if (!activationIndex.has(id)) activationIndex.set(id, index);
+    });
+    const closeBatchActivation = (event: { activationTradeIds: string[] }): number | undefined => {
+        const ids = new Set(event.activationTradeIds);
+        if (ids.size !== 1) return undefined;
+        const index = activationIndex.get(event.activationTradeIds[0]);
+        if (index === undefined) return undefined;
+        const trade = strategy.opentrades[index];
+        return trade._activation_entry_path_segment === path.length - 2 && trade._activation_entry_path_distance === 1
+            ? index
+            : undefined;
+    };
+    for (let start = 0; start < globalEvents.length;) {
+        let end = start + 1;
+        while (end < globalEvents.length && comparePathPositions(globalEvents[end], globalEvents[start]) === 0) end++;
+        const batchSlots = new Map<number, number[]>();
+        for (let slot = start; slot < end; slot++) {
+            const index = closeBatchActivation(globalEvents[slot]);
+            if (index === undefined) continue;
+            const trade = strategy.opentrades[index];
+            const bar = trade._activation_entry_bar_index ?? trade.entry_bar_index;
+            batchSlots.set(bar, [...(batchSlots.get(bar) ?? []), slot]);
+        }
+        for (const slots of batchSlots.values()) {
+            const batch = slots
+                .map((slot) => globalEvents[slot])
+                .sort((left, right) => closeBatchActivation(right)! - closeBatchActivation(left)!);
+            slots.forEach((slot, i) => { globalEvents[slot] = batch[i]; });
+        }
+        start = end;
+    }
     const deferredOrders = beforePathPosition === undefined
         ? undefined
         : new Set(
