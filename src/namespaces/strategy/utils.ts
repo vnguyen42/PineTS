@@ -1838,6 +1838,15 @@ export function cashPerContract(config: StrategyConfig | undefined, tick: number
 }
 
 /**
+ * Host extension (ISymbolInfo.backadjust_offset): on a back-adjusted continuous future, what the
+ * adjustment adds to the current bar's prices (the sum of the later rolls' gaps), read on every
+ * access; the real (traded) price is the bar price minus it. 0 on any other symbol.
+ */
+export function backadjustOffset(syminfo: { backadjust_offset?: number } | undefined): number {
+    return Number(syminfo?.backadjust_offset) || 0;
+}
+
+/**
  * Commission of one fill leg of `qty` at `price` under `config`, in account currency.
  *
  * Pine commission types:
@@ -1850,17 +1859,20 @@ export function cashPerContract(config: StrategyConfig | undefined, tick: number
  * leg notional (the maximum wins when it is below the minimum, as IBKR assesses it).
  * A minimum also applies with a zero rate (a flat fee per order). Callers bound
  * a whole order once (`qty` = the order's quantity) and share it pro rata.
- * `tick` is the fill bar's syminfo.mintick (see cashPerContract).
+ * `tick` is the fill bar's syminfo.mintick (see cashPerContract). `backadjust` is the fill
+ * bar's backadjust_offset: the notional is taken at the real price `price − backadjust`, so a
+ * percent fee on a back-adjusted future is a percent of what the contract traded at.
  */
-export function legCommission(config: StrategyConfig | undefined, qty: number, price: number, pointValue: number, tick: number | undefined): number {
+export function legCommission(config: StrategyConfig | undefined, qty: number, price: number, pointValue: number, tick: number | undefined, backadjust = 0): number {
     const type = config?.commission_type ?? 'percent';
     const value = config?.commission_value ?? 0;
     if (!value && !boundedCommission(config)) return 0;
+    const notional = Math.abs(qty) * (price - backadjust) * pointValue;
     let fee: number;
     switch (type) {
         case 'percent':
             // Notional = qty × price × pointValue, commission is value% of it.
-            fee = Math.abs(qty) * price * pointValue * (value / 100);
+            fee = notional * (value / 100);
             break;
         case 'cash_per_contract':
             // value is in account currency per contract — no pointValue factor.
@@ -1874,7 +1886,7 @@ export function legCommission(config: StrategyConfig | undefined, qty: number, p
     const min = Number(config?.commission_min) || 0;
     const maxPct = Number(config?.commission_max_pct) || 0;
     if (min > 0) fee = Math.max(fee, min);
-    if (maxPct > 0) fee = Math.min(fee, Math.abs(qty) * price * pointValue * (maxPct / 100));
+    if (maxPct > 0) fee = Math.min(fee, notional * (maxPct / 100));
     return fee;
 }
 
@@ -2042,7 +2054,7 @@ export function openTrade(
     const commTypeOpen = strategy.config.commission_type ?? 'percent';
     const halveFlat = isReversalOpen && commTypeOpen === 'cash_per_order';
     const orderQty = boundedCommission(strategy.config) ? (strategy._bounded_order_qty ?? qty) : qty;
-    const rawEntryCommission = legCommission(strategy.config, orderQty, price, context.pine?.syminfo?.pointvalue ?? 1, context.pine?.syminfo?.mintick) * (qty / orderQty);
+    const rawEntryCommission = legCommission(strategy.config, orderQty, price, context.pine?.syminfo?.pointvalue ?? 1, context.pine?.syminfo?.mintick, backadjustOffset(context.pine?.syminfo)) * (qty / orderQty);
     const entryCommission = halveFlat ? rawEntryCommission / 2 : rawEntryCommission;
 
     const trade: Trade = {
@@ -2384,8 +2396,8 @@ export function closePartialPosition(context: any, qtyToClose: number, exitPrice
         // would charge the flat fee TWICE (review L1 round 2).
         const halveFlat = closeInfo?.isImplicitReversal && commType === 'cash_per_order';
         const rawExitCommission = bounded
-            ? legCommission(strategy.config, orderQty, exitPrice, pointValue, context.pine?.syminfo?.mintick) * (qtyClosing / orderQty)
-            : legCommission(strategy.config, qtyClosing, exitPrice, pointValue, context.pine?.syminfo?.mintick)
+            ? legCommission(strategy.config, orderQty, exitPrice, pointValue, context.pine?.syminfo?.mintick, backadjustOffset(context.pine?.syminfo)) * (qtyClosing / orderQty)
+            : legCommission(strategy.config, qtyClosing, exitPrice, pointValue, context.pine?.syminfo?.mintick, backadjustOffset(context.pine?.syminfo))
                 * (commType === 'cash_per_order' ? qtyClosing / totalClosingQty : 1);
         const exitCommissionTotal = halveFlat ? rawExitCommission / 2 : rawExitCommission;
 

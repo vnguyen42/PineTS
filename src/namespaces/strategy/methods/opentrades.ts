@@ -2,7 +2,7 @@
 // Copyright (C) 2026 LuxAlgo
 
 import { Trade } from '../types';
-import { legCommission } from '../utils';
+import { backadjustOffset, legCommission } from '../utils';
 
 /**
  * Pine's `strategy.opentrades` mirrors strategy.closedtrades' dual-role
@@ -62,7 +62,7 @@ export function opentrades(context: any) {
             // Hypothetical exit commission if the trade closed right now at the
             // current price: TV's open-trade profit deducts BOTH the entry
             // commission (already charged on trade.commission) AND this exit leg.
-            return priceChange * Math.abs(t.size) * pointValue - (t.commission ?? 0) - legCommission(context.strategy?.config, t.size, cp, pointValue, context.pine?.syminfo?.mintick);
+            return priceChange * Math.abs(t.size) * pointValue - (t.commission ?? 0) - legCommission(context.strategy?.config, t.size, cp, pointValue, context.pine?.syminfo?.mintick, backadjustOffset(context.pine?.syminfo));
         };
         result.profit_percent = (i: any) => {
             const t = at(i);

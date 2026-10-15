@@ -51,6 +51,12 @@ export type ISymbolInfo = {
     mintick: number;
     pointvalue: number;
     pricescale: number;
+    /**
+     * Host extension, not a Pine field: on a back-adjusted continuous future, what the adjustment
+     * adds to the current chart bar's prices (a getter, read at each fill); percent commissions are
+     * charged on the real notional `price − backadjust_offset`. Absent = 0.
+     */
+    backadjust_offset?: number;
 
     // Analyst Ratings
     recommendations_buy: number;
