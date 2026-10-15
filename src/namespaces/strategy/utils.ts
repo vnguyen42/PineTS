@@ -1049,9 +1049,15 @@ export function processStrategyOrders(context: any, phase: 'open' | 'close' = 'o
     // 211.605 → HEAD 211.61 vs B 211.62, et aucun oracle crypto à
     // slippage ≠ 0 ne justifie B là-bas.
     const tickSpaceFills = snapExecutionPrices || assetType === 'etf' || assetType === 'fund';
-    const displayedOhlc = snapExecutionPrices ? snapDisplayOhlc(rawOhlc, mintick) : rawOhlc;
+    // Stop triggers (and their non-gap fill range) are evaluated on the
+    // DISPLAYED OHLC for crypto/spot as well: BINANCE:XLMUSDT D (script
+    // 1828) carries 5-decimal raw bars under a 0.0001 mintick, and TV fills
+    // the buy-stop 0.0792 on 2020-10-16 whose raw high is 0.07919 (displayed
+    // 0.0792), at the level 0.0792.
+    const displayedStopTriggers = snapExecutionPrices || assetType === 'crypto' || assetType === 'spot';
+    const displayedOhlc = displayedStopTriggers ? snapDisplayOhlc(rawOhlc, mintick) : rawOhlc;
     const intrabarPath = assumedIntrabarPath(openPrice, highPrice, lowPrice, closePrice);
-    const displayedIntrabarPath = snapExecutionPrices
+    const displayedIntrabarPath = displayedStopTriggers
         ? assumedIntrabarPath(displayedOhlc.open, displayedOhlc.high, displayedOhlc.low, displayedOhlc.close)
         : intrabarPath;
 
@@ -1099,7 +1105,7 @@ export function processStrategyOrders(context: any, phase: 'open' | 'close' = 'o
                 position: entryFillPathPosition(
                     order,
                     parseDirection(order.direction),
-                    snapExecutionPrices && order.type === 'stop' ? displayedIntrabarPath : intrabarPath,
+                    displayedStopTriggers && order.type === 'stop' ? displayedIntrabarPath : intrabarPath,
                     null,
                     false,
                 ),
@@ -1455,7 +1461,7 @@ export function processStrategyOrders(context: any, phase: 'open' | 'close' = 'o
             ? entryFillPathPosition(
                 order,
                 parseDirection(order.direction),
-                snapExecutionPrices && order.type === 'stop' ? displayedIntrabarPath : intrabarPath,
+                displayedStopTriggers && order.type === 'stop' ? displayedIntrabarPath : intrabarPath,
                 null,
                 false,
             )
@@ -1471,7 +1477,7 @@ export function processStrategyOrders(context: any, phase: 'open' | 'close' = 'o
             const entryDirection = parseDirection(order.direction);
             const positionDirection = Math.sign(strategy.position_size);
             if (positionDirection !== 0 && positionDirection !== entryDirection) {
-                const fillPath = snapExecutionPrices && order.type === 'stop'
+                const fillPath = displayedStopTriggers && order.type === 'stop'
                     ? displayedIntrabarPath
                     : intrabarPath;
                 const entryPathPosition = entryFillPathPosition(
@@ -1500,11 +1506,20 @@ export function processStrategyOrders(context: any, phase: 'open' | 'close' = 'o
             // A price-based fill, including slippage, cannot exist outside
             // the bar that filled it. Stock intrabar stops are evaluated
             // against displayed OHLC, so use that same range for the
-            // non-gap clamp. Gap fills retain raw OHLC here and are snapped
+            // non-gap clamp. Crypto/spot stops are triggered on the displayed
+            // OHLC too, but take the displayed range only when the fill lies
+            // beyond the raw range by more than float noise (a level reached
+            // on the displayed high/low only, 1828: 0.0792 vs raw 0.07919);
+            // otherwise the raw clamp keeps absorbing the level's 1-ulp noise
+            // (1665: level 2.5380000000000003, raw high 2.538). Gap fills
+            // retain raw OHLC here and are snapped
             // after this block — the snap must NOT lift the fill out of the
             // bar's range (HIGH-2: a buy-stop crossed at the gap with
             // open=high=102 and slippage 1 fills at 102, never 102.01).
-            const clampOhlc = snapExecutionPrices && order.type === 'stop' && !gapExecution
+            const noiseEps = 1e-12 * Math.max(1, Math.abs(fillPrice));
+            const beyondRawRange = fillPrice > rawOhlc.high + noiseEps || fillPrice < rawOhlc.low - noiseEps;
+            const clampOhlc = order.type === 'stop' && !gapExecution
+                && (snapExecutionPrices || (displayedStopTriggers && beyondRawRange))
                 ? displayedOhlc
                 : rawOhlc;
             if (order.type === 'limit' || order.type === 'stop') {
@@ -1727,7 +1742,7 @@ export function processStrategyOrders(context: any, phase: 'open' | 'close' = 'o
             // path. A pre-existing exit may attach to it, but cannot inherit
             // a trigger crossed earlier in the same bar.
             const fillsAtClose = closePhase && order.type === 'market' && order.bar === context.idx;
-            const fillPath = snapExecutionPrices && order.type === 'stop'
+            const fillPath = displayedStopTriggers && order.type === 'stop'
                 ? displayedIntrabarPath
                 : intrabarPath;
             const fillPathPosition = interiorMarketableLimit
