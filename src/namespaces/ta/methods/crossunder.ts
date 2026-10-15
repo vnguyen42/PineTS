@@ -8,17 +8,18 @@ export function crossunder(context: any) {
         const s2 = Series.from(source2);
 
         // Stateless calculation (accesses past data via Series)
-
-        // Get current values
         const current1 = s1.get(0);
         const current2 = s2.get(0);
+        if (!(current1 < current2)) return false;
 
-        // Get previous values
-        const prev1 = s1.get(1);
-        const prev2 = s2.get(1);
-
-        // Check if source1 crossed below source2
-        // TradingView: previous was at or above, current is strictly below
-        return prev1 >= prev2 && current1 < current2;
+        // TradingView: previous was at or above, current is strictly below.
+        // Bars where either value is na are skipped: the previous point is
+        // the most recent bar where both values are non-na.
+        for (let j = 1, n = Math.min(s1.length, s2.length); j < n; j++) {
+            const prev1 = s1.get(j);
+            const prev2 = s2.get(j);
+            if (!isNaN(prev1) && !isNaN(prev2)) return prev1 >= prev2;
+        }
+        return false;
     };
 }
