@@ -123,7 +123,13 @@ export function entry(context: any) {
             );
         }
         const strategy = context.strategy;
-        const qtyValue      = extractValue(parsed.qty);
+        // An `na` qty is no qty: TV sizes the order with the strategy's default
+        // quantity type and value ("If a call ... specifies a non-na `qty` value,
+        // that call ignores the strategy's default", Concepts / Strategies).
+        // Revealed by 2473 (`qty = useRiskMagmt ? riskBasedQty : na`), whose
+        // entries were all dropped as size-NaN orders. Normalized like the
+        // price levels: a NaN number and the bare `na` literal are both "no qty".
+        const qtyValue      = normalizeOrderLevel(extractValue(parsed.qty), false);
         const hasLimitLevel = Object.prototype.hasOwnProperty.call(parsed, 'limit') && parsed.limit !== undefined;
         const hasStopLevel  = Object.prototype.hasOwnProperty.call(parsed, 'stop') && parsed.stop !== undefined;
         const limitValue    = normalizeOrderLevel(extractValue(parsed.limit), hasStopLevel);
