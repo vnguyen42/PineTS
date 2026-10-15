@@ -32,6 +32,7 @@
  */
 
 import * as astring from 'astring';
+import type { Pattern, Statement } from 'acorn';
 
 const SLICING_TARGETS = new Set(['security_lower_tf', 'security']);
 
@@ -402,14 +403,72 @@ function findTruncatedReturnTemps(stmt: any, fnName: string, graph: Map<string, 
     return temps;
 }
 
+/**
+ * `temps` holds both kinds of value the slice no longer produces: series
+ * slots of the truncated return (member-chain keys such as `$$.let.fn6__SSB`,
+ * read through `$.get`) and the JS locals of removed declarations (plain
+ * names such as `p155`, read as bare identifiers). A chain key always has a
+ * dot and a local never does, so one set serves both lookups.
+ */
 function containsTruncatedReturnRead(node: any, temps: Set<string>): boolean {
     let found = false;
+    // Non-computed member properties and object keys are names, not reads.
+    const names = new WeakSet<object>();
     walkExecutableAst(node, (candidate) => {
+        if (candidate.type === 'MemberExpression' && !candidate.computed) names.add(candidate.property);
+        if (candidate.type === 'Property' && !candidate.computed && !candidate.shorthand) names.add(candidate.key);
+        if (candidate.type === 'Identifier' && !names.has(candidate) && temps.has(candidate.name)) found = true;
         if (!isDollarMethodCall(candidate, 'get')) return;
         const temp = memberChainKey(candidate.arguments?.[0]);
         if (temp && temps.has(temp)) found = true;
     });
     return found;
+}
+
+/** Add every name a declaration pattern binds (`x`, `[a, b]`, `{a, b: c}`, defaults, rest). */
+function collectBindingNames(pattern: Pattern | null, out: Set<string>): void {
+    if (!pattern) return;
+    switch (pattern.type) {
+        case 'Identifier':
+            out.add(pattern.name);
+            return;
+        case 'ArrayPattern':
+            for (const element of pattern.elements) collectBindingNames(element, out);
+            return;
+        case 'ObjectPattern':
+            for (const property of pattern.properties) {
+                collectBindingNames(property.type === 'Property' ? property.value : property, out);
+            }
+            return;
+        case 'AssignmentPattern':
+            collectBindingNames(pattern.left, out);
+            return;
+        case 'RestElement':
+            collectBindingNames(pattern.argument, out);
+            return;
+    }
+}
+
+/**
+ * Drop the consumers of a statement list, in source order. A dropped
+ * declaration's bindings join `temps`, so the statements that read them are
+ * consumers too: script 2658 declares `const p155 = math.param($.get(SSA) -
+ * $.get(SSB))` (SSB truncated) then `const temp_63 = math.abs(p155)`, and a
+ * slice keeping the second without the first throws `p155 is not defined`
+ * (and fails Studio's safe-script gate on the free `p155`).
+ */
+function removeConsumerStatements(stmts: Statement[], temps: Set<string>): Statement[] {
+    const kept: Statement[] = [];
+    for (const stmt of stmts || []) {
+        if (isTruncatedReturnConsumer(stmt, temps)) {
+            if (stmt.type === 'VariableDeclaration') {
+                for (const declaration of stmt.declarations) collectBindingNames(declaration.id, temps);
+            }
+            continue;
+        }
+        kept.push(removeTruncatedReturnConsumers(stmt, temps));
+    }
+    return kept;
 }
 
 /**
@@ -446,12 +505,7 @@ function removeTruncatedReturnConsumers(node: any, temps: Set<string>): any {
     if (!node || typeof node !== 'object' || temps.size === 0) return node;
     switch (node.type) {
         case 'BlockStatement':
-            return {
-                ...node,
-                body: (node.body || [])
-                    .filter((stmt: any) => !isTruncatedReturnConsumer(stmt, temps))
-                    .map((stmt: any) => removeTruncatedReturnConsumers(stmt, temps)),
-            };
+            return { ...node, body: removeConsumerStatements(node.body, temps) };
         // A kept function whose body destructures the truncated fn's return
         // carries the same dead temp reads one nesting level deeper (probe C:
         // `outer()` destructures `inner()`'s truncated return). Recurse into
@@ -479,12 +533,7 @@ function removeTruncatedReturnConsumers(node: any, temps: Set<string>): any {
                 cases: (node.cases || []).map((caseNode: any) => removeTruncatedReturnConsumers(caseNode, temps)),
             };
         case 'SwitchCase':
-            return {
-                ...node,
-                consequent: (node.consequent || [])
-                    .filter((stmt: any) => !isTruncatedReturnConsumer(stmt, temps))
-                    .map((stmt: any) => removeTruncatedReturnConsumers(stmt, temps)),
-            };
+            return { ...node, consequent: removeConsumerStatements(node.consequent, temps) };
         case 'TryStatement':
             return {
                 ...node,
