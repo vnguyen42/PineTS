@@ -168,6 +168,11 @@ export function preProcessUdtRegistry(ast: any, scopeManager: ScopeManager): voi
     }
 
     // Pass 2: collect variables initialized to a UDT instance.
+    // `udtArrays` maps an array variable created as `array.new(size, <UDT-init>)`
+    // to its element type, so a binding read from it (`first = arr.first()`)
+    // is a UDT instance too. Declarations are visited in source order, so the
+    // array is known before its element reads.
+    const udtArrays = new Map<string, string>();
     walk.simple(ast, {
         VariableDeclaration(node: any) {
             for (const decl of node.declarations) {
@@ -175,10 +180,13 @@ export function preProcessUdtRegistry(ast: any, scopeManager: ScopeManager): voi
 
                 // Scalar binding: `let bar = <init>`.
                 if (decl.id?.type === 'Identifier') {
-                    const typeName = inferUdtTypeFromInit(decl.init, scopeManager);
+                    const typeName =
+                        inferUdtTypeFromInit(decl.init, scopeManager) ?? udtArrayElementType(decl.init, udtArrays);
                     if (typeName) {
                         scopeManager.markVariableAsUdtInstance(decl.id.name, typeName);
                     }
+                    const elementType = udtArrayNewElementType(decl.init, scopeManager);
+                    if (elementType) udtArrays.set(decl.id.name, elementType);
                     continue;
                 }
 
@@ -336,6 +344,56 @@ export function inferDirectUdtFactoryType(init: unknown, scopeManager: ScopeMana
         return objectName;
     }
     return undefined;
+}
+
+/** A non-computed `<object>.<property>(...)` call: its object/property names and arguments. */
+function namedMemberCall(init: unknown): { object: string; property: string; args: unknown[] } | undefined {
+    if (!init || typeof init !== 'object') return undefined;
+    const candidate = init as {
+        type?: string;
+        arguments?: unknown[];
+        callee?: {
+            type?: string;
+            computed?: boolean;
+            object?: { type?: string; name?: string };
+            property?: { type?: string; name?: string };
+        };
+    };
+    const callee = candidate.callee;
+    if (
+        candidate.type !== 'CallExpression' ||
+        callee?.type !== 'MemberExpression' ||
+        callee.computed ||
+        callee.object?.type !== 'Identifier' ||
+        callee.property?.type !== 'Identifier' ||
+        !callee.object.name ||
+        !callee.property.name
+    ) {
+        return undefined;
+    }
+    return { object: callee.object.name, property: callee.property.name, args: candidate.arguments ?? [] };
+}
+
+/** UDT element type of `array.new(size, <UDT-init>)` (`array.new<T>(size, T.new(…))` in Pine). */
+function udtArrayNewElementType(init: unknown, scopeManager: ScopeManager): string | undefined {
+    const call = namedMemberCall(init);
+    if (call?.object !== 'array' || call.property !== 'new') return undefined;
+    return inferUdtTypeFromInit(call.args[1], scopeManager);
+}
+
+/** Pine array methods returning one element of the array. */
+const ARRAY_ELEMENT_METHODS: Record<string, true> = { get: true, first: true, last: true, pop: true, shift: true, remove: true };
+
+/**
+ * UDT type of an element read from a known UDT array (`arr.first()`, `arr.get(i)`, …).
+ * Revealed by script 2692: `firstBl = aUniBl.first()` then `firstBl.active[1]`
+ * inside an `if` — unregistered, the history subscript left `firstBl` unlowered
+ * (a free JS identifier: ReferenceError, and Studio's safe-script gate refusal).
+ */
+function udtArrayElementType(init: unknown, udtArrays: ReadonlyMap<string, string>): string | undefined {
+    const call = namedMemberCall(init);
+    if (!call || !Object.hasOwn(ARRAY_ELEMENT_METHODS, call.property)) return undefined;
+    return udtArrays.get(call.object);
 }
 
 /**
