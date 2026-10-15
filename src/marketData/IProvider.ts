@@ -43,6 +43,13 @@ export type ISymbolInfo = {
     // Session & Market
     expiration_date: number; //Pinescript timestamp
     session: string;
+    /**
+     * Host extension, not a Pine field: the exchange's session holidays in TradingView's
+     * `symbol_resolved.session_holidays` format ("20230116,20230220,…"). On an overnight session a
+     * holiday's sessions join the next trading day (time('D'), time_tradingday, session.isfirstbar).
+     * Absent = no holidays.
+     */
+    session_holidays?: string;
     volumetype: string;
 
     // Price & Contract Info

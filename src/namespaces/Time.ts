@@ -253,10 +253,13 @@ export function getDatePartsInTimezone(timestamp: number, timezone: string): Dat
 
 // ── Overnight trading days (futures, forex) ─────────────────────────
 
-/** An overnight session: opens at `open` (minute of the local day in `timezone`) the evening before its trading day. */
-export type TradingDaySession = { timezone: string; open: number };
+/**
+ * An overnight session: opens at `open` (minute of the local day in `timezone`) the evening before
+ * its trading day. `holidays` are the exchange's session holidays (UTC day numbers).
+ */
+export type TradingDaySession = { timezone: string; open: number; holidays: ReadonlySet<number> };
 /** The part of a run context the trading-day helpers read. */
-type SyminfoContext = { pine?: { syminfo?: { session?: unknown; timezone?: string } | null } } | null | undefined;
+type SyminfoContext = { pine?: { syminfo?: { session?: unknown; timezone?: string; session_holidays?: unknown } | null } } | null | undefined;
 
 const MS_DAY = 86_400_000;
 const overnightSessions = new Map<string, TradingDaySession | null>();
@@ -274,7 +277,8 @@ export function overnightSession(context: SyminfoContext): TradingDaySession | n
     const session = syminfo?.session;
     if (typeof session !== 'string') return null;
     const timezone = syminfo.timezone || 'UTC';
-    const key = `${session}|${timezone}`;
+    const holidayList = typeof syminfo.session_holidays === 'string' ? syminfo.session_holidays : '';
+    const key = `${session}|${timezone}|${holidayList}`;
     let found = overnightSessions.get(key);
     if (found === undefined) {
         found = null;
@@ -282,7 +286,11 @@ export function overnightSession(context: SyminfoContext): TradingDaySession | n
         if (match) {
             const open = Number(match[1]) * 60 + Number(match[2]);
             const close = Number(match[3]) * 60 + Number(match[4]);
-            if (open > close || (open === close && open !== 0)) found = { timezone, open };
+            const holidays = new Set<number>();
+            for (const date of holidayList.matchAll(/(\d{4})(\d\d)(\d\d)/g)) {
+                holidays.add(Date.UTC(Number(date[1]), Number(date[2]) - 1, Number(date[3])) / MS_DAY);
+            }
+            if (open > close || (open === close && open !== 0)) found = { timezone, open, holidays };
         }
         overnightSessions.set(key, found);
     }
@@ -304,14 +312,34 @@ function localToUtc(local: number, timezone: string, near: number): number {
 /**
  * The trading day holding `timestamp` on an overnight session: its start (UTC ms of the session
  * open) and its label (00:00 UTC of the trading day's date, TradingView's `time_tradingday`).
+ * A session opening the evening before a session holiday belongs to the next trading day, and
+ * that day starts at the first such session (TradingView syminfo `session_holidays`; 2511
+ * NYMEX:NG1! 60: the 2023-01-16 Martin Luther King Day sessions and the 2023-01-17 session form
+ * one trading day from Sunday 18:00, so its `time('D')` does not change on Monday 18:00).
  */
 export function tradingDayOf(timestamp: number, session: TradingDaySession): { start: number; label: number } {
     const local = timestamp + zoneOffset(timestamp, session.timezone);
     let openLocal = Math.floor(local / MS_DAY) * MS_DAY + session.open * 60_000;
     if (local < openLocal) openLocal -= MS_DAY;
+    const day = Math.floor(openLocal / MS_DAY) + 1;
+    let labelDay = day;
+    let firstDay = day;
+    if (session.holidays.size > 0) {
+        const weekend = (d: number) => {
+            const weekday = new Date(d * MS_DAY).getUTCDay();
+            return weekday === 0 || weekday === 6;
+        };
+        while (session.holidays.has(labelDay)) {
+            labelDay++;
+            while (weekend(labelDay)) labelDay++;
+        }
+        for (let previous = day - 1; session.holidays.has(previous) || weekend(previous); previous--) {
+            if (session.holidays.has(previous)) firstDay = previous;
+        }
+    }
     return {
-        start: localToUtc(openLocal, session.timezone, timestamp),
-        label: Math.floor(openLocal / MS_DAY) * MS_DAY + MS_DAY,
+        start: localToUtc(openLocal - (day - firstDay) * MS_DAY, session.timezone, timestamp),
+        label: labelDay * MS_DAY,
     };
 }
 
