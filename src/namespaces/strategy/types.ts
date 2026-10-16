@@ -294,6 +294,14 @@ export interface Order {
     _exit_bound_activation_ids?: string[];
     _exit_bound_entry_ids?: string[];
     _exit_bound_direction?: -1 | 1;
+    // Internal: a wildcard exit placed while flat with an entry pending is
+    // bound to nothing yet; it waits for the next activation of either
+    // direction and binds to it when it attaches (2120).
+    _exit_waits_next_activation?: boolean;
+    // Internal: bar on which a wildcard exit first placed while flat was
+    // created; an in-place refresh of the live instance keeps it. Between two
+    // such exits the earlier one reserves first (2120); absent elsewhere.
+    _exit_created_bar?: number;
     // Internal: distinguishes a refreshed broker order from a newly-created
     // instance with the same logical (id, from_entry) key.
     _exit_refreshed?: boolean;

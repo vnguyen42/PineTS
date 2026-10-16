@@ -66,10 +66,20 @@ describe('VIN-125 strategy.exit call-time binding', () => {
 
         const pending = makeContext();
         entry(pending)('L', 'long');
-        exit(pending)('pending', { profit: 10 });
+        exit(pending)('pending', 'L', { profit: 10 });
         const pendingOrder = exitOrders(pending)[0];
         expect(pendingOrder._exit_bound_direction).toBe(1);
         expect(pendingOrder._exit_bound_entry_ids).toEqual(['L']);
+
+        // 2120: a wildcard exit placed while flat waits for the next
+        // activation of either direction instead of binding to the entry.
+        const waiting = makeContext();
+        entry(waiting)('L', 'long');
+        exit(waiting)('waiting', { profit: 10 });
+        const waitingOrder = exitOrders(waiting)[0];
+        expect(waitingOrder._exit_waits_next_activation).toBe(true);
+        expect(waitingOrder._exit_bound_direction).toBeUndefined();
+        expect(waitingOrder._exit_bound_entry_ids).toBeUndefined();
     });
 
     it('lets a wildcard orphan bind an entry submitted later in the same evaluation', () => {

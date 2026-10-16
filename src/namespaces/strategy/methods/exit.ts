@@ -179,11 +179,13 @@ export function exit(context: any) {
         // Conditional exits bind to the call-time position, not the
         // activation book that exists after a later reversal fills. When an
         // open activation is present it takes precedence over pending
-        // entries; when flat, preserve the same-evaluation entry(); exit()
-        // pattern only if pending entries have one unambiguous direction.
+        // entries; when flat, an explicit from_entry exit binds to its
+        // pending entry only if pending entries have one unambiguous
+        // direction.
         let boundActivationIds: string[] | undefined;
         let boundEntryIds: string[] | undefined;
         let boundDirection: -1 | 1 | undefined;
+        let waitsNextActivation = false;
         if (matchingActivations.length > 0) {
             boundActivationIds = Array.from(new Set(matchingActivations.map((activation) => activation.id)));
             const direction = matchingActivations.find((activation) => activation.direction === 1 || activation.direction === -1)?.direction;
@@ -208,6 +210,17 @@ export function exit(context: any) {
             ));
             if (pendingDirections.length === 1) {
                 boundDirection = pendingDirections[0];
+            }
+            if (!fromEntryId) {
+                // 2120 (NASDAQ:DOCU 60): a wildcard exit placed while flat
+                // is not tied to the entry pending at the call. TV keeps it
+                // after that entry is cancelled and attaches it to the next
+                // position of either direction: the long stop 57.18 placed
+                // on bar 9901 closes the short filled at 59.76 on bar 9922
+                // at that fill price. The pending direction still rounds the
+                // limit (2808).
+                waitsNextActivation = true;
+            } else if (pendingDirections.length === 1) {
                 boundEntryIds = Array.from(new Set(pendingMatchingEntries.map((order) => order.id)));
                 boundActivationIds = [];
             } else {
@@ -288,7 +301,9 @@ export function exit(context: any) {
             _exit_lifecycle_key: lifecycleKey,
             _exit_bound_activation_ids: boundActivationIds,
             _exit_bound_entry_ids: boundEntryIds,
-            _exit_bound_direction: boundDirection,
+            _exit_bound_direction: waitsNextActivation ? undefined : boundDirection,
+            _exit_waits_next_activation: waitsNextActivation || undefined,
+            _exit_created_bar: waitsNextActivation ? context.idx : undefined,
             _exit_refreshed: false,
             _excluded_activation_trade_ids: excludedActivationTradeIds,
             _excluded_consumed_trade_ids: excludedConsumedTradeIds,
@@ -309,12 +324,23 @@ export function exit(context: any) {
         if (pending !== undefined) {
             const trailArmed = pending.trail_armed;
             const trailPeak = pending.trail_peak;
+            // A refresh modifies a live broker order in place and keeps its
+            // place in the exit queue (2120 bar 13910). Only an instance
+            // bound to activations that are all closed is gone for TV: the
+            // call places a new order.
+            const boundIds = pending._exit_bound_activation_ids;
+            const liveInstance = boundIds === undefined
+                || boundIds.length === 0
+                || boundIds.some((id) => matchingTradeIds.includes(id))
+                || (pending._exit_bound_entry_ids ?? []).some((id) => pendingMatchingEntries.some((entry) => entry.id === id));
+            const createdBar = liveInstance ? pending._exit_created_bar : order._exit_created_bar;
             const activationExclusions = pending._excluded_activation_trade_ids;
             const consumedExclusions = pending._excluded_consumed_trade_ids;
             const continuousSameLifecycle =
                 pending.bar === context.idx - 1
                 || (pending.bar === context.idx && pending._isPersistent === true);
             Object.assign(pending, order);
+            pending._exit_created_bar = createdBar;
             // VIN-120: a refresh is never a fresh instance — drop the
             // pass-scoped marker so a later bar with a coincident COF pass
             // number cannot drain this bracket same-tick as if it were new.

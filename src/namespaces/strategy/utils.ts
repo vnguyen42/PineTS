@@ -3091,7 +3091,11 @@ export function processExitOrders(
     // gap-exits it at its own fill price (2021-09-08).
     // Reservations follow the script's exit-call order, not the pending
     // array's newest-first order. Keep the original sequence on each event so
-    // equal-path execution precedence remains unchanged.
+    // equal-path execution precedence remains unchanged. Between two wildcard
+    // exits first placed while flat (2120), the one created on an earlier bar
+    // reserves first, whatever its call site (bar 13910: the short stop
+    // created on bar 13792 holds the short; the long stop created on bar
+    // 13823 does not fire).
     const exitCallsiteRank = (order: Order): number => {
         if ((order.category ?? 'entry') !== 'exit' || order._callsiteId === undefined) {
             return Number.MAX_SAFE_INTEGER;
@@ -3099,10 +3103,16 @@ export function processExitOrders(
         const suffix = /(\d+)$/.exec(order._callsiteId);
         return suffix === null ? Number.MAX_SAFE_INTEGER : Number(suffix[1]);
     };
+    const exitQueueOrder = (left: Order, right: Order): number => {
+        const leftRank = exitCallsiteRank(left);
+        const rightRank = exitCallsiteRank(right);
+        if (left._exit_created_bar === undefined || right._exit_created_bar === undefined) return leftRank - rightRank;
+        return left._exit_created_bar - right._exit_created_bar || leftRank - rightRank;
+    };
     const orderedPendingEntries = strategy.pending_orders
         .map((order, orderSequence) => ({ order, orderSequence }))
         .sort((left, right) =>
-            exitCallsiteRank(left.order) - exitCallsiteRank(right.order)
+            exitQueueOrder(left.order, right.order)
             || left.orderSequence - right.orderSequence,
         );
     for (const { orderSequence, order } of orderedPendingEntries) {
@@ -3204,9 +3214,11 @@ export function processExitOrders(
         if (matching.length === 0) {
             // Exit orders placed before their matching entry wait for it,
             // including deferred entries captured at call time. Once the
-            // captured entry is cancelled, the exit is dead; it must not
-            // attach to a later opposite-direction activation.
+            // captured entry is cancelled, a from_entry exit is dead; it must
+            // not attach to a later opposite-direction activation. A wildcard
+            // exit placed while flat waits for the next activation (2120).
             const waitingForEntry = waitingForBoundEntry
+                || order._exit_waits_next_activation === true
                 || (
                     usesIntrabarPath
                     && !order._intended_trade_ids
@@ -3216,6 +3228,14 @@ export function processExitOrders(
                 order.status = 'cancelled';
             }
             continue;
+        }
+        if (order._exit_waits_next_activation === true) {
+            // Attached: from now on it lives and dies with this position
+            // (2120 bar 12383: the long stop placed flat on bar 12364 holds
+            // the short; the short stop of the long closed on bar 12357 is gone).
+            order._exit_bound_activation_ids = Array.from(new Set(matching.map((t) => t._activation_id ?? t.id)));
+            order._exit_bound_direction = Math.sign(matching[0].size) === 1 ? 1 : -1;
+            delete order._exit_waits_next_activation;
         }
 
         const matchingQty = matching.reduce((sum, t) => sum + Math.abs(t.size), 0);
@@ -3469,6 +3489,11 @@ export function processExitOrders(
             // inherit the bar's earlier open/high.
             const entryBar = t._activation_entry_bar_index ?? t.entry_bar_index;
             const entryPathSegment = t._activation_entry_path_segment;
+            // Under process_orders_on_close a position entered on this bar
+            // meets an older bracket in the close phase at its close only:
+            // the bar's earlier path predates it (2120 bar 10602: the long
+            // filled at the close 59.52 is not stopped at the open 58.13).
+            const closeOnlyTrade = closeOnly || (closePhase && cofState === null && entryBar === context.idx);
             const gateToActivation = phase === 'intrabar'
                 && cofState === null
                 && entryBar === context.idx
@@ -3490,7 +3515,7 @@ export function processExitOrders(
             // crosses again.
             let tpHit = false;
             if (tp !== undefined) {
-                if (closeOnly) {
+                if (closeOnlyTrade) {
                     // process_orders_on_close evaluates a bracket placed on
                     // this bar against the close only. High/low values from
                     // the already-completed intrabar path are not replayed.
@@ -3541,7 +3566,7 @@ export function processExitOrders(
                 }
             }
             if (sl !== undefined) {
-                if (closeOnly) {
+                if (closeOnlyTrade) {
                     // A close-phase stop is marketable only when the close
                     // itself is beyond the current stop. Do not reuse a
                     // historical low/high crossing from the intrabar pass.
@@ -3584,7 +3609,7 @@ export function processExitOrders(
             if (kind === 'loss') {
                 const openPastSl = cofMarkedThisPass
                     ? (isLong ? cofTickPrice! <= (sl as number) : cofTickPrice! >= (sl as number))
-                    : !closeOnly && (
+                    : !closeOnlyTrade && (
                         slExecution !== undefined
                             ? slExecution.position.pathSegment === -1
                             : atOpenTick && (isLong ? openPrice <= (sl as number) : openPrice >= (sl as number))
@@ -3617,13 +3642,13 @@ export function processExitOrders(
                         qty: tQty,
                         price: cofMarkedThisPass
                             ? cofTickPrice!
-                            : closeOnly
+                            : closeOnlyTrade
                               ? closePrice
                               : slExecution?.fillPrice ?? (openPastSl ? rawOpenPrice : (sl as number)),
                         kind: 'loss',
                         tradeId: activationId,
                         gap: openPastSl,
-                        atClose: closeOnly,
+                        atClose: closeOnlyTrade,
                         forcedSegment: forcedSegmentFor(slExecution),
                     });
                 } else if (tpHit) {
@@ -3633,7 +3658,7 @@ export function processExitOrders(
             if (kind === 'profit') {
                 const openPastTp = cofMarkedThisPass || (cofState !== null && order.bar === context.idx && order._cof_marketable_next_pass === cofState.pass)
                     ? (isLong ? cofTickPrice! >= (tp as number) : cofTickPrice! <= (tp as number))
-                    : !closeOnly && (
+                    : !closeOnlyTrade && (
                         tpExecution !== undefined
                             ? tpExecution.position.pathSegment === -1
                             : atOpenTick && (isLong ? openPrice >= (tp as number) : openPrice <= (tp as number))
@@ -3642,13 +3667,13 @@ export function processExitOrders(
                     qty: tQty,
                     price: cofState !== null && openPastTp
                         ? cofTickPrice!
-                        : closeOnly
+                        : closeOnlyTrade
                           ? closePrice
                           : tpExecution?.fillPrice ?? (openPastTp ? rawOpenPrice : (tp as number)),
                     kind: 'profit',
                     tradeId: activationId,
                     gap: openPastTp,
-                    atClose: closeOnly,
+                    atClose: closeOnlyTrade,
                     forcedSegment: forcedSegmentFor(tpExecution),
                 });
             }
