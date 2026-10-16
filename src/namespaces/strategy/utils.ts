@@ -1530,7 +1530,13 @@ export function processStrategyOrders(context: any, phase: 'open' | 'close' = 'o
                 && (snapExecutionPrices || (displayedStopTriggers && beyondRawRange))
                 ? displayedOhlc
                 : rawOhlc;
-            if (order.type === 'limit' || order.type === 'stop') {
+            // A stop already marketable at submission executes as a MARKET
+            // order at the next open, and like a market fill its slippage is
+            // not clamped to the bar: BINANCE:ENAUSDT 60 (script 2097,
+            // slippage 2) — the long entry of 2024-09-26 12:00 on a bar
+            // open = high = 0.3729 fills at 0.3731 on TradingView (21/21
+            // such entries at open ± 2 ticks beyond the bar's high/low).
+            if (order.type === 'limit' || (order.type === 'stop' && !order._stop_marketable)) {
                 fillPrice = Math.min(clampOhlc.high, Math.max(clampOhlc.low, nominalFillPrice));
             } else {
                 fillPrice = nominalFillPrice;
@@ -1569,7 +1575,7 @@ export function processStrategyOrders(context: any, phase: 'open' | 'close' = 'o
                     // limits restent au prix de placement (jamais snappées
                     // ici — pas de chemin gap) et les market fills gardent
                     // leur prix composé (HEAD : jamais clampés en gap).
-                    if (order.type === 'stop') {
+                    if (order.type === 'stop' && !order._stop_marketable) {
                         fillPrice = Math.min(displayedOhlc.high, Math.max(displayedOhlc.low, fillPrice));
                     }
                 } else {
