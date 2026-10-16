@@ -95,7 +95,20 @@ const BARSTATE_HISTORY_FLAGS: Record<string, true> = {
     islastconfirmedhistory: true,
 };
 
-function getSingletonHistoryKind(node: any): { kind: 'time' | 'barstate'; name: string } | undefined {
+// VIN-240: `session.ismarket[1]` read the scalar's index (undefined → false on every bar).
+const SESSION_HISTORY_FLAGS: Record<string, true> = {
+    isfirstbar: true,
+    islastbar: true,
+    isfirstbar_regular: true,
+    islastbar_regular: true,
+    ismarket: true,
+    ispremarket: true,
+    ispostmarket: true,
+};
+
+type SingletonHistoryKind = { kind: 'time' | 'barstate' | 'session'; name: string };
+
+function getSingletonHistoryKind(node: any): SingletonHistoryKind | undefined {
     if (!node?.computed || node.property?.type === 'PrivateIdentifier') return undefined;
 
     if (
@@ -106,26 +119,27 @@ function getSingletonHistoryKind(node: any): { kind: 'time' | 'barstate'; name: 
         return { kind: 'time', name: node.object.name };
     }
 
+    const namespace = node.object?.object?.name;
     if (
         node.object?.type === 'MemberExpression' &&
         !node.object.computed &&
         node.object.object?.type === 'Identifier' &&
-        node.object.object.name === 'barstate' &&
         node.object.property?.type === 'Identifier' &&
-        BARSTATE_HISTORY_FLAGS[node.object.property.name]
+        ((namespace === 'barstate' && BARSTATE_HISTORY_FLAGS[node.object.property.name]) ||
+            (namespace === 'session' && SESSION_HISTORY_FLAGS[node.object.property.name]))
     ) {
-        return { kind: 'barstate', name: node.object.property.name };
+        return { kind: namespace, name: node.object.property.name };
     }
 
     return undefined;
 }
 
-function createSingletonSeries(historyKind: { kind: 'time' | 'barstate'; name: string }): any {
-    if (historyKind.kind === 'barstate') {
-        const barstate = ASTFactory.createIdentifier('barstate');
-        barstate._skipTransformation = true;
+function createSingletonSeries(historyKind: SingletonHistoryKind): any {
+    if (historyKind.kind !== 'time') {
+        const namespace = ASTFactory.createIdentifier(historyKind.kind);
+        namespace._skipTransformation = true;
         const accessor = ASTFactory.createMemberExpression(
-            barstate,
+            namespace,
             ASTFactory.createIdentifier('__series'),
         );
         const series = ASTFactory.createCallExpression(accessor, [ASTFactory.createLiteral(historyKind.name)]);
