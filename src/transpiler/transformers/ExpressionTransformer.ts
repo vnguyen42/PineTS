@@ -2099,8 +2099,11 @@ export function transformCallExpression(node: any, scopeManager: ScopeManager, n
 
         // Inject unique call ID for TA functions to enable proper state management
         if (namespace === 'ta') {
-            if (scopeManager.getCurrentScopeType() === 'fn') {
-                // If inside a function, combine $$.id with the static ID
+            if (scopeManager.isInsideFunctionScope()) {
+                // Inside a function (its body or a nested if/for/while/switch),
+                // combine $$.id with the static ID so each call path keeps its
+                // own state: two `f_ma(type, close, len)` calls with the EMA
+                // inside an `if type == 'EMA'` block (script 1715) shared one.
                 const staticId = scopeManager.getNextTACallId();
 
                 // Manually resolve $$ from scope to ensure it uses the scoped variable name
