@@ -63,8 +63,9 @@ describe('crypto-market-fill-mintick-snap (1592)', () => {
         expect(context.strategy.closedtrades[0].exit_price).toBe(0.00561);
     });
 
-    it('does not snap a market fill for a non-crypto, non-stock asset', () => {
-        const context = makeContext('forex');
+    it('does not snap a market fill for an asset class outside the proven set', () => {
+        // Forex joined the snapped classes (forex-market-fill-mintick-snap-2029).
+        const context = makeContext('futures');
         entry(context)('M', 'long');
         setBar(context, 1, 0.0056051, 0.0056051, 0.0056, 0.0056);
 

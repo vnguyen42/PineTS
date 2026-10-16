@@ -1046,8 +1046,12 @@ export function processStrategyOrders(context: any, phase: 'open' | 'close' = 'o
     // 225.515 + 1 tick → 225.52, jamais 225.53). Seul le snap des fills est
     // étendu : l'OHLC affiché, les stops intrabar (niveau de déclencheur) et
     // les limites (prix de placement) gardent leur sémantique.
+    // Forex follows the same market-fill snap (composition A): TV fills the
+    // half-tick open 1.087225 of FX:EURUSD at 1.08723 (script 2029, also
+    // 1763/2733) and FX:CADJPY 109.3055 at 109.305 (2550) — Math.round of
+    // the binary quotient, 7/7 off-grid open fills in the forex captures.
     const snapExecutionFills = snapExecutionPrices || assetType === 'crypto' || assetType === 'spot'
-        || assetType === 'etf' || assetType === 'fund';
+        || assetType === 'etf' || assetType === 'fund' || assetType === 'forex';
     // HIGH-1/MEDIUM-1 (re-revue VIN-2479) : la composition EN ESPACE TICKS
     // (règle B — snap AVANT slippage, slipTicks = dir·slippage) n'est
     // prouvée que sur les classes stock-like — stock/etf/fund, R3
@@ -2993,7 +2997,7 @@ export function processExitOrders(
     // market/gap aux classes stock-like que dans processStrategyOrders —
     // « fund » (symbol_resolved TV : SPY 2479, VXX 2676) et « etf » (FMP).
     const snapExecutionFills = snapExecutionPrices || assetType === 'crypto' || assetType === 'spot'
-        || assetType === 'etf' || assetType === 'fund';
+        || assetType === 'etf' || assetType === 'fund' || assetType === 'forex';
     // HIGH-1/MEDIUM-1 (re-revue VIN-2479) : la composition EN ESPACE TICKS
     // (règle B) n'est prouvée que sur les classes stock-like ; crypto/spot
     // conservent leur composition A héritée (81fcb5c, 9 deltas mesurés à

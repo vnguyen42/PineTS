@@ -169,12 +169,13 @@ describe('stock execution snap — market and open-gap fills snap, intrabar stop
         expect(halfTick.context.strategy.opentrades[0].entry_price).toBe(19.66);
     });
 
-    it('NON-crypto/non-stock is unchanged: market open keeps its raw value', () => {
-        const context = makeContext({}, 'forex');
+    it('an asset class outside the proven set is unchanged: market open keeps its raw value', () => {
+        // Forex joined the snapped classes (forex-market-fill-mintick-snap-2029).
+        const context = makeContext({}, 'futures');
         entry(context)('M', 'long');
         setBar(context, 1, 101.037, 102, 100.5, 101.5);
         expect(processStrategyOrders(context)).toBe(1);
-        expect(context.strategy.opentrades[0].entry_price).toBe(101.037); // no snap on forex
+        expect(context.strategy.opentrades[0].entry_price).toBe(101.037); // no snap on futures
     });
 
     it('NON-stock is unchanged: intrabar off-grid stop keeps its trigger', () => {
