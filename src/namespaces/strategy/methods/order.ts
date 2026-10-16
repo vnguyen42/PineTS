@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright (C) 2026 LuxAlgo
 
-import { riskOrderRequestsHalted, calculateOrderQty, normalizeOrderLevel, parseDirection } from '../utils';
+import { riskOrderRequestsHalted, calculateOrderQty, cofCurrentTick, normalizeOrderLevel, parseDirection, roundToMintick } from '../utils';
 import { Order } from '../types';
 import { Series } from '../../../Series';
 import { parseArgsForPineParams } from '../../utils';
@@ -75,8 +75,20 @@ export function order(context: any) {
         const qtyValue      = extractValue(parsed.qty);
         const hasLimitLevel = Object.prototype.hasOwnProperty.call(parsed, 'limit') && parsed.limit !== undefined;
         const hasStopLevel  = Object.prototype.hasOwnProperty.call(parsed, 'stop') && parsed.stop !== undefined;
-        const limitValue    = normalizeOrderLevel(extractValue(parsed.limit), hasStopLevel);
+        // The limit snaps to the mintick grid away from its reference — the
+        // signal bar's close, or for a pure limit created during a
+        // calc_on_order_fills recalculation the current tick — the
+        // broker-emulator convention strategy.entry already applies
+        // (roundToMintick). 1799's take-profit `strategy.order(limit =
+        // avg × 1.02)` filled at the raw 4104.2534388048; TV fills at 4104.26.
+        // The stop level keeps its raw value: no TV ledger proves its rounding.
+        const currentPrice  = Series.from(context.data.close).get(0);
         const stopValue     = normalizeOrderLevel(extractValue(parsed.stop), hasLimitLevel);
+        const rawLimit      = normalizeOrderLevel(extractValue(parsed.limit), hasStopLevel);
+        const limitReference = stopValue === undefined ? cofCurrentTick(context.strategy) ?? currentPrice : currentPrice;
+        const limitValue    = rawLimit !== undefined
+            ? roundToMintick(rawLimit, limitReference, context.pine?.syminfo?.mintick ?? 0)
+            : undefined;
         const ocaName       = extractValue(parsed.oca_name);
         const ocaType       = extractValue(parsed.oca_type);
         const commentValue  = extractValue(parsed.comment);
@@ -88,7 +100,6 @@ export function order(context: any) {
         // Market orders use the signal bar's close; price-based orders use
         // their declared execution level, which is the price TV uses when
         // locking the default quantity.
-        const currentPrice = Series.from(context.data.close).get(0);
         const sizingPrice = stopValue !== undefined
             ? stopValue
             : limitValue !== undefined

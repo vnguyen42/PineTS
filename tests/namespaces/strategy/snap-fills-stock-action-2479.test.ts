@@ -5,6 +5,7 @@ import { entry } from '../../../src/namespaces/strategy/methods/entry';
 import { order } from '../../../src/namespaces/strategy/methods/order';
 import { close_all } from '../../../src/namespaces/strategy/methods/close_all';
 import { Series } from '../../../src/Series';
+import type { Order } from '../../../src/namespaces/strategy/types';
 
 /**
  * Famille : composition en ESPACE TICKS des fills market/GAP étendue aux
@@ -170,7 +171,10 @@ describe('stock-like (etf/fund) execution composition — market/gap fills snap 
         (type) => {
             const context = makeContext(type);
             setBar(context, 0, 100, 101, 99, 100);
-            order(context)({ id: 'L', direction: 'long', qty: 1, limit: 96.005 });
+            // An off-grid pending limit injected directly: strategy.order now
+            // away-rounds its limit at placement (1799), and this guard is
+            // about the fill path never snapping a limit level.
+            context.strategy.pending_orders.push({ id: 'L', direction: 1, qty: 1, type: 'limit', limit: 96.005, bar: 0, time: 0, status: 'pending' } as Order);
             setBar(context, 1, 97, 98, 95, 96.5);
             expect(processStrategyOrders(context)).toBe(1);
             expect(context.strategy.opentrades[0].entry_price).toBe(96.005);
