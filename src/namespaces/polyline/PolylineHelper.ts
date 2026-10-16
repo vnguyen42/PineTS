@@ -215,8 +215,8 @@ export class PolylineHelper {
      * Remove all drawing objects created at or after the given bar index.
      * Called during streaming rollback to prevent accumulation.
      */
-    rollbackFromBar(barIdx: number): void {
-        this._polylines = this._polylines.filter((pl) => pl._createdAtBar < barIdx);
+    rollbackFromBar(barIdx: number, keep?: Set<object>): void {
+        this._polylines = this._polylines.filter((pl) => pl._createdAtBar < barIdx || keep?.has(pl));
         this.syncToPlot();
     }
 }

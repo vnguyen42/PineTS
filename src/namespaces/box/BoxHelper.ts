@@ -405,8 +405,8 @@ export class BoxHelper {
      * and un-delete objects that were deleted during rolled-back bars.
      * Called during streaming rollback to prevent accumulation.
      */
-    rollbackFromBar(barIdx: number): void {
-        this._boxes = this._boxes.filter((b) => b._createdAtBar < barIdx);
+    rollbackFromBar(barIdx: number, keep?: Set<object>): void {
+        this._boxes = this._boxes.filter((b) => b._createdAtBar < barIdx || keep?.has(b));
         this.syncToPlot();
     }
 }

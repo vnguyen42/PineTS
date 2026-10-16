@@ -5,6 +5,10 @@ import { Context } from './Context.class';
 import { splitTickerModifier, stripTickerModifier, transformHeikinAshi, transformHeikinAshiCandle, withTickerModifier } from './tickerModifier';
 import { Series } from './Series';
 import { Indicator } from './Indicator';
+import { PineArrayObject } from './namespaces/array/PineArrayObject';
+import { PineMapObject } from './namespaces/map/PineMapObject';
+import { PineMatrixObject } from './namespaces/matrix/PineMatrixObject';
+import { PineTypeObject } from './namespaces/PineTypeObject';
 import { processConsecutiveLossDay, finalizeConsecutiveLossDay, intradayLossHalted, processIntradayLoss, processStrategyOrders, processExitOrders, processMarginCall, finalizeStrategyBar, finalizeStrategyRun, isAdverseFirstBar, marginExtremeBeforeExits, applyPendingCloseMarginCall, applyPendingOpenMarginCall, snapshotStrategyState, restoreStrategyState, markToMarket } from './namespaces/strategy/utils';
 
 // ── Timeframe duration utility ──────────────────────────────────────
@@ -23,6 +27,171 @@ const TIMEFRAME_DURATION_MS: Record<string, number> = {
 // pass (CofBarState.drainedEntryIds), this constant bounds pathological
 // re-emitting scripts on top of it.
 const MAX_SAME_TICK_DRAIN = 100;
+const SCRIPT_VAR_SCOPES = ['const', 'var', 'let', 'params'];
+// Per-variable Series length and last value, main context and function-local contexts.
+type ScriptVarSnapshot = { main: Record<string, unknown>; lctx: Array<Record<string, unknown>> };
+// What one calc_on_order_fills bar execution may change (see _snapshotCofBar).
+type CofBarRollback = {
+    vars: ScriptVarSnapshot;
+    slots: Map<object, Set<string>>;
+    arrays: ArrayJournal[];
+    maps: MapJournal[];
+    copies: Array<[object, unknown]>;
+};
+// Element types that cannot hold an array / map / UDT / drawing.
+const PRIMITIVE_ARRAY_TYPES = new Set<string>(['bool', 'color', 'float', 'int', 'string']);
+
+// Undo journal of one array for the executions of one bar. The live array is
+// proxied: writes at or past the pre-bar length are appends (undone by
+// truncation); the first write or deletion below it saves the pre-bar
+// elements once. `onRead` (arrays that can hold objects) journals an element
+// object when a run first reads it, before the run can change it — so the
+// elements of a growing history are never walked.
+type ArrayJournal = { owner: PineArrayObject; raw: unknown[]; proxy: unknown[]; length: number; original?: unknown[] };
+function journalArray(owner: PineArrayObject, onRead?: (value: unknown) => void): ArrayJournal {
+    const raw: unknown[] = owner.array;
+    const journal: ArrayJournal = { owner, raw, proxy: raw, length: raw.length };
+    const below = (prop: string | symbol) => typeof prop === 'string' && /^\d+$/.test(prop) && Number(prop) < journal.length;
+    const saveOriginal = () => {
+        if (journal.original === undefined) journal.original = raw.slice(0, journal.length);
+    };
+    const handler: ProxyHandler<unknown[]> = {
+        set(target, prop, value) {
+            if (prop === 'length' ? Number(value) < journal.length : below(prop)) saveOriginal();
+            return Reflect.set(target, prop, value);
+        },
+        deleteProperty(target, prop) {
+            if (below(prop)) saveOriginal();
+            return Reflect.deleteProperty(target, prop);
+        },
+    };
+    if (onRead) {
+        handler.get = (target, prop) => {
+            const value = Reflect.get(target, prop);
+            if (value !== null && typeof value === 'object' && below(prop)) onRead(value);
+            return value;
+        };
+    }
+    journal.proxy = new Proxy(raw, handler);
+    owner.array = journal.proxy;
+    return journal;
+}
+function restoreArray(journal: ArrayJournal): void {
+    const { raw, original } = journal;
+    if (original === undefined) {
+        raw.length = journal.length;
+    } else {
+        raw.length = original.length;
+        for (let i = 0; i < original.length; i++) raw[i] = original[i];
+    }
+    journal.owner.array = journal.proxy;
+}
+
+// Undo journal of one map: the first set of a key records its pre-bar
+// presence / value; a deletion or clear saves the whole pre-bar map once.
+// `onRead` (maps holding objects) journals a value object on its first read.
+type MapJournal = { owner: PineMapObject; map: Map<unknown, unknown>; keys: Map<unknown, [boolean, unknown]>; pristine?: Map<unknown, unknown> };
+function journalMap(owner: PineMapObject, onRead?: (value: unknown) => void): MapJournal {
+    const map = owner.map;
+    const journal: MapJournal = { owner, map, keys: new Map() };
+    const note = (key: unknown) => {
+        if (journal.pristine === undefined && !journal.keys.has(key)) {
+            journal.keys.set(key, [Map.prototype.has.call(map, key), Map.prototype.get.call(map, key)]);
+        }
+    };
+    const savePristine = () => {
+        if (journal.pristine !== undefined) return;
+        const pristine = new Map(Map.prototype.entries.call(map));
+        for (const [key, [had, value]] of journal.keys) {
+            if (had) pristine.set(key, value);
+            else pristine.delete(key);
+        }
+        journal.pristine = pristine;
+    };
+    Object.assign(map, {
+        set(key: unknown, value: unknown) {
+            note(key);
+            return Map.prototype.set.call(map, key, value);
+        },
+        delete(key: unknown) {
+            savePristine();
+            return Map.prototype.delete.call(map, key);
+        },
+        clear() {
+            savePristine();
+            Map.prototype.clear.call(map);
+        },
+    });
+    if (onRead) {
+        const entries = (): IterableIterator<[unknown, unknown]> => {
+            const list = [...Map.prototype.entries.call(map)];
+            for (const [, value] of list) onRead(value);
+            return list[Symbol.iterator]();
+        };
+        Object.assign(map, {
+            get(key: unknown) {
+                const value = Map.prototype.get.call(map, key);
+                onRead(value);
+                return value;
+            },
+            entries,
+            [Symbol.iterator]: entries,
+            values() {
+                return [...entries()].map(([, value]) => value)[Symbol.iterator]();
+            },
+            forEach(callback: (value: unknown, key: unknown, owner: Map<unknown, unknown>) => void, thisArg?: unknown) {
+                for (const [key, value] of entries()) callback.call(thisArg, value, key, map);
+            },
+        });
+    }
+    return journal;
+}
+function restoreMap(journal: MapJournal): void {
+    const { map, pristine } = journal;
+    if (pristine !== undefined) {
+        Map.prototype.clear.call(map);
+        for (const [key, value] of pristine) Map.prototype.set.call(map, key, value);
+    } else {
+        for (const [key, [had, value]] of journal.keys) {
+            if (had) Map.prototype.set.call(map, key, value);
+            else Map.prototype.delete.call(map, key);
+        }
+    }
+    journal.owner.map = map;
+}
+function commitMap(journal: MapJournal): void {
+    for (const method of ['set', 'delete', 'clear', 'get', 'entries', 'values', 'forEach', Symbol.iterator]) {
+        Reflect.deleteProperty(journal.map, method);
+    }
+}
+
+// Drawing objects reachable from varip variables: they survive the per-bar
+// drawing rollback together with the varip binding that holds them.
+function varipDrawings(context: Context): Set<object> | undefined {
+    const kept = new Set<object>();
+    const seen = new Set<object>();
+    const collect = (value: unknown): void => {
+        if (value === null || typeof value !== 'object' || seen.has(value)) return;
+        seen.add(value);
+        if (value instanceof PineArrayObject) value.array.forEach(collect);
+        else if (value instanceof PineMapObject) value.map.forEach((item) => collect(item));
+        else if (value instanceof PineTypeObject) Object.keys(value.__def__).forEach((field) => collect((value as any)[field]));
+        else if ('_createdAtBar' in value) kept.add(value);
+    };
+    const visit = (container: any) => {
+        for (const scope of SCRIPT_VAR_SCOPES) {
+            const vars = container[scope];
+            if (!vars) continue;
+            for (const key in vars) {
+                const item = vars[key];
+                if (item instanceof Series && context.varipSeries.has(item)) collect(item.data[item.data.length - 1]);
+            }
+        }
+    };
+    visit(context);
+    context.lctx.forEach(visit);
+    return kept.size > 0 ? kept : undefined;
+}
 function getTimeframeDurationMs(timeframe: string | undefined): number {
     if (!timeframe) return 86_400_000; // default to 1D when timeframe is unknown
     return TIMEFRAME_DURATION_MS[timeframe] ?? TIMEFRAME_DURATION_MS[timeframe.toUpperCase()] ?? 86_400_000;
@@ -1019,33 +1188,7 @@ export class PineTS {
      * @private
      */
     private _snapshotVarState(context: Context): any {
-        const contextVarNames = ['const', 'var', 'let', 'params'];
-        const snapshot: any = { main: {}, lctx: [] };
-
-        const snapContainer = (container: any) => {
-            const snap: any = {};
-            for (const ctxVarName of contextVarNames) {
-                if (!container[ctxVarName]) continue;
-                snap[ctxVarName] = {};
-                for (const key in container[ctxVarName]) {
-                    const item = container[ctxVarName][key];
-                    if (item instanceof Series) {
-                        // Save length AND the last value so we can restore both
-                        const len = item.data.length;
-                        const lastVal = len > 0 ? item.data[len - 1] : undefined;
-                        snap[ctxVarName][key] = { len, lastVal };
-                    }
-                }
-            }
-            return snap;
-        };
-
-        snapshot.main = snapContainer(context);
-        if (context.lctx) {
-            const lctxSnaps: any[] = [];
-            context.lctx.forEach((lctx: any) => lctxSnaps.push(snapContainer(lctx)));
-            snapshot.lctx = lctxSnaps;
-        }
+        const snapshot: any = this._snapshotScriptVars(context);
 
         // Strategy ledger (pending_orders / opentrades / position / equity /
         // peaks). Without this, orders queued by a discarded execution of the
@@ -1074,10 +1217,57 @@ export class PineTS {
      */
     private _restoreVarState(context: Context, snapshot: any): void {
         if (!snapshot) return;
-        const contextVarNames = ['const', 'var', 'let', 'params'];
+        for (const [key, plot] of Object.entries(context.plots) as [string, any][]) {
+            if (plot._plotKey && Array.isArray(plot.data)) {
+                plot.data.length = Math.min(plot.data.length, snapshot.plotLengths?.[key] ?? 0);
+            }
+        }
+        this._restoreScriptVars(context, snapshot);
 
+        // Roll the strategy ledger back to its pre-last-bar state (no-op for
+        // indicators). Mutates context.strategy in place — its identity is
+        // public API.
+        restoreStrategyState(context.strategy, snapshot.strategy);
+        context._strategyHistorySnapshotBar = snapshot.strategyHistorySnapshotBar;
+    }
+
+    /**
+     * Length and last value of every script variable Series (main context and
+     * function-local contexts) — the state `_restoreScriptVars` returns to.
+     * Series in `excluded` are left out, so a restore never touches them.
+     * @private
+     */
+    private _snapshotScriptVars(context: Context, excluded?: WeakSet<Series>): ScriptVarSnapshot {
+        const snapContainer = (container: any) => {
+            const snap: any = {};
+            for (const ctxVarName of SCRIPT_VAR_SCOPES) {
+                if (!container[ctxVarName]) continue;
+                snap[ctxVarName] = {};
+                for (const key in container[ctxVarName]) {
+                    const item = container[ctxVarName][key];
+                    if (item instanceof Series && !excluded?.has(item)) {
+                        // Save length AND the last value so we can restore both
+                        const len = item.data.length;
+                        const lastVal = len > 0 ? item.data[len - 1] : undefined;
+                        snap[ctxVarName][key] = { len, lastVal };
+                    }
+                }
+            }
+            return snap;
+        };
+        const lctx: any[] = [];
+        context.lctx?.forEach((local: any) => lctx.push(snapContainer(local)));
+        return { main: snapContainer(context), lctx };
+    }
+
+    /**
+     * Truncate every script variable Series back to its snapshotted length and
+     * restore its last value.
+     * @private
+     */
+    private _restoreScriptVars(context: Context, snapshot: ScriptVarSnapshot): void {
         const restoreContainer = (container: any, snap: any) => {
-            for (const ctxVarName of contextVarNames) {
+            for (const ctxVarName of SCRIPT_VAR_SCOPES) {
                 if (!snap[ctxVarName] || !container[ctxVarName]) continue;
                 for (const key in snap[ctxVarName]) {
                     const item = container[ctxVarName][key];
@@ -1095,12 +1285,6 @@ export class PineTS {
                 }
             }
         };
-
-        for (const [key, plot] of Object.entries(context.plots) as [string, any][]) {
-            if (plot._plotKey && Array.isArray(plot.data)) {
-                plot.data.length = Math.min(plot.data.length, snapshot.plotLengths?.[key] ?? 0);
-            }
-        }
         restoreContainer(context, snapshot.main);
         if (context.lctx && snapshot.lctx) {
             let i = 0;
@@ -1109,12 +1293,95 @@ export class PineTS {
                 i++;
             });
         }
+    }
 
-        // Roll the strategy ledger back to its pre-last-bar state (no-op for
-        // indicators). Mutates context.strategy in place — its identity is
-        // public API.
-        restoreStrategyState(context.strategy, snapshot.strategy);
-        context._strategyHistorySnapshotBar = snapshot.strategyHistorySnapshotBar;
+    /**
+     * Everything one execution of a bar may change and the calc_on_order_fills
+     * rollback must undo (Pine execution model): script variable Series (except
+     * varip), the variable slots that exist, and the contents of the
+     * arrays / maps / matrices / UDT instances reachable from those variables.
+     * Arrays and maps are journaled, not copied: appends cost nothing to undo
+     * and the first overwrite / removal saves the pre-bar contents once; their
+     * element objects are journaled when a run first reads them. A growing
+     * `var` collection therefore costs O(1) per bar. Drawings are rolled back
+     * by bar (see `_restoreCofBar`).
+     * @private
+     */
+    private _snapshotCofBar(context: Context): CofBarRollback {
+        const excluded = context.varipSeries;
+        const slots = new Map<object, Set<string>>();
+        const arrays: ArrayJournal[] = [];
+        const maps: MapJournal[] = [];
+        const copies: Array<[object, unknown]> = [];
+        const seen = new Set<object>();
+        const capture = (value: unknown): void => {
+            if (value === null || typeof value !== 'object' || seen.has(value)) return;
+            seen.add(value);
+            if (value instanceof PineArrayObject) {
+                arrays.push(journalArray(value, PRIMITIVE_ARRAY_TYPES.has(value.type) ? undefined : capture));
+            } else if (value instanceof PineMapObject) {
+                const first = value.map.values().next();
+                const holdsObjects = !first.done && first.value !== null && typeof first.value === 'object';
+                maps.push(journalMap(value, holdsObjects ? capture : undefined));
+            } else if (value instanceof PineMatrixObject) {
+                copies.push([value, value.matrix.map((row) => [...row])]);
+                value.matrix.forEach((row) => row.forEach(capture));
+            } else if (value instanceof PineTypeObject) {
+                const fields = Object.keys(value.__def__).map((field): [string, unknown] => [field, (value as any)[field]]);
+                copies.push([value, fields]);
+                fields.forEach(([, item]) => capture(item));
+            }
+        };
+        const visit = (container: any) => {
+            for (const scope of SCRIPT_VAR_SCOPES) {
+                const vars = container[scope];
+                if (!vars) continue;
+                slots.set(vars, new Set(Object.keys(vars)));
+                for (const key in vars) {
+                    const item = vars[key];
+                    if (item instanceof Series && !excluded.has(item)) capture(item.data[item.data.length - 1]);
+                }
+            }
+        };
+        visit(context);
+        context.lctx.forEach(visit);
+        return { vars: this._snapshotScriptVars(context, excluded), slots, arrays, maps, copies };
+    }
+
+    /** Return the bar to the state `_snapshotCofBar` captured. @private */
+    private _restoreCofBar(context: Context, snapshot: CofBarRollback): void {
+        this._restoreScriptVars(context, snapshot.vars);
+        // A variable first declared by a discarded execution is declared
+        // again by the next one (its `var` initializer runs then).
+        const dropNewSlots = (container: any) => {
+            for (const scope of SCRIPT_VAR_SCOPES) {
+                const vars = container[scope];
+                if (!vars) continue;
+                const existing = snapshot.slots.get(vars);
+                for (const key of Object.keys(vars)) {
+                    if (!existing?.has(key) && !context.varipSeries.has(vars[key])) delete vars[key];
+                }
+            }
+        };
+        dropNewSlots(context);
+        context.lctx.forEach(dropNewSlots);
+        snapshot.arrays.forEach(restoreArray);
+        snapshot.maps.forEach(restoreMap);
+        for (const [value, saved] of snapshot.copies) {
+            if (value instanceof PineMatrixObject) value.matrix = (saved as unknown[][]).map((row) => [...row]);
+            else if (value instanceof PineTypeObject) for (const [field, item] of saved as Array<[string, unknown]>) (value as any)[field] = item;
+        }
+        // Drawings created by a discarded execution of this bar disappear,
+        // except those a varip variable still holds (varip escapes rollback).
+        context.rollbackDrawings(context.idx, varipDrawings(context));
+    }
+
+    /** After the closing execution: drop the journals, keep its writes. @private */
+    private _commitCofBar(snapshot: CofBarRollback): void {
+        for (const journal of snapshot.arrays) {
+            if (journal.owner.array === journal.proxy) journal.owner.array = journal.raw;
+        }
+        snapshot.maps.forEach(commitMap);
     }
 
     /**
@@ -1235,6 +1502,18 @@ export class PineTS {
             // catch the same-open entry; one (2024-03-21) spares it. The
             // 'open' phase of processExitOrders implements the minority
             // (exit-first) semantics and is currently not wired in.
+            // calc_on_order_fills: every execution of this bar (each fill
+            // recalculation, then the closing one) starts from the variables
+            // committed by the previous bar; only the closing execution
+            // commits. TV 2205 (NYMEX:CL1!): on 2023-01-18 14:00 the
+            // recalculation after the open stop fill re-enters through
+            // `entry_price := close; strategy.entry(...)`, yet that trade's TP
+            // is 82.25 = 81.84 × 1.005, the entry_price committed before the bar.
+            // `varip` variables keep every execution's writes (VIN-169/173/186
+            // native probes record fill-time values in varip). The rollback also
+            // covers var collection / UDT contents, variables first declared by a
+            // discarded execution and the drawings it created (_restoreCofBar).
+            let cofVarRollback: CofBarRollback | undefined;
             if (context.strategy) {
                 const consecutiveLossFills = processConsecutiveLossDay(context);
                 // Initialize the day's equity before pending-order fills add commissions or slippage.
@@ -1349,6 +1628,8 @@ export class PineTS {
                                 markToMarket(context, strategy._cof.ticks[valuationPass]);
                                 // Each script run (here a COF recalculation) gets its own tick.
                                 context._execTick = (context._execTick || 0) + 1;
+                                if (cofVarRollback === undefined) cofVarRollback = this._snapshotCofBar(context);
+                                else this._restoreCofBar(context, cofVarRollback);
                                 await transpiledFn(context);
                                 if (pendingBefore) {
                                     const batch = strategy._cof.submissionBatch = (strategy._cof.submissionBatch ?? 0) + 1;
@@ -1416,7 +1697,9 @@ export class PineTS {
             // Each script run gets its own tick (ta.ema chains repeated calls of
             // a call site within one run only; alert counters reset per run).
             context._execTick = (context._execTick || 0) + 1;
+            if (cofVarRollback !== undefined) this._restoreCofBar(context, cofVarRollback);
             const result = await transpiledFn(context);
+            if (cofVarRollback !== undefined) this._commitCofBar(cofVarRollback);
             const poc = context.strategy?.config.process_orders_on_close === true;
             const cof = context.strategy?.config.calc_on_order_fills === true;
             // Studio T1/T2 TradingView windows: immediate market closes fill

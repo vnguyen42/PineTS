@@ -649,7 +649,7 @@ export function transformVariableDeclaration(varNode: any, scopeManager: ScopeMa
             if (isArrowFunction || isArrayPatternVar) {
                 rightSide = decl.init;
             } else if (kind === 'var') {
-                rightSide = ASTFactory.createInitVarCall(targetVarRef, decl.init);
+                rightSide = ASTFactory.createInitVarCall(targetVarRef, decl.init, decl._pineVarip === true);
             } else {
                 rightSide = ASTFactory.createInitCall(
                     targetVarRef,

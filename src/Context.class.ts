@@ -134,7 +134,7 @@ export class Context {
     public length: number = 0;
 
     /** References to drawing helpers for streaming rollback and plot sync */
-    public _drawingHelpers: { rollbackFromBar(barIdx: number): void; syncToPlot?(): void }[] = [];
+    public _drawingHelpers: { rollbackFromBar(barIdx: number, keep?: Set<object>): void; syncToPlot?(): void }[] = [];
 
     // Combined namespace and core functions - the default way to access everything
     public pine: {
@@ -165,6 +165,8 @@ export class Context {
     private static _deprecationWarningsShown = new Set<string>();
 
     public idx: number = 0;
+    // Series of Pine `varip` variables (see initVarip).
+    public varipSeries = new WeakSet<Series>();
 
     public params: any = {};
     public const: any = {};
@@ -629,12 +631,13 @@ export class Context {
     }
 
     /**
-     * Roll back all drawing objects created at or after the given bar index.
+     * Roll back all drawing objects created at or after the given bar index,
+     * except those in `keep`.
      * Called during streaming updates to prevent accumulation when bars are re-processed.
      */
-    rollbackDrawings(fromBarIdx: number): void {
+    rollbackDrawings(fromBarIdx: number, keep?: Set<object>): void {
         for (const helper of this._drawingHelpers) {
-            helper.rollbackFromBar(fromBarIdx);
+            helper.rollbackFromBar(fromBarIdx, keep);
         }
     }
 
@@ -699,6 +702,17 @@ export class Context {
 
         // Default: create new Series
         return new Series([value]);
+    }
+
+    /**
+     * Initializes a Pine `varip` variable: same state as initVar, and the
+     * Series is registered so the executions of one bar under
+     * calc_on_order_fills do not roll it back (Pine `varip` semantics).
+     */
+    initVarip(trg, src: any): Series {
+        const series = this.initVar(trg, src);
+        this.varipSeries.add(series);
+        return series;
     }
 
     /**

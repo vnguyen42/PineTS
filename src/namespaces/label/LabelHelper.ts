@@ -333,8 +333,8 @@ export class LabelHelper {
      * Remove all drawing objects created at or after the given bar index.
      * Called during streaming rollback to prevent accumulation.
      */
-    rollbackFromBar(barIdx: number): void {
-        this._labels = this._labels.filter((l) => l._createdAtBar < barIdx);
+    rollbackFromBar(barIdx: number, keep?: Set<object>): void {
+        this._labels = this._labels.filter((l) => l._createdAtBar < barIdx || keep?.has(l));
         this.syncToPlot();
     }
 

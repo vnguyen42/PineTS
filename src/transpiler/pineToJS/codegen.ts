@@ -770,6 +770,14 @@ export class CodeGenerator {
 
             this.write(';\n');
 
+            // varip lowers to the same JS `var`; keep the distinction for the
+            // runtime, which must not roll varip back between the executions
+            // of one bar (AnalysisPass flags the declarator from this marker).
+            if (node.kind === 'varip' && decl.id.type === 'Identifier') {
+                this.write(this.indentStr.repeat(this.indent));
+                this.write(`"__pineVarip@${decl.id.name}";\n`);
+            }
+
             // Preserve one canonical annotation marker for the later
             // transpiler passes. The clean Acorn AST cannot retain the custom
             // parser `varType` property, so TypeInferencePass reads this

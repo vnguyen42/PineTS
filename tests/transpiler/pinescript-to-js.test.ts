@@ -323,8 +323,9 @@ plot(tick_counter)
         const result = transpile(code);
         const jsCode = result.toString();
 
-        // varip uses initVar like var
-        expect(jsCode).toContain('$.initVar(');
+        // varip keeps var's state slot, created by initVarip so the
+        // calc_on_order_fills rollback leaves it alone (cof-var-rollback-2205)
+        expect(jsCode).toContain('$.initVarip(');
         expect(jsCode).toContain('$.var.glb1_tick_counter');
     });
 

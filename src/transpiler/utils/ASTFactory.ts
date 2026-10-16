@@ -114,9 +114,9 @@ export const ASTFactory = {
         return this.createCallExpression(initMethod, args);
     },
 
-    createInitVarCall(targetVarRef: any, value: any): any {
-        // $.initVar(target, value)
-        const initMethod = this.createMemberExpression(this.createContextIdentifier(), this.createIdentifier('initVar'), false);
+    createInitVarCall(targetVarRef: any, value: any, varip = false): any {
+        // $.initVar(target, value) — $.initVarip for a Pine `varip`
+        const initMethod = this.createMemberExpression(this.createContextIdentifier(), this.createIdentifier(varip ? 'initVarip' : 'initVar'), false);
         const args = [targetVarRef, value];
         return this.createCallExpression(initMethod, args);
     },
