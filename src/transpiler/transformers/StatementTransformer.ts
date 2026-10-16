@@ -1511,6 +1511,52 @@ export function transformReturnStatement(node: any, scopeManager: ScopeManager):
     }
 }
 
+/**
+ * Statements recording, at function entry, every `$.param($.get(arg, 0),
+ * undefined, $$.id + 'pN')` site of the body whose value is a plain read of
+ * one of the function's own arguments (nested functions excluded), once per
+ * site name. See FN_PARAM_HISTORY_SHORTCIRCUIT in transformFunctionDeclaration.
+ */
+function collectParamHistorySites(body: any[], paramNames: (string | undefined)[]): any[] {
+    const names = new Set(paramNames.filter((name): name is string => Boolean(name)));
+    const sites = new Map<string, any>();
+    const visit = (node: any): void => {
+        if (!node || typeof node !== 'object') return;
+        if (Array.isArray(node)) {
+            for (const item of node) visit(item);
+            return;
+        }
+        if (node.type === 'FunctionDeclaration' || node.type === 'FunctionExpression' || node.type === 'ArrowFunctionExpression') return;
+        const value = node.arguments?.[0];
+        const siteName = node.arguments?.[2];
+        if (
+            node.type === 'CallExpression'
+            && node.callee?.type === 'MemberExpression'
+            && node.callee.object?.name === CONTEXT_NAME
+            && node.callee.property?.name === 'param'
+            && node.arguments.length === 3
+            && value?.type === 'CallExpression'
+            && value.callee?.object?.name === CONTEXT_NAME
+            && value.callee.property?.name === 'get'
+            && value.arguments?.[0]?.type === 'Identifier'
+            && names.has(value.arguments[0].name)
+            && (value.arguments[1]?.value === 0 || value.arguments[1]?.name === '0')
+            && siteName?.type === 'BinaryExpression'
+            && siteName.left?.object?.name === '$$'
+            && typeof siteName.right?.name === 'string'
+            && !sites.has(siteName.right.name)
+        ) {
+            const expression = JSON.parse(JSON.stringify(node, (key, v) => (key === 'parent' ? undefined : v)));
+            sites.set(siteName.right.name, { type: 'ExpressionStatement', expression, _skipTransformation: true });
+        }
+        for (const key of Object.keys(node)) {
+            if (key !== 'parent') visit(node[key]);
+        }
+    };
+    visit(body);
+    return [...sites.values()];
+}
+
 export function transformFunctionDeclaration(node: any, scopeManager: ScopeManager, c: any): void {
     // Note: We don't register parameters here anymore, that's done in the AnalysisPass.
 
@@ -1611,6 +1657,18 @@ export function transformFunctionDeclaration(node: any, scopeManager: ScopeManag
         c(node.body, scopeManager);
 
         scopeManager.setCurrentFnName(prevFnName);
+
+        // A function argument has ONE history per call: each `src[k]` reads
+        // the per-call-path series `params[$$.id + 'pN']` fed by its own
+        // access site (`$.param($.get(src, 0), …, $$.id + 'pN')`), which only
+        // records a value when that site runs. A site behind a short-circuit
+        // `and`/`or`, a ternary branch or an `if` skipped some calls, so its
+        // series kept a stale value and `src[k]` read the wrong bar
+        // (BINANCE:SANDUSDT D, script 1622: `src[4] < src[2] and src[2] >
+        // src[0]` false on a real fractal top). Record every such site once
+        // at function entry, from the argument value of this call; the site
+        // itself rewrites the same value (FN_PARAM_HISTORY_SHORTCIRCUIT).
+        node.body.body.splice(1, 0, ...collectParamHistorySites(node.body.body.slice(1), paramNames));
 
         // Clean up: remove function parameters from local series vars after exiting function scope
         for (const name of paramNames) {
