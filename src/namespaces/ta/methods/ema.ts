@@ -37,6 +37,16 @@ export function ema(context: any) {
             }
             state.lastIdx = context.idx;
         }
+        // A call site executed again within the same bar run (a loop body)
+        // continues from its previous call, as TradingView does: CME_MINI:NQ1!
+        // 120 (script 2539), `ta.ema(close, L)` for L = 1..21 in a `for`
+        // loop — chaining reproduces TV's plotted ratio on 20916/20916 bars,
+        // restarting each call from the previous bar's state on none. A new
+        // run of the same bar (live re-execution) gets a new _execTick and
+        // restarts from the committed state.
+        const tick = context._execTick || 0;
+        const chained = state.lastTick === tick;
+        state.lastTick = tick;
 
         const currentValue = Series.from(source).get(0);
 
@@ -46,9 +56,9 @@ export function ema(context: any) {
 
         // Use 'prev' variables for calculation to ensure stability during live updates
         // We calculate 'current' values but DO NOT overwrite 'prev' values yet
-        let initCount = state.prevInitCount;
-        let initSum = state.prevInitSum;
-        let prevEma = state.prevEma;
+        let initCount = chained ? state.currentInitCount : state.prevInitCount;
+        let initSum = chained ? state.currentInitSum : state.prevInitSum;
+        let prevEma = chained ? state.currentEma : state.prevEma;
 
         if (initCount < period) {
             // Accumulate for SMA initialization

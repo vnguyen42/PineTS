@@ -1211,7 +1211,6 @@ export class PineTS {
 
         for (let i = startIdx; i < endIdx; i++) {
             context.idx = i;
-            context._execTick = (context._execTick || 0) + 1;
 
             context.data.close.data.push(this.close[i]);
             context.data.open.data.push(this.open[i]);
@@ -1348,6 +1347,8 @@ export class PineTS {
                                     || (strategy._cof.currentBarEntryFilled && !strategy._cof.interiorEntryFilled);
                                 const valuationPass = Math.min(strategy._cof.pass + Number(nextValuationPoint), strategy._cof.ticks.length - 1);
                                 markToMarket(context, strategy._cof.ticks[valuationPass]);
+                                // Each script run (here a COF recalculation) gets its own tick.
+                                context._execTick = (context._execTick || 0) + 1;
                                 await transpiledFn(context);
                                 if (pendingBefore) {
                                     const batch = strategy._cof.submissionBatch = (strategy._cof.submissionBatch ?? 0) + 1;
@@ -1412,6 +1413,9 @@ export class PineTS {
                 }
             }
 
+            // Each script run gets its own tick (ta.ema chains repeated calls of
+            // a call site within one run only; alert counters reset per run).
+            context._execTick = (context._execTick || 0) + 1;
             const result = await transpiledFn(context);
             const poc = context.strategy?.config.process_orders_on_close === true;
             const cof = context.strategy?.config.calc_on_order_fills === true;
