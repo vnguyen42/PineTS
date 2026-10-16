@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright (C) 2026 LuxAlgo
 
-import { riskOrderRequestsHalted, calculateOrderQty, cofCurrentTick, cryptoMarketSizingPrice, normalizeOrderLevel, parseDirection, parseEntryDirection, wouldExceedPyramiding, roundToMintick } from '../utils';
+import { riskOrderRequestsHalted, calculateOrderQty, cofCurrentTick, marketSizingPrice, normalizeOrderLevel, parseDirection, parseEntryDirection, wouldExceedPyramiding, roundToMintick } from '../utils';
 import { Order } from '../types';
 import { Series } from '../../../Series';
 import { parseArgsForPineParams } from '../../utils';
@@ -334,14 +334,13 @@ export function entry(context: any) {
             ? cofCurrentTick(strategy)
             : undefined;
         const currentPrice = cofTick !== undefined ? cofTick : Series.from(context.data.close).get(0);
-        // VIN-B (1917/2594/2701) + SIZING_CASH_PRIX_NON_QUANTIFIE_TICK (1622):
-        // a DEFAULT MARKET entry (no explicit qty) on a crypto/spot symbol is
-        // sized on the displayed reference built by cryptoMarketSizingPrice —
-        // signal close + directional slippage, quantized to the displayed
-        // tick — for every price-dependent default qty type (percent_of_equity
-        // and cash). A declared limit/stop level keeps its raw VIN-89 sizing
-        // price, and stock / COF references are untouched (the helper is a
-        // no-op outside its scope). 'fixed' stays on the raw close: its qty
+        // VIN-B (1917/2594/2701) + SIZING_CASH_PRIX_NON_QUANTIFIE_TICK (1622)
+        // + 2479: a DEFAULT MARKET entry (no explicit qty) is sized on the
+        // reference built by marketSizingPrice — signal close + directional
+        // slippage, quantized to the displayed tick on crypto/spot — for every
+        // price-dependent default qty type (percent_of_equity and cash). A
+        // declared limit/stop level keeps its raw VIN-89 sizing price, and COF
+        // references are untouched. 'fixed' stays on the raw close: its qty
         // is a contract count and never divides by a price.
         const usesDefaultPriceSizing = qtyValue === undefined
             && (defaultQtyType === 'percent_of_equity' || defaultQtyType === 'cash');
@@ -377,7 +376,7 @@ export function entry(context: any) {
             && stopValueRounded !== undefined
             && ((dir === 1 && stopValueRounded < currentPrice - 1e-12 * Math.max(1, Math.abs(currentPrice)))
                 || (dir === -1 && stopValueRounded > currentPrice + 1e-12 * Math.max(1, Math.abs(currentPrice))));
-        const marketSizing = usesDefaultPriceSizing ? cryptoMarketSizingPrice(context, dir, currentPrice) : currentPrice;
+        const marketSizing = usesDefaultPriceSizing ? marketSizingPrice(context, dir, currentPrice) : currentPrice;
         const sizingPrice = stopMarketable ? marketSizing : stopValueRounded ?? limitValueRounded ?? marketSizing;
         const baseQty = calculateOrderQty(context, qtyValue, dir, sizingPrice);
 

@@ -11,7 +11,7 @@
 // signal quantifié au mintick, round(close/mintick)·mintick — alors que le
 // moteur dimensionnait sur le close BRUT. Écart relatif max 1.1365e-4, 27
 // quantités + 36 profits faux sur les 37 lignes divergentes de la cible.
-// Le fix étend le prix de sizing affiché (cryptoMarketSizingPrice, déjà
+// Le fix étend le prix de sizing affiché (marketSizingPrice, déjà
 // VIN-B pour percent_of_equity) à tout type par défaut dont la quantité
 // DIVISE par le prix (percent_of_equity, cash). Inchangés : percent_of_equity,
 // niveaux limit/stop déclarés (niveau effectif arrondi, VIN-137), symboles

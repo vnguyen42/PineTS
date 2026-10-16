@@ -81,7 +81,9 @@ describe('percent_of_equity crypto sizing price (2594 / 1917 / 2096)', () => {
         expect(calculateOrderQty(context, undefined, 1, 0.1501)).toBe(3998.4);
     });
 
-    it('keeps stock market sizing unchanged instead of reserving slippage', () => {
+    it('reserves the slippage in stock market sizing too, without the crypto tick snap (2479)', () => {
+        // 2479 AMEX:SPY / 1786 NASDAQ:RENT: TV sizes stock market entries on
+        // close + slippage: 1000 / 10.01 = 99.9, not 1000 / 10 = 100.
         const context = makeContext(10, 0.01, 'stock', {
             default_qty_value: 10,
             slippage: 1,
@@ -89,7 +91,7 @@ describe('percent_of_equity crypto sizing price (2594 / 1917 / 2096)', () => {
 
         entry(context)('L', 'long');
 
-        expect(strategyOf(context).pending_orders[0].qty).toBe(100);
+        expect(strategyOf(context).pending_orders[0].qty).toBe(99.9);
     });
 
     it('leaves a host-fabricated (FileProvider) crypto symbol on the raw sizing price', () => {

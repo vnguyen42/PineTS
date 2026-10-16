@@ -683,32 +683,36 @@ function quantizeToQtyStep(context: any, rawQty: number): number | undefined {
 }
 
 /**
- * VIN-B (2594/1917/2096/2701): scope of the percent_of_equity CRYPTO sizing
- * reference. TradingView sizes on the DISPLAYED price of an exchange-traded
- * crypto/spot symbol, exactly like the fill path already does for every
- * crypto/spot symbol (VIN-1592, snapExecutionFills below).
+ * VIN-B (2594/1917/2096/2701) + 2479: scope of the market sizing reference
+ * (marketSizingPrice): symbols resolved by an exchange.
  *
  * Excluded: symbols whose syminfo is FABRICATED by a host file provider
  * (`prefix` empty or 'FILE'). That exclusion is empirical, not a stated TV
- * rule: the file-fed oracle witness 2808 (scripts/witness-run.mjs, prefix
- * 'FILE') has a certified fork baseline built without this sizing reference,
- * and no TV capture exists for a file-fed symbol to decide it. Perpetuals
- * resolve as `type: 'futures'` and stay on the raw-price path.
+ * rule: the file-fed oracle witnesses 2808 and 2825 (scripts/witness-run.mjs,
+ * prefix 'FILE') have certified fork baselines built without this sizing
+ * reference, and no TV capture exists for a file-fed symbol to decide it.
  */
-function isCryptoSpotSizingSymbol(context: any): boolean {
-    const type = context.pine?.syminfo?.type;
-    if (type !== 'crypto' && type !== 'spot') return false;
+function isExchangeSizingSymbol(context: any): boolean {
     const prefix = String(context.pine?.syminfo?.prefix ?? '').toUpperCase();
     return prefix !== '' && prefix !== 'FILE';
 }
 
 /**
- * VIN-B: sizing reference of a DEFAULT percent_of_equity MARKET order on a
- * crypto/spot symbol — the signal close moved by the configured slippage
- * (direction-adjusted: 2701 OKX:CROUSDT fits 225/226 shorts with the minus
- * sign, 177/405 with a always-positive slippage) and quantized to the
- * DISPLAYED tick with Math.round on the binary quotient
- * (2594: 15.5925/0.001 = 15592.499999999998 → 15.592, 311/311).
+ * Sizing reference of a DEFAULT price-sized (percent_of_equity, cash) MARKET
+ * order on an exchange-resolved symbol: the signal close moved by the
+ * configured slippage, direction-adjusted (VIN-B, 2701 OKX:CROUSDT fits
+ * 225/226 shorts with the minus sign, 177/405 with an always-positive
+ * slippage). On a crypto/spot symbol it is also quantized to the DISPLAYED
+ * tick with Math.round on the binary quotient (2594: 15.5925/0.001 =
+ * 15592.499999999998 → 15.592, 311/311), exactly like the fill path
+ * (VIN-1592, snapExecutionFills below). Stock-like classes (stock, fund, etf)
+ * keep the raw close plus slippage: 2479 AMEX:SPY 60 (fund, slippage 1,
+ * percent_of_equity) sizes on close + 1 tick — 22 entries one share too large
+ * on the raw close, 4519/4519 quantities with the slippage, and its sub-cent
+ * closes do not discriminate a snap (same ledger with or without it); 1786
+ * NASDAQ:RENT (stock, slippage 2) 135 → 142/142 full keys. Other classes
+ * (futures including perpetuals, forex, index, cfd) stay on the raw close:
+ * no capture proves the reserve there.
  *
  * Only the MARKET reference is transformed: a declared limit/stop level
  * remains the raw sizing price proved by VIN-89, and calc_on_order_fills
@@ -720,9 +724,13 @@ function isCryptoSpotSizingSymbol(context: any): boolean {
  * entry of 2594/1917/2096/2701 has openprofit = 0 (no overlapping position),
  * so no capture discriminates the two readings.
  */
-export function cryptoMarketSizingPrice(context: any, direction: number, marketPrice: number): number {
-    if (context.strategy?._cof || !isCryptoSpotSizingSymbol(context)) return marketPrice;
-    return snapDisplayPrice(applySlippage(context, direction, marketPrice), context.pine?.syminfo?.mintick ?? 0);
+export function marketSizingPrice(context: any, direction: number, marketPrice: number): number {
+    if (context.strategy?._cof || !isExchangeSizingSymbol(context)) return marketPrice;
+    const type = context.pine?.syminfo?.type;
+    if (type === 'crypto' || type === 'spot') {
+        return snapDisplayPrice(applySlippage(context, direction, marketPrice), context.pine?.syminfo?.mintick ?? 0);
+    }
+    return type === 'stock' || type === 'fund' || type === 'etf' ? applySlippage(context, direction, marketPrice) : marketPrice;
 }
 
 /**
@@ -828,7 +836,7 @@ export function calculateOrderQty(context: any, specifiedQty: number | undefined
             // reference-directed and away from zero.
             // VIN-130: TV applies this displayed-price path to stock symbols.
             // VIN-B: the crypto/spot displayed reference is built by the
-            // CALLER for market orders only (cryptoMarketSizingPrice), so a
+            // CALLER for market orders only (marketSizingPrice), so a
             // declared limit/stop level keeps the raw VIN-89 sizing price.
             const stockTickSizing = context.pine?.syminfo?.type === 'stock';
             const sizingPrice = stockTickSizing
