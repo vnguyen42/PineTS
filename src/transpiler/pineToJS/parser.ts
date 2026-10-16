@@ -1265,7 +1265,39 @@ export class Parser {
             if (lastDecl?.init && lastDecl.id?.type === 'Identifier') {
                 statements.push(new ReturnStatement(new Identifier(lastDecl.id.name)));
             }
+        } else if ((last.type === 'ForStatement' || last.type === 'WhileStatement') && last.body?.body?.length > 0) {
+            this._returnLoopValue(statements, last.body.body);
         }
+    }
+
+    /**
+     * A trailing loop is the value of its block: "A loop's returned results
+     * come from the latest execution of the last expression [...] within its
+     * body as of the final iteration [...] Loops return na results [...] when
+     * no iterations occur" (Pine docs, Loops / Keywords and return
+     * expressions — the docs' own return expression is a `+=` reassignment).
+     * The loop stays a statement: its return expression also stores into a
+     * block-local `$loop_value` (initialized na, never a Pine identifier),
+     * returned after the loop. A reassignment keeps its statement and is
+     * followed by a read of its target, the reassigned value. Revealed by 1799:
+     * `stepped_deviation()` ends in `if so_index > 0 / for … _stepped_deviation
+     * := …`, which returned undefined, so every safety-order price and qty was
+     * NaN. Loops ending in a nested structure keep returning nothing.
+     */
+    private _returnLoopValue(statements: any[], loopBody: any[]): void {
+        const returnExpression = loopBody[loopBody.length - 1];
+        if (returnExpression.type !== 'ExpressionStatement') return;
+        const expression = returnExpression.expression;
+        // `break` / `continue` are parsed as bare keyword identifiers: no value.
+        if (expression.type === 'Identifier' && (expression.name === 'break' || expression.name === 'continue')) return;
+        const value = new Identifier('$loop_value');
+        if (expression.type === 'AssignmentExpression') {
+            loopBody.push(new ExpressionStatement(new AssignmentExpression('=', value, structuredClone(expression.left))));
+        } else {
+            loopBody[loopBody.length - 1] = new ExpressionStatement(new AssignmentExpression('=', value, expression));
+        }
+        statements.splice(statements.length - 1, 0, new VariableDeclaration([new VariableDeclarator(new Identifier('$loop_value'), new Identifier('na'))]));
+        statements.push(new ReturnStatement(new Identifier('$loop_value')));
     }
 
     private _addImplicitReturnToIf(node: any): void {
