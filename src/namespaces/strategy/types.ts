@@ -250,6 +250,8 @@ export interface Order {
     _cof_fresh_same_tick?: boolean;
     // A new LIMIT submitted after a conditional fill crossed inside this pass.
     _cof_interior_limit_pass?: number;
+    // VIN-187: a new LIMIT submitted after such a limit filled at a path point.
+    _cof_point_fill_pass?: number;
     // Internal risk close scheduled after a current-bar COF order fill.
     _risk_close_after_cof_pass?: number;
     _cof_submission_batch?: number;
@@ -388,6 +390,8 @@ export interface CofBarState {
     interiorEntryFilled?: boolean;
     /** A conditional exit crossed strictly inside the current path segment. */
     interiorExitFilled?: boolean;
+    /** VIN-187: pass at which a fresh limit filled at its path point. */
+    pointFillPass?: number;
     submissionBatch?: number;
 }
 

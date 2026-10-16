@@ -462,8 +462,14 @@ export function entry(context: any) {
             _stop_marketable: stopMarketable,
             _cof_reversal_same_tick: cofSameTickReversal,
             _cof_fresh_same_tick: cofSameTickFresh,
+            // VIN-187: also at the OPEN (public2030 2024-08-06 04UTC: DCA2 fills
+            // at the open, the fresh DCA3 marketable there fills at that open).
             _cof_interior_limit_pass: pendingIndex < 0 && orderType === 'limit'
-                && (context.strategy._cof?.interiorEntryFilled || context.strategy._cof?.interiorExitFilled)
+                && (context.strategy._cof?.interiorEntryFilled || context.strategy._cof?.interiorExitFilled
+                    || context.strategy._cof?.pass === 0)
+                ? context.strategy._cof.pass : undefined,
+            _cof_point_fill_pass: pendingIndex < 0 && orderType === 'limit' && context.strategy._cof != null
+                && context.strategy._cof.pointFillPass === context.strategy._cof.pass
                 ? context.strategy._cof.pass : undefined,
             // Ordered base size (before the reversal close-qty addition).
             // executeOrder uses it to split a reversal OVERSHOOT into its

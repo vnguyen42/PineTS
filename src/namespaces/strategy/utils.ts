@@ -1211,9 +1211,13 @@ export function processStrategyOrders(context: any, phase: 'open' | 'close' = 'o
         // VIN-182/186 public2030: after a conditional fill crosses inside a segment,
         // a newly submitted executable limit fills at that segment's endpoint.
         // It must not replay the earlier crossing of its own limit level.
+        // VIN-187: the terminal CLOSE is not such an endpoint — the limit
+        // fills at the next bar's open (2024-08-05 04UTC: Exit_7 crosses
+        // inside LOW->CLOSE, the fresh DCA7 fills at the next open 52674.2).
         const interiorMarketableLimit = reversalEntriesOnly && cofState !== null
             && order.bar === context.idx && order.type === 'limit'
             && order._cof_interior_limit_pass === cofState.pass
+            && cofState.pass < cofState.ticks.length - 1
             && order.limit !== undefined
             && (parseDirection(order.direction) === 1
                 ? cofState.ticks[cofState.pass] <= order.limit
@@ -1310,18 +1314,32 @@ export function processStrategyOrders(context: any, phase: 'open' | 'close' = 'o
                         shouldFill = true;
                         fillPrice = tickPrice!;
                         gapExecution = true;
+                        cofState!.pointFillPass = cofState!.pass;
                         break;
                     }
                     const newlyActivated = order._stop_limit_activated === true;
                     if (newlyActivated) order._stop_limit_activated = false;
+                    // VIN-187 public2030 2024-08-05 04UTC: the fresh DCA6 fills at
+                    // HIGH 54576.71 as above; the DCA7 limit 52683.07 submitted
+                    // by that fill's recalculation is checked at the next point
+                    // only and fills at LOW 49000, not at its level inside
+                    // HIGH->LOW. Such a fill chains the same way (2024-08-06
+                    // 04UTC: DCA4 at LOW, then DCA5 at HIGH). The terminal close
+                    // is excluded (VIN-135).
+                    const freshPointCheck = cofState != null
+                        && order.bar === context.idx
+                        && order._cof_point_fill_pass !== undefined
+                        && order._cof_point_fill_pass + 1 === cofState.pass
+                        && cofState.pass < cofState.ticks.length - 1;
+                    const pointCheck = newlyActivated || freshPointCheck;
                     if (direction === 1) {
                         if (tickPrice !== undefined) {
-                            const executable = cofState.pass === 0 || newlyActivated
+                            const executable = cofState.pass === 0 || pointCheck
                                 ? tickPrice <= order.limit
                                 : limitPreviousTick! >= order.limit && tickPrice <= order.limit;
                             if (executable) {
                                 shouldFill = true;
-                                fillPrice = cofState.pass === 0 || newlyActivated ? tickPrice : order.limit;
+                                fillPrice = cofState.pass === 0 || pointCheck ? tickPrice : order.limit;
                             }
                         } else if (lowPrice <= order.limit) {
                             shouldFill = true;
@@ -1333,12 +1351,12 @@ export function processStrategyOrders(context: any, phase: 'open' | 'close' = 'o
                                 : openPrice <= order.limit ? openPrice : order.limit;
                         }
                     } else if (tickPrice !== undefined) {
-                        const executable = cofState.pass === 0 || newlyActivated
+                        const executable = cofState.pass === 0 || pointCheck
                             ? tickPrice >= order.limit
                             : limitPreviousTick! <= order.limit && tickPrice >= order.limit;
                         if (executable) {
                             shouldFill = true;
-                            fillPrice = cofState.pass === 0 || newlyActivated ? tickPrice : order.limit;
+                            fillPrice = cofState.pass === 0 || pointCheck ? tickPrice : order.limit;
                         }
                     } else if (highPrice >= order.limit) {
                         shouldFill = true;
@@ -1346,6 +1364,7 @@ export function processStrategyOrders(context: any, phase: 'open' | 'close' = 'o
                             ? closePrice
                             : openPrice >= order.limit ? openPrice : order.limit;
                     }
+                    if (shouldFill && freshPointCheck) cofState!.pointFillPass = cofState!.pass;
                 }
                 break;
 
