@@ -754,15 +754,20 @@ export class Context {
     }
 
     /**
-     * this function is used to set the floating point precision of a number
-     * by default it is set to 10 decimals which is the same as pine script
-     * @param n - the number to be precision
-     * @param decimals - the number of decimals to precision to
-     * @returns the precision number
+     * Round `value` to `decimals` decimal places when `decimals` is given
+     * (math.round_to_mintick). Without it the value is returned unchanged:
+     * TradingView stores and returns full float values and only rounds for
+     * display. The former default 10 dp rounding of every stored series
+     * value and function return mixed rounded and raw values in one
+     * comparison (e.g. a stored 10 dp minimum against a raw ta.sma output).
+     * @param value - the number to round
+     * @param decimals - the number of decimals to round to
+     * @returns the rounded number, or `value` itself without `decimals`
      */
     private static readonly PRECISION_EPSILON = 10 ** 10; // Cache default epsilon
 
-    precision(value: number, decimals: number = 10) {
+    precision(value: number, decimals?: number) {
+        if (decimals === undefined) return value;
         const epsilon = decimals === 10 ? Context.PRECISION_EPSILON : 10 ** decimals;
         return typeof value === 'number' ? Math.round(value * epsilon) / epsilon : value;
         //if (typeof n !== 'number' || isNaN(n)) return n;

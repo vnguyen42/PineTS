@@ -70,7 +70,7 @@ describe('PineScript Language', () => {
         console.log('>>> result: ', context.result);
 
         const expected = {
-            _avg: [0, 0.3333333333, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18],
+            _avg: [0, 0.3333333333333333, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18],
         };
 
         expect(deepEqual(context.result, expected)).toBe(true);

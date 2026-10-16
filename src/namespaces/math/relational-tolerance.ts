@@ -21,9 +21,12 @@
  *   - magnitude ≥ 1: the pre-fix engine used 1e-10 absolute everywhere; the
  *     cap keeps every comparison here byte-identical to that behavior.
  *
- * At operands ±0 the tolerance is 0: callers treat exact equality (`a === b`)
- * as equal, which the strict comparisons below preserve naturally.
+ * At an exact 0 operand the relative term would be 0; comparisons against
+ * an exact 0 keep the historical absolute 1e-10 floor instead, so values
+ * that only differ from 0 by float noise (e.g. 0.3 − 0.1 − 0.2, no longer
+ * absorbed by the removed 10 dp storage rounding) still compare equal.
  */
 export function relationalTolerance(a: number, b: number): number {
+    if (a === 0 || b === 0) return 1e-10;
     return Math.min(1e-10, 1e-10 * Math.max(Math.abs(a), Math.abs(b)));
 }

@@ -44,7 +44,7 @@ describe('Technical Analysis - Volume Indicators', () => {
 [2019-01-21T00:00:00.000-00:00]: 25589.91
 [2019-01-28T00:00:00.000-00:00]: 29003.37
 [2019-02-04T00:00:00.000-00:00]: 32654.94
-[2019-02-11T00:00:00.000-00:00]: 36283.48`;
+[2019-02-11T00:00:00.000-00:00]: 36283.479999999996`;
 
         console.log('expected_plot', expected_plot);
         console.log('plotdata_str', plotdata_str);

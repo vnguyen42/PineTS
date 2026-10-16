@@ -5,6 +5,6 @@ import { Context } from '../../../Context.class';
 
 export function round_to_mintick(context: Context) {
     return (source: any) => {
-        return context.precision(Math.round(Series.from(source).get(0) / context.pine.syminfo.mintick) * context.pine.syminfo.mintick);
+        return context.precision(Math.round(Series.from(source).get(0) / context.pine.syminfo.mintick) * context.pine.syminfo.mintick, 10);
     };
 }

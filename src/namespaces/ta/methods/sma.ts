@@ -6,7 +6,17 @@ export function sma(context: any) {
     return (source: any, _period: any, _callId?: string) => {
         const period = Series.from(_period).get(0);
 
-        // Incremental SMA calculation using rolling sum
+        // Window mean recomputed each bar with a compensated (Neumaier) sum,
+        // returned unrounded (SMA_EXACT_WINDOW). TradingView's ta.sma behaves
+        // as the correctly rounded mean:
+        //  - OKX:CROUSDT 240 (script 2701): ta.sma(ohlc4, 1)[3] equals the raw
+        //    past ohlc4 0.059500000000000004 — no ta.crossover with the same
+        //    current ohlc4; the former 10 dp context.precision (0.0595) and a
+        //    rolling sum (sum + current − popped, drifting) fabricate it;
+        //  - BINANCE:ICPUSDT 60 (script 2673), 2025-10-25 04:00: ta.sma(close,
+        //    50) and ta.sma(close, 200) are both 3.072 — no cross that bar on
+        //    TradingView — while a plain left-to-right sum of the 200 closes
+        //    gives 3.0719999999999983 and fabricates a ta.crossover.
         if (!context.taState) context.taState = {};
         const stateKey = _callId || `sma_${period}`;
 
@@ -15,11 +25,9 @@ export function sma(context: any) {
                 lastIdx: -1,
                 // Committed state
                 prevWindow: [],
-                prevSum: 0,
                 prevCallCount: 0,
                 // Tentative state
                 currentWindow: [],
-                currentSum: 0,
                 currentCallCount: 0,
             };
         }
@@ -30,13 +38,19 @@ export function sma(context: any) {
         if (context.idx > state.lastIdx) {
             if (state.lastIdx >= 0) {
                 state.prevWindow = [...state.currentWindow];
-                state.prevSum = state.currentSum;
                 state.prevCallCount = state.currentCallCount;
             }
             state.lastIdx = context.idx;
         }
 
         const currentValue = Series.from(source).get(0);
+
+        // TradingView ignores na source values: the average covers the last
+        // `period` non-na values. An na bar returns na and leaves the window
+        // untouched, so the next valid bar resumes on the same window.
+        if (currentValue === undefined || currentValue === null || Number.isNaN(currentValue)) {
+            return NaN;
+        }
 
         // Use committed state
         const window = [...state.prevWindow];
@@ -55,83 +69,47 @@ export function sma(context: any) {
         // Backfill from source series when window is undersized.
         // Use both callCount (for top-level warmup) and context.idx
         // (for conditional/barstate.islast where chart has enough history).
-        let backfilled = false;
+        // The window keeps the values of its own calls; only the missing
+        // tail is completed from the most recent NON-na past source values
+        // (na are ignored, see above), after skipping as many of them as the
+        // window already holds: reading a raw bar offset after skipped na
+        // values would count a value twice or bridge a real gap. A source
+        // whose history differs from the values passed (self-reference such
+        // as `x := sma(x, n)`, NYSE:SQ 1613) contributes no na and the window
+        // fills from its own calls, as before the na rule.
         if (window.length < period && (callCount >= period || context.idx >= period - 1)) {
             const series = Series.from(source);
-            while (window.length < period) {
-                window.push(series.get(window.length));
+            let alreadyHeld = window.length - 1;
+            for (let i = 1; window.length < period && i < series.length; i++) {
+                const v = series.get(i);
+                if (v === undefined || v === null || Number.isNaN(v)) continue;
+                if (alreadyHeld > 0) alreadyHeld--;
+                else window.push(v);
             }
-            backfilled = true;
         }
 
-        let sum;
-
-        // Check for NaN contamination to decide on calculation strategy
-        const isCurrentInvalid = currentValue === undefined || currentValue === null || Number.isNaN(currentValue);
-        const isPrevSumInvalid = Number.isNaN(state.prevSum);
-
-        // When backfill added values to the window, prevSum doesn't include
-        // them so the incremental path would give wrong results.
-        let useFastPath = !isPrevSumInvalid && !isCurrentInvalid && !backfilled;
-        
-        // If fast path seems possible, we still need to be sure we didn't just pop a NaN (which would make result NaN -> Number, requiring recalc of prevSum didn't allow recovery)
-        // Actually, if prevSum was Number, then the window *should* have contained only Numbers. 
-        // So popping a value should be popping a Number.
-        // So fast path IS safe if prevSum is valid and current is valid.
-        
-        if (useFastPath) {
-             // Reconstruct incremental step
-             // We need the value that was popped. 
-             // Logic: sum = prevSum + current - popped
-             
-             // But we already modified 'window'. 
-             // Let's use the state logic again carefully.
-             
-             // Re-derive from state vars for calculation
-             let tempSum = state.prevSum + currentValue;
-             
-             // If we shrank the window, we need to subtract the element that was in prevWindow but not in current window.
-             // That element is prevWindow[prevWindow.length - 1] IF prevWindow.length == period.
-             
-             if (state.prevWindow.length >= period) {
-                 const popped = state.prevWindow[state.prevWindow.length - 1];
-                 // Double check popped validity just in case
-                 if (popped === undefined || popped === null || Number.isNaN(popped)) {
-                     useFastPath = false;
-                 } else {
-                     tempSum -= popped;
-                 }
-             }
-             
-             if (useFastPath) {
-                 sum = tempSum;
-             }
-        }
-        
-        if (!useFastPath) {
-            // Fallback to full recalculation
-            sum = 0;
-            let hasNaN = false;
-            for (const v of window) {
-                if (v === undefined || v === null || Number.isNaN(v)) {
-                    hasNaN = true;
-                    break;
-                }
-                sum += v;
+        let sum = 0;
+        let compensation = 0;
+        for (let i = window.length - 1; i >= 0; i--) {
+            const v = window[i];
+            if (v === undefined || v === null || Number.isNaN(v)) {
+                sum = NaN;
+                break;
             }
-            if (hasNaN) sum = NaN;
+            const next = sum + v;
+            compensation += Math.abs(sum) >= Math.abs(v) ? (sum - next) + v : (v - next) + sum;
+            sum = next;
         }
+        sum += compensation;
 
         // Update tentative state
         state.currentWindow = window;
-        state.currentSum = sum;
         state.currentCallCount = callCount;
         
         if (window.length < period) {
             return NaN;
         }
 
-        const sma = sum / period;
-        return context.precision(sma);
+        return sum / period;
     };
 }
