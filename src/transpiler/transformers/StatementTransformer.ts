@@ -1560,6 +1560,20 @@ export function transformFunctionDeclaration(node: any, scopeManager: ScopeManag
             if (name) scopeManager.addLocalSeriesVar(name);
         }
 
+        // A default value that is a built-in namespace member read
+        // (`_avg_price = strategy.position_avg_price`) is evaluated at each call
+        // like the same read in an expression, i.e. lowered to its getter call.
+        // Left raw, the default bound the getter FUNCTION: 1799's
+        // `take_profit_price()` returned NaN, so its take-profit limit order
+        // became a market order that closed every deal on the next bar. A
+        // history read (`strategy.position_avg_price[1]`) stays raw: its
+        // lowering reads the call context `$$`, absent from the parameter list.
+        for (const param of node.params) {
+            if (param.type === 'AssignmentPattern' && param.right?.type === 'MemberExpression' && !param.right.computed) {
+                transformMemberExpression(param.right, '', scopeManager);
+            }
+        }
+
         // Scope-locally register any UDT-typed parameters (per
         // `funcName.__pineParamTypes__` markers populated by AnalysisPass)
         // so the use-site rewrite for `b.field[N]` fires inside the body.
