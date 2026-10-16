@@ -140,7 +140,40 @@ export function order(context: any) {
             _stop_marketable: stopMarketable,
         };
 
-        context.strategy.pending_orders.push(orderObj);
+        // "If an order with the same ID is already pending, it is possible to
+        // modify the order" (Pine reference, strategy.order): the new spec
+        // replaces the pending strategy.order (no category) of that ID in
+        // place, like strategy.entry. Pushing stacked one more order per call —
+        // 1799's take-profit `strategy.order(id=TP, qty=|position|, limit=…)`
+        // is resubmitted every bar, and all the stale copies filled, flipping
+        // the closed deal into a short position (TV: one fill, flat).
+        const pendingIndex = context.strategy.pending_orders.findIndex(
+            (pending: Order) => pending.status === 'pending' && pending.category === undefined && pending.id === idValue,
+        );
+        if (pendingIndex < 0) {
+            context.strategy.pending_orders.push(orderObj);
+        } else {
+            const pending = context.strategy.pending_orders[pendingIndex];
+            // As in strategy.entry: repeating an unchanged stop-limit command
+            // must not turn its activated limit back into a fresh stop-limit.
+            const unchangedActivatedStopLimit =
+                pending.type === 'limit'
+                && pending.stop !== undefined
+                && pending._stop_limit_activated !== undefined
+                && orderObj.type === 'stop-limit'
+                && pending.limit === orderObj.limit
+                && pending.stop === orderObj.stop;
+            if (unchangedActivatedStopLimit) {
+                const activatedBar = pending.bar;
+                const activatedTime = pending.time;
+                Object.assign(pending, orderObj);
+                pending.type = 'limit';
+                pending.bar = activatedBar;
+                pending.time = activatedTime;
+            } else {
+                context.strategy.pending_orders[pendingIndex] = orderObj;
+            }
+        }
 
         return orderObj;
     };
