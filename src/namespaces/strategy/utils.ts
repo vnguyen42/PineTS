@@ -3498,6 +3498,18 @@ export function processExitOrders(
             // inherit the bar's earlier open/high.
             const entryBar = t._activation_entry_bar_index ?? t.entry_bar_index;
             const entryPathSegment = t._activation_entry_path_segment;
+            // A short lot filled at this bar's open in place of a short closed
+            // at that same open (close_all then entry on the previous bar) is
+            // not reached by its buy LIMIT on this bar (1825 NASDAQ:COIN 120:
+            // 72 short re-entries, none exits on its entry bar although the
+            // buy limit is crossed 20 times; the 71 long re-entries do, 13
+            // times). Stops are not covered by this evidence and still fill.
+            const atOpen = (price: number) => isLevelTouched(price, openPrice) || isLevelTouched(price, rawOpenPrice);
+            const shortReentryAtOpen = !isLong && entryBar === context.idx && cofState === null && !closePhase
+                && (entryPathSegment ?? -1) === -1 && atOpen(t.entry_price)
+                && strategy.closedtrades.some((closed) => closed.size < 0
+                    && closed.exit_bar_index === context.idx && closed.entry_bar_index < context.idx
+                    && atOpen(closed.exit_price));
             // Under process_orders_on_close a position entered on this bar
             // meets an older bracket in the close phase at its close only:
             // the bar's earlier path predates it (2120 bar 10602: the long
@@ -3523,7 +3535,7 @@ export function processExitOrders(
             // is already beyond it; that order stays inert until the path
             // crosses again.
             let tpHit = false;
-            if (tp !== undefined) {
+            if (tp !== undefined && !shortReentryAtOpen) {
                 if (closeOnlyTrade) {
                     // process_orders_on_close evaluates a bracket placed on
                     // this bar against the close only. High/low values from
