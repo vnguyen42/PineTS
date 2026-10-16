@@ -2246,7 +2246,16 @@ function executeOrder(
         // the reversing order's id/comment become the EXIT id/comment of
         // the prior trade — that's TV behavior.
         const qtyToClose = Math.min(Math.abs(oldPosition), order.qty);
-        const remainingQty = order.qty - qtyToClose;
+        // A known-step remainder of ULP-scale noise is no reversal (same rule
+        // as the close leg in closePartialPosition): 1799 closes lots 0.14792 +
+        // 0.10675 + 0.11015 with `qty = math.abs(strategy.position_size)`; the
+        // float lot sum left 5.55e-17, booked as a short lot that stalled every
+        // later deal (TV: flat, next deal on the next signal).
+        const rawRemainingQty = order.qty - qtyToClose;
+        const remainingQty = quantizeToQtyStep(context, rawRemainingQty) === 0
+            && rawRemainingQty <= 16 * Number.EPSILON * Math.max(1, order.qty)
+            ? 0
+            : rawRemainingQty;
         // True reversal: the SAME order both flattens the prior position
         // AND opens a new one in the opposite direction. For cash_per_order
         // commission, TV charges the order's flat fee ONCE total — split
