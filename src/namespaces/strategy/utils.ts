@@ -3768,9 +3768,25 @@ export function processExitOrders(
                         const hit = isLong ? touchedAtOrBelow(trig, lowPrice) : touchedAtOrAbove(trig, highPrice);
                         if (hit) emitTrail(trig, 1);
                     } else {
+                        // Armed at the open, on a position held since the
+                        // open: the stop rides from the open through the
+                        // adverse leg before the favorable extreme (2280
+                        // CME_MINI:ES1! bar 11225: armed at the 6006 open, TV
+                        // exits at 6005.5 on the way to the 6005.5 low, not
+                        // 6010.5 below the 6011 high). A position entered
+                        // later in the bar (a stop or limit fill on the path)
+                        // did not exist on that leg.
+                        const openTrig = triggerFromPeak(openPrice);
+                        const heldSinceOpen = matching.every((t) =>
+                            (t._activation_entry_bar_index ?? t.entry_bar_index) < context.idx
+                            || (t._activation_entry_path_segment ?? -1) === -1);
+                        const openLegHit = trailActivationPosition?.pathSegment === -1
+                            && heldSinceOpen
+                            && (isLong ? touchedAtOrBelow(openTrig, lowPrice) : touchedAtOrAbove(openTrig, highPrice));
                         // Phase 3 (favorable extreme → close): close past trigger.
                         const seg3 = isLong ? touchedAtOrBelow(trig, closePrice) : touchedAtOrAbove(trig, closePrice);
-                        if (seg3) emitTrail(trig, 2);
+                        if (openLegHit) emitTrail(openTrig, 0);
+                        else if (seg3) emitTrail(trig, 2);
                     }
                 }
             } else if (favorableFirst) {
