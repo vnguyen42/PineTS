@@ -1261,6 +1261,10 @@ export function processStrategyOrders(context: any, phase: 'open' | 'close' = 'o
         // marketable-at-submission stop). Ordinary intrabar stop crossings
         // fill at their trigger level and are NOT execution-snapped.
         let gapExecution = false;
+        // VIN-187: a fresh COF limit filled AT a path point (not at its level
+        // inside the segment). Recorded at the segment's endpoint, and it
+        // chains the next fresh limit once the order is actually executed.
+        let pointFill = false;
 
         // Determine if order should be filled based on type
         switch (order.type) {
@@ -1314,7 +1318,7 @@ export function processStrategyOrders(context: any, phase: 'open' | 'close' = 'o
                         shouldFill = true;
                         fillPrice = tickPrice!;
                         gapExecution = true;
-                        cofState!.pointFillPass = cofState!.pass;
+                        pointFill = true;
                         break;
                     }
                     const newlyActivated = order._stop_limit_activated === true;
@@ -1325,12 +1329,13 @@ export function processStrategyOrders(context: any, phase: 'open' | 'close' = 'o
                     // only and fills at LOW 49000, not at its level inside
                     // HIGH->LOW. Such a fill chains the same way (2024-08-06
                     // 04UTC: DCA4 at LOW, then DCA5 at HIGH). The terminal close
-                    // is excluded (VIN-135).
+                    // is never such a point (VIN-135): the order waits for the
+                    // next bar's open.
                     const freshPointCheck = cofState != null
                         && order.bar === context.idx
                         && order._cof_point_fill_pass !== undefined
-                        && order._cof_point_fill_pass + 1 === cofState.pass
-                        && cofState.pass < cofState.ticks.length - 1;
+                        && order._cof_point_fill_pass + 1 === cofState.pass;
+                    if (freshPointCheck && cofState.pass === cofState.ticks.length - 1) break;
                     const pointCheck = newlyActivated || freshPointCheck;
                     if (direction === 1) {
                         if (tickPrice !== undefined) {
@@ -1364,7 +1369,7 @@ export function processStrategyOrders(context: any, phase: 'open' | 'close' = 'o
                             ? closePrice
                             : openPrice >= order.limit ? openPrice : order.limit;
                     }
-                    if (shouldFill && freshPointCheck) cofState!.pointFillPass = cofState!.pass;
+                    if (shouldFill && freshPointCheck) pointFill = true;
                 }
                 break;
 
@@ -1782,10 +1787,11 @@ export function processStrategyOrders(context: any, phase: 'open' | 'close' = 'o
             const fillPath = displayedStopTriggers && order.type === 'stop'
                 ? displayedIntrabarPath
                 : intrabarPath;
-            const fillPathPosition = interiorMarketableLimit
+            const fillPathPosition = pointFill
                 ? {pathSegment: cofState!.pass - 1, distanceAlongSegment: 1}
                 : entryFillPathPosition(order, direction, fillPath, cofState, fillsAtClose || closeMarketableLimit(order));
             executeOrder(context, order, fillPrice, currentTime, fillPathPosition, fillsAtClose);
+            if (pointFill) cofState!.pointFillPass = cofState!.pass;
             if (fillsInsideBar) {
                 const marginPath = currentBarMarginPath(context);
                 if (marginPath && (!marginPath.entry || comparePathPositions(fillPathPosition, marginPath.entry) > 0)) {
@@ -1813,7 +1819,9 @@ export function processStrategyOrders(context: any, phase: 'open' | 'close' = 'o
             order.fill_time = currentTime;
             fills += 1;
             recordIntradayOrderFill(context, fillPrice, currentTime, 1, order);
-            if (reversalEntriesOnly && cofState?.pass === 0
+            // VIN-166: the one open market-addition slot; a VIN-187 fresh
+            // limit filled at the open does not consume it.
+            if (reversalEntriesOnly && cofState?.pass === 0 && order.type === 'market'
                 && !order._cof_reversal_same_tick && !order._cof_fresh_same_tick) {
                 cofState.openAdditionFilled = true;
             }

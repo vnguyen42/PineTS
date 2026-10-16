@@ -69,3 +69,49 @@ if bar_index == 1 and n >= 1 and n < 5
   ['DCA6',1722931200000,55998.02],
  ]);
 });
+
+// Review of f9e0024 (synthetic bars): b1 path OPEN 100 -> LOW 90 -> HIGH 112 -> CLOSE 105.
+const T0=1722902400000,H4=14400000;
+const reviewBars=[[T0,100,101,99,100],[T0+H4,100,112,90,105],[T0+2*H4,104,108,95,100],[T0+3*H4,100,103,97,101]];
+const reviewRun=(body:string,header='pyramiding=10,calc_on_order_fills=true,margin_long=0,margin_short=0')=>
+ new PineTS(feed(reviewBars),'BTCUSDT','240').run(`//@version=5
+strategy("x",${header})
+if bar_index == 0
+    strategy.entry("M",strategy.long,qty=1)
+n = strategy.opentrades
+${body}`);
+
+// F1: a fresh limit filled at the open does not consume the VIN-166 open
+// market-addition slot; statement order does not matter.
+it('keeps the open market addition independent of a fresh open limit',async()=>{
+ for(const body of [
+  'if bar_index == 1 and n == 1\n    strategy.entry("L",strategy.long,qty=1,limit=102)\n    strategy.entry("A",strategy.long,qty=1)',
+  'if bar_index == 1 and n == 1\n    strategy.entry("A",strategy.long,qty=1)\n    strategy.entry("L",strategy.long,qty=1,limit=102)',
+ ]){
+  expect(entries(await reviewRun(body))).toEqual([['A',T0+H4,100],['L',T0+H4,100],['M',T0+H4,100]]);
+ }
+});
+
+// F2: a point fill at LOW does not count as an interior crossing; the next
+// fresh limit (95) is checked from HIGH only and fills on the next bar.
+it('records a point fill at its endpoint',async()=>{
+ const ctx=await reviewRun('if bar_index == 1 and n >= 1 and n < 5\n    strategy.entry("D" + str.tostring(n),strategy.long,qty=1,limit=n == 1 ? 120 : 95)');
+ expect(entries(ctx)).toEqual([['D1',T0+H4,100],['D2',T0+H4,90],['M',T0+H4,100],['D3',T0+2*H4,95]]);
+});
+
+// F3: a limit chained after the HIGH point fill waits for the next open even
+// when it is crossed inside HIGH -> CLOSE.
+it('does not fill a chained limit in the terminal segment',async()=>{
+ const ctx=await reviewRun('if bar_index == 1 and n >= 1 and n < 4\n    strategy.entry("D" + str.tostring(n),strategy.long,qty=1,limit=120)\nif bar_index == 1 and n == 4\n    strategy.entry("D4",strategy.long,qty=1,limit=108)');
+ expect(entries(ctx)).toEqual([['D1',T0+H4,100],['D2',T0+H4,90],['D3',T0+H4,112],['M',T0+H4,100],['D4',T0+2*H4,104]]);
+});
+
+// F4: a fresh limit rejected for margin does not start the point-fill chain:
+// the ledger equals the same script without L (first L3 at its level 95; the
+// re-emitted L3 then follow the VIN-182 interior rule).
+it('does not chain after a rejected fresh limit',async()=>{
+ const ctx=await reviewRun('if bar_index == 1 and strategy.opentrades == 1 and strategy.closedtrades == 0\n    strategy.entry("L",strategy.long,qty=100,limit=102)\n    strategy.exit("X",from_entry="M",limit=99.5)\nif bar_index == 1 and strategy.closedtrades == 1\n    strategy.entry("L3",strategy.long,qty=1,limit=95)',
+  'pyramiding=10,calc_on_order_fills=true,margin_long=100,initial_capital=1000');
+ const L3=[...ctx.strategy.closedtrades,...ctx.strategy.opentrades].filter((t:any)=>t.entry_id!=='M').map((t:any)=>[t.entry_id,t.entry_time,t.entry_price]);
+ expect(L3).toEqual([['L3',T0+H4,95],['L3',T0+H4,90],['L3',T0+2*H4,95]]);
+});
