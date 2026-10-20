@@ -5,6 +5,7 @@ import { riskOrderRequestsHalted, calculateOrderQty, cofCurrentTick, normalizeOr
 import { Order } from '../types';
 import { Series } from '../../../Series';
 import { parseArgsForPineParams } from '../../utils';
+import { PineRuntimeError } from '../../../errors/PineRuntimeError';
 
 /**
  * Pine signature for strategy.order():
@@ -73,9 +74,12 @@ export function order(context: any) {
         const idValue       = extractValue(parsed.id);
         const directionVal  = extractValue(parsed.direction);
         const qtyValue      = extractValue(parsed.qty);
-        // A negative explicit qty creates no order (TV: runtime error), as in
-        // strategy.entry(): see the note there.
-        if (typeof qtyValue === 'number' && qtyValue < 0) return;
+        // A negative explicit qty: a runtime error while the equity is above
+        // zero, else no order (the account is over), as in strategy.entry().
+        if (typeof qtyValue === 'number' && qtyValue < 0) {
+            if (!(context.strategy.equity <= 0)) throw new PineRuntimeError('Cannot create an order with negative quantity.', 'strategy.order');
+            return;
+        }
         const hasLimitLevel = Object.prototype.hasOwnProperty.call(parsed, 'limit') && parsed.limit !== undefined;
         const hasStopLevel  = Object.prototype.hasOwnProperty.call(parsed, 'stop') && parsed.stop !== undefined;
         // The limit snaps to the mintick grid away from its reference — the

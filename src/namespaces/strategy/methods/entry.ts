@@ -5,6 +5,7 @@ import { riskOrderRequestsHalted, calculateOrderQty, cofCurrentTick, marketSizin
 import { Order } from '../types';
 import { Series } from '../../../Series';
 import { parseArgsForPineParams } from '../../utils';
+import { PineRuntimeError } from '../../../errors/PineRuntimeError';
 
 /**
  * Pine signature:
@@ -130,16 +131,20 @@ export function entry(context: any) {
         // entries were all dropped as size-NaN orders. Normalized like the
         // price levels: a NaN number and the bare `na` literal are both "no qty".
         const qtyValue      = normalizeOrderLevel(extractValue(parsed.qty), false);
-        // A negative explicit qty creates no order. TradingView: "The order size
-        // must be positive; negative numbers will cause runtime errors"
-        // (support 43000478450); a risk-sized qty (`strategy.equity * risk /
-        // stop`) turns negative once equity is below zero, and TV stops the
-        // script there ("Cannot create an order with negative quantity",
-        // support 43000651235). The fork traded |qty| instead: an account
-        // below zero reopened ever larger positions (2270 on GC1! 1h:
-        // +6.99e303 %). Studio reads the first bar at or below zero as the
-        // account's end (metrics.wiped_out_at).
-        if (typeof qtyValue === 'number' && qtyValue < 0) return;
+        // A negative explicit qty is a runtime error on TradingView: "The order
+        // size must be positive; negative numbers will cause runtime errors"
+        // (support 43000478450, "Cannot create an order with negative
+        // quantity", 43000651235); the direction is strategy.long/short, never
+        // the sign. The fork traded |qty|. Once the equity is at or below zero
+        // (a risk-sized `strategy.equity * risk / stop` turns negative there)
+        // the order is dropped instead of failing the run: the account is
+        // over at that bar (Studio: metrics.wiped_out_at), and dropping it
+        // stops the ever larger positions |qty| reopened below zero (2270 on
+        // GC1! 1h: +6.99e303 %).
+        if (typeof qtyValue === 'number' && qtyValue < 0) {
+            if (!(strategy.equity <= 0)) throw new PineRuntimeError('Cannot create an order with negative quantity.', 'strategy.entry');
+            return;
+        }
         const hasLimitLevel = Object.prototype.hasOwnProperty.call(parsed, 'limit') && parsed.limit !== undefined;
         const hasStopLevel  = Object.prototype.hasOwnProperty.call(parsed, 'stop') && parsed.stop !== undefined;
         const limitValue    = normalizeOrderLevel(extractValue(parsed.limit), hasStopLevel);
