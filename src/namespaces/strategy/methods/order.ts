@@ -73,6 +73,9 @@ export function order(context: any) {
         const idValue       = extractValue(parsed.id);
         const directionVal  = extractValue(parsed.direction);
         const qtyValue      = extractValue(parsed.qty);
+        // A negative explicit qty creates no order (TV: runtime error), as in
+        // strategy.entry(): see the note there.
+        if (typeof qtyValue === 'number' && qtyValue < 0) return;
         const hasLimitLevel = Object.prototype.hasOwnProperty.call(parsed, 'limit') && parsed.limit !== undefined;
         const hasStopLevel  = Object.prototype.hasOwnProperty.call(parsed, 'stop') && parsed.stop !== undefined;
         // The limit snaps to the mintick grid away from its reference — the
